@@ -1,0 +1,73 @@
+# systemd unit for ManorCloud
+# Installed by install.sh to /etc/systemd/system/manorcloud.service
+
+[Unit]
+Description=ManorCloud home cloud storage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# notify: the program tells systemd when it is listening.
+# Until then, systemctl start/restart waits; a failure during startup is reported as such.
+Type=notify
+User=manorcloud
+Group=manorcloud
+
+# "run" is a hidden command and is not listed in "manorcloud --help":
+# the server should only be started by systemd. When run by hand, the program checks for
+# INVOCATION_ID (set by systemd) and refuses without it; running as root is always refused.
+# To debug in the foreground: sudo systemctl stop manorcloud, then run it as the
+# manorcloud user with MANORCLOUD_MANUAL_RUN=1 and the variables from the configuration file.
+ExecStart=/usr/local/bin/manorcloud run
+
+# Configuration. systemd (as root) reads it before switching users;
+# the program itself never reads this file.
+EnvironmentFile=/etc/manorcloud/manorcloud.env
+
+# systemd creates /var/lib/manorcloud owned by manorcloud, unreadable by other users
+StateDirectory=manorcloud
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/manorcloud
+UMask=0027
+
+# Startup runs migrations and, on first install, one Argon2 hash: allow time on slow CPUs
+TimeoutStartSec=120
+# Watchdog: every 20 seconds the program checks the database and pings systemd if it is healthy.
+# One failed check is tolerated; two in a row (no ping for 60 seconds) means it is hung.
+WatchdogSec=60
+
+# Stopping: the program finishes requests in progress for up to 30 seconds, then exits.
+# This must be longer than that, or systemd kills it before it can clean up.
+TimeoutStopSec=45
+
+# Restart after a crash or a watchdog timeout, but not after "systemctl stop"
+Restart=on-failure
+RestartSec=5
+
+# ---------- Hardening ----------
+# Even if the program had a vulnerability, an attacker could do as little as possible.
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# AF_UNIX is also used for sd_notify
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

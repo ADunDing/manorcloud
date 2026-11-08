@@ -1,0 +1,10 @@
+/target
+*.db*
+.env
+/data
+cookies.txt
+/frontend/node_modules/
+/frontend/public/js/
+/fresh*.db*
+/fresh-data/
+/dist/

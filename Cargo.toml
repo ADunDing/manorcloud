@@ -1,0 +1,34 @@
+[package]
+name = "manorcloud"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+argon2 = "0.6.0"
+axum = { version = "0.8.9", features = ["macros", "multipart"] }
+axum-extra = { version = "0.12.6", features = ["cookie"] }
+base64 = "0.23.1"
+getrandom = "0.4.3"
+mime_guess = "2.0.5"
+rust-embed = "8.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+time = "0.3.55"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time", "signal", "sync"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+unicode-normalization = "0.1.25"
+libc = "0.2"
+futures-util = "0.3.34"
+
+[dev-dependencies]
+futures-util = "0.3.34"
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+tower = { version = "0.5", features = ["util"] }  # 測試用：oneshot 直接呼叫 Router
+
+[profile.release]
+# 移除除錯符號：執行檔小很多。panic 的錯誤訊息仍然會顯示，只是少了函式名稱等細節
+strip = true
