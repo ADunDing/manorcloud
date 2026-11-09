@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT disabled AS \"disabled!: bool\" FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "disabled!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "disabled"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9a5800d49e71b10bf35b3a3cffc2a558c6d03844b0b8c5619079bdfcfb386236"
+}

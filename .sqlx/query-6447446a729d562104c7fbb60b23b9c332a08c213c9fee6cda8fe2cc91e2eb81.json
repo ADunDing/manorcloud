@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                WITH RECURSIVE ancestors(id) AS (\n                    SELECT id FROM files WHERE id = ? AND owner_id = ?\n                    UNION\n                    SELECT f.parent_id FROM files f JOIN ancestors a ON f.id = a.id\n                    WHERE f.parent_id IS NOT NULL\n                )\n                SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = ?) AS \"cycle!: bool\"\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "cycle!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6447446a729d562104c7fbb60b23b9c332a08c213c9fee6cda8fe2cc91e2eb81"
+}

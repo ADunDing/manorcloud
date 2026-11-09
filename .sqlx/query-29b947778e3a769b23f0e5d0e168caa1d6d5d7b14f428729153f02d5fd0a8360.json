@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE users\n        SET role = COALESCE(?, role), disabled = COALESCE(?, disabled)\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "29b947778e3a769b23f0e5d0e168caa1d6d5d7b14f428729153f02d5fd0a8360"
+}

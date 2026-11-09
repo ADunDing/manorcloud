@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO users (username, role)\n        SELECT ?, 'admin'\n        WHERE NOT EXISTS (SELECT 1 FROM users)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9979fa8a40ed51bb3da092f38214667f0d1fadb3454ce588aa749401b8fefe62"
+}

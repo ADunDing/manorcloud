@@ -1,0 +1,13 @@
+# cross 在 Docker 容器中編譯，預設不會傳入主機的環境變數。
+# SQLX_OFFLINE 必須傳進去：容器中的 sqlx 巨集才會改讀 .sqlx/，而不是去連資料庫
+[build.env]
+passthrough = ["SQLX_OFFLINE"]
+
+# 執行檔需要的 glibc 版本由「連結時」的 glibc 決定：在 glibc 2.39 的環境連結，
+# Rust 標準函式庫會留下 GLIBC_2.39 的版本需求，舊系統就無法啟動。
+# 固定使用以 Ubuntu 20.04（glibc 2.31）為基礎的映像。package.sh 會檢查結果。
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"

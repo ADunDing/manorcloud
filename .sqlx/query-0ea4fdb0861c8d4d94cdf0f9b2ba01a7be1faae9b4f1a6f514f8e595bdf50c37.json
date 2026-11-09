@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE password_credentials\n            SET password_hash = ?, must_change_password = 0, updated_at = unixepoch()\n            WHERE user_id = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0ea4fdb0861c8d4d94cdf0f9b2ba01a7be1faae9b4f1a6f514f8e595bdf50c37"
+}

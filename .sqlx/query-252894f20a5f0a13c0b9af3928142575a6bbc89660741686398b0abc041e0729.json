@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH RECURSIVE chain(id, parent_id, name, depth) AS (\n            SELECT id, parent_id, name, 0 FROM files WHERE id = ? AND owner_id = ?\n            UNION ALL\n            SELECT f.id, f.parent_id, f.name, c.depth + 1\n            FROM files f JOIN chain c ON f.id = c.parent_id\n            WHERE c.depth < ?\n        )\n        SELECT id AS \"id!\", name AS \"name!\"\n        FROM chain\n        WHERE depth > 0\n        ORDER BY depth DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "252894f20a5f0a13c0b9af3928142575a6bbc89660741686398b0abc041e0729"
+}

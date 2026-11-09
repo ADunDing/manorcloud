@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH RECURSIVE subtree(id) AS (\n            SELECT id FROM files WHERE id = ? AND owner_id = ?\n            UNION\n            SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id\n        )\n        SELECT storage_key AS \"storage_key!\"\n        FROM files\n        WHERE id IN (SELECT id FROM subtree) AND storage_key IS NOT NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "storage_key!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "files",
+            "name": "storage_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "be82ab1ea83af0a8841f1399a3b09f47e21559e53b3bbb30acea8642246a1a42"
+}

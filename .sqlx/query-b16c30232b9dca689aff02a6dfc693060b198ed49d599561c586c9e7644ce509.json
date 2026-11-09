@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            users.id                                  AS \"user_id!\",\n            users.username                            AS \"username!\",\n            users.role                                AS \"role!\",\n            password_credentials.password_hash        AS \"password_hash!\",\n            password_credentials.must_change_password AS \"must_change_password!: bool\"\n        FROM users\n        JOIN password_credentials ON password_credentials.user_id = users.id\n        WHERE users.username = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "username!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "role!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "name": "password_hash!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "password_credentials",
+            "name": "password_hash"
+          }
+        }
+      },
+      {
+        "name": "must_change_password!: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "password_credentials",
+            "name": "must_change_password"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b16c30232b9dca689aff02a6dfc693060b198ed49d599561c586c9e7644ce509"
+}

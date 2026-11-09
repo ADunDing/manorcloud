@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO password_credentials (user_id, password_hash, must_change_password)\n        VALUES (?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a9b0110bb889d5bc347b2e7d2a82b14ec92abc4b5f9abc018145f8d40b695bbe"
+}

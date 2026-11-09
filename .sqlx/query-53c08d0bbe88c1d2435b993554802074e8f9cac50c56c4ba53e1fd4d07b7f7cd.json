@@ -1,0 +1,81 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            users.id         AS \"id!\",\n            users.username   AS \"username!\",\n            users.role       AS \"role!\",\n            users.disabled   AS \"disabled!: bool\",\n            COALESCE(password_credentials.must_change_password, 0)\n                             AS \"must_change_password!: bool\",\n            users.created_at AS \"created_at!\"\n        FROM users\n        LEFT JOIN password_credentials ON password_credentials.user_id = users.id\n        ORDER BY users.username\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "username!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "role!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "name": "disabled!: bool",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "disabled"
+          }
+        }
+      },
+      {
+        "name": "must_change_password!: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "53c08d0bbe88c1d2435b993554802074e8f9cac50c56c4ba53e1fd4d07b7f7cd"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT users.id AS \"id!\", users.username AS \"username!\"\n        FROM users\n        JOIN password_credentials ON password_credentials.user_id = users.id\n        WHERE users.role = 'admin'\n          AND password_credentials.must_change_password = 1\n          AND (SELECT COUNT(*) FROM users) = 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "username!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "10c3adc8e49737350ea26e2ae0f9018a3426de9e9bf607d64933f120f91dff6d"
+}

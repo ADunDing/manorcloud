@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM files\n            WHERE id = ? AND owner_id = ? AND kind = 'folder'\n        ) AS \"exists!: bool\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "da3a3039756b3008b734b65840cc04b7075cd4728af66f570e50318c1ecaf66a"
+}
