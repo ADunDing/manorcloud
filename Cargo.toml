@@ -32,3 +32,8 @@ tower = { version = "0.5", features = ["util"] }  # 測試用：oneshot 直接�
 [profile.release]
 # 移除除錯符號：執行檔小很多。panic 的錯誤訊息仍然會顯示，只是少了函式名稱等細節
 strip = true
+
+# 開發與測試時，依賴套件（SQLite、Argon2 等）也做最佳化，自己的程式碼維持 debug：
+# 測試快很多，而修改自己的程式碼時重新編譯的速度不受影響
+[profile.dev.package."*"]
+opt-level = 2

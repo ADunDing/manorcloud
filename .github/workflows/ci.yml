@@ -1,0 +1,69 @@
+# 每次 push 到 main 與每個 PR：確認程式碼能編譯、測試通過、格式正確
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 最小權限：這個工作流程只需要讀取程式碼
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 編譯時不連資料庫，改讀 .sqlx/
+  SQLX_OFFLINE: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 不把存取權杖留在工作目錄中：之後的步驟不需要推送任何東西
+          persist-credentials: false
+
+      # 前端必須先建置：rust-embed 在編譯時把它嵌入執行檔，build.rs 也會檢查
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+          npm --prefix frontend test
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+      # Cargo.toml 的 rust-version 必須真的能編譯：用那個版本實際檢查一次。
+      # 這個數字要與 Cargo.toml 保持一致
+      - name: Minimum Rust version (1.94)
+        run: |
+          rustup toolchain install 1.94 --profile minimal
+          cargo +1.94 check --all-targets
+
+      # .sqlx/ 必須與程式碼中的 SQL 一致。修改了 query! 卻忘記 cargo sqlx prepare，
+      # 本機有 app.db 照樣能編譯，只有這裡會發現
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --version "^0.9" --locked --no-default-features --features sqlite,rustls
+      - name: Check .sqlx is up to date
+        env:
+          SQLX_OFFLINE: "false"
+          DATABASE_URL: sqlite://ci.db?mode=rwc
+        run: |
+          sqlx migrate run
+          cargo sqlx prepare --check -- --all-targets || {
+            echo "::error::.sqlx/ is out of date: run 'cargo sqlx prepare -- --all-targets' and commit it"
+            exit 1
+          }

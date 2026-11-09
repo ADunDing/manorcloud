@@ -243,6 +243,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn join_with_absolute_path_replaces_base() {
+        // 刻意示範陷阱：clippy 正確地指出這通常是錯誤，而這個測試要證明的正是它的後果
+        #[allow(clippy::join_absolute_paths)]
         let joined = Path::new("/data").join("/etc/passwd");
         assert_eq!(joined, Path::new("/etc/passwd"));
     }

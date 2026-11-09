@@ -382,7 +382,7 @@ mod tests {
         t.send(builder.body(Body::empty()).unwrap()).await
     }
 
-    fn header_str<'a>(headers: &'a HeaderMap, name: header::HeaderName) -> &'a str {
+    fn header_str(headers: &HeaderMap, name: header::HeaderName) -> &str {
         headers.get(name).unwrap().to_str().unwrap()
     }
 

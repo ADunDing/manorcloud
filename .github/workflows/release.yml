@@ -1,0 +1,104 @@
+# 推送 v* 標籤時：編譯兩種架構，建立 GitHub Release。
+#
+# 也可以在 Actions 頁面手動執行（workflow_dispatch）：只編譯與打包，不建立 Release，
+# 用來在正式發布前確認整個流程能跑完。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # 標籤 v0.2.0 的 Release 裡必須是 0.2.0 的程式：忘記改 Cargo.toml 就推了標籤，
+      # 在這裡停下，而不是發布一個名不符實的版本
+      - name: Check that the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version)"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 與本機相同的 cross 版本；編譯用的映像由 Cross.toml 固定
+      - name: Install cross
+        run: cargo install cross --version 0.2.5 --locked
+
+      # package.sh 會建置前端、交叉編譯、檢查 glibc 版本、打包
+      - name: Package
+        run: ./package.sh ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # 手動試跑時不建立 Release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      # 只有這個工作需要寫入權限：建立 Release
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # 去掉檔名中的版本號：一行安裝用 releases/latest/download/<檔名>，檔名必須固定。
+      # manorcloud-0.1.0-aarch64.tar.gz → manorcloud-linux-aarch64.tar.gz
+      # 架構名稱中沒有連字號（x86_64 用的是底線），所以最後一個連字號之後就是架構
+      - name: Name the assets and compute checksums
+        run: |
+          mkdir release
+          for file in artifacts/manorcloud-*.tar.gz; do
+            arch=${file##*-}
+            arch=${arch%.tar.gz}
+            cp "$file" "release/manorcloud-linux-$arch.tar.gz"
+          done
+          ls -l release
+          (cd release && sha256sum * > SHA256SUMS)
+          cat release/SHA256SUMS
+
+      # 標籤中有連字號（v0.2.0-rc.1）的標記為預先發布版：
+      # releases/latest 只指向正式版，一行安裝不會裝到測試版
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=
+          case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "ManorCloud $GITHUB_REF_NAME" \
+            --generate-notes \
+            $prerelease

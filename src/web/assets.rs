@@ -115,7 +115,7 @@ mod tests {
     use axum::http::{HeaderMap, Method, StatusCode, header};
     use sqlx::SqlitePool;
 
-    fn header_str<'a>(headers: &'a HeaderMap, name: header::HeaderName) -> &'a str {
+    fn header_str(headers: &HeaderMap, name: header::HeaderName) -> &str {
         headers.get(name).unwrap().to_str().unwrap()
     }
 
