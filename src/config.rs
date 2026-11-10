@@ -27,6 +27,7 @@ const MAX_UPLOAD_VAR: &str = "MANORCLOUD_MAX_UPLOAD_BYTES";
 
 const BIND_VAR: &str = "MANORCLOUD_BIND";
 /// 預設只監聽本機：要讓區網其他裝置連入，必須在設定檔中明確寫出 0.0.0.0
+/// install.sh 的 DEFAULT_BIND 必須與它一致（安裝完成時顯示的位址）
 const DEFAULT_BIND: &str = "127.0.0.1:3000";
 
 const SECURE_COOKIES_VAR: &str = "MANORCLOUD_SECURE_COOKIES";

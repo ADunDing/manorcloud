@@ -31,6 +31,10 @@ CONFIG_DIR=/etc/manorcloud
 ENV_FILE=$CONFIG_DIR/manorcloud.env
 UNIT_FILE=/etc/systemd/system/manorcloud.service
 
+# The program's listen address when the configuration does not set one.
+# Must match DEFAULT_BIND in src/config.rs
+DEFAULT_BIND=127.0.0.1:3000
+
 # ==================== Helpers ====================
 
 say() {
@@ -147,12 +151,17 @@ download_package() {
     fetch "$base/$asset" "$WORK/$asset" || fail "cannot download $base/$asset"
     fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS" || fail "cannot download $base/SHA256SUMS"
 
-    # Nothing from the download is used before this check passes
+    # Nothing from the download is used before this check passes.
+    #
+    # What it protects against: a download that is incomplete or damaged on the way.
+    # What it does not: SHA256SUMS comes from the same release as the package, so someone able
+    # to replace the package there could replace SHA256SUMS too. That needs an independent
+    # signature, such as GitHub's build provenance attestations.
     say "Verifying the checksum"
     grep -E "^[0-9a-f]{64}  $asset\$" "$WORK/SHA256SUMS" >"$WORK/expected" ||
         fail "$asset is not listed in SHA256SUMS"
     (cd "$WORK" && sha256sum -c --quiet expected) ||
-        fail "checksum mismatch: the download is damaged or has been tampered with"
+        fail "checksum mismatch: the download is damaged. Try again"
 
     tar -xzf "$WORK/$asset" -C "$WORK"
     BINARY=
@@ -241,13 +250,44 @@ start_service() {
     echo "---------------------------------"
 }
 
+# The address to open in a browser, from MANORCLOUD_BIND in the configuration.
+#
+# The file is readable by root only; sudo was just used, so it does not ask again.
+# As in systemd, the last setting of a name wins, and the quotes it removes are removed here.
+# Without a setting, the program's default applies.
+web_address() {
+    bind=$(as_root sed -n 's/^[[:space:]]*MANORCLOUD_BIND=//p' "$ENV_FILE" |
+        tail -n 1 | tr -d "\"' \t")
+    [ -n "$bind" ] || bind=$DEFAULT_BIND
+
+    # The port is after the last colon; the host is everything before it ("[::]" keeps its
+    # brackets, which is also how an IPv6 address is written in a URL)
+    port=${bind##*:}
+    host=${bind%:*}
+
+    case "$host" in
+        0.0.0.0 | "[::]")
+            # Every address of this machine: show the first one others on the network can use
+            ip=$(hostname -I 2>/dev/null | awk '{ print $1 }')
+            case "$ip" in
+                "") echo "http://<this machine's address>:$port" ;;
+                *:*) echo "http://[$ip]:$port" ;;
+                *) echo "http://$ip:$port" ;;
+            esac
+            ;;
+        127.0.0.1 | "[::1]" | localhost)
+            echo "http://$host:$port (from this machine only)"
+            ;;
+        *)
+            echo "http://$host:$port"
+            ;;
+    esac
+}
+
 print_summary() {
     echo
     echo "$("$BIN_PATH" --version) is running."
-    ip=$(hostname -I 2>/dev/null | awk '{ print $1 }')
-    if [ -n "$ip" ]; then
-        echo "  Address:  http://$ip:3000 (use your port if you changed MANORCLOUD_BIND)"
-    fi
+    echo "  Address:  $(web_address)"
     echo "  Status:   systemctl status manorcloud"
     echo "  Logs:     journalctl -u manorcloud -f"
     echo "  Settings: $ENV_FILE (then: sudo systemctl restart manorcloud)"
