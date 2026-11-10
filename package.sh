@@ -1,23 +1,26 @@
 #!/bin/sh
-# Build an installation package: the frontend, the cross-compiled binary and the deployment
-# files, in one archive.
+# Build an installation package: the frontend, the cross-compiled binary, the installer and
+# the last-resort export script, in one archive.
 #
 # Usage:
-#   ./package.sh                               build for ARM64 (Raspberry Pi, RK3528, ...)
-#   ./package.sh x86_64-unknown-linux-gnu      build for x86_64
+#   ./package.sh aarch64-unknown-linux-gnu     ARM64 (Raspberry Pi, RK3528, ...)
+#   ./package.sh x86_64-unknown-linux-gnu      x86_64
 #
-# Produces dist/manorcloud-<version>-<arch>.tar.gz. On the target machine, extract it and run
-# sudo ./install.sh. No source code, Rust or Node is needed there.
+# Produces dist/manorcloud-<version>-<arch>.tar.gz. Releases normally install with the
+# one-line installer; to install this package offline, extract it on the target machine and run
+# MANORCLOUD_SKIP_DOWNLOAD=true ./install.sh. No source code, Rust or Node is needed there.
 set -eu
 
 # Always work from the project root, wherever this is run from
 cd "$(dirname "$0")"
 
-TARGET=${1:-aarch64-unknown-linux-gnu}
+[ $# -eq 1 ] || { sed -n '5,7p' "$0" >&2; exit 2; }
+TARGET=$1
 
 # The oldest glibc the binaries may require. Raising it drops support for older systems
 # (2.34: Ubuntu 22.04, Debian 12, Raspberry Pi OS bookworm and later), so it is checked below
-# and must only change on purpose. install.sh checks the same version on the target machine.
+# and must only change on purpose. install.sh refuses older systems with the same version
+# (MIN_GLIBC there).
 MAX_GLIBC=2.34
 
 # Version from the first "version" in Cargo.toml (the [package] section)
@@ -30,9 +33,6 @@ case "$TARGET" in
     *) echo "error: unsupported target $TARGET (use aarch64- or x86_64-unknown-linux-gnu)" >&2; exit 1 ;;
 esac
 NAME="manorcloud-$VERSION-$ARCH"
-
-# Package contents
-FILES="install.sh export-files.sh manorcloud.service manorcloud.env"
 
 # 1. Frontend: must be built before Rust, because rust-embed bundles it at compile time
 npm --prefix frontend ci
@@ -69,17 +69,15 @@ fi
 echo "requires glibc $required (supported: $MAX_GLIBC and later)"
 
 # 4. Assemble the package
+FILES="manorcloud install.sh export-files.sh"
 rm -rf "dist/$NAME"
 mkdir -p "dist/$NAME"
-cp "$BINARY" "dist/$NAME/"
-for file in $FILES; do
-    cp "deploy/$file" "dist/$NAME/"
-done
+cp "$BINARY" install.sh deploy/export-files.sh "dist/$NAME/"
 tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
 
 # 5. Check that the package is complete: a missing file is much worse to discover on the
-#    target machine. grep -x matches whole lines, so "manorcloud" never matches manorcloud.env
-for file in manorcloud $FILES; do
+#    target machine. grep -x matches whole lines, so a file never matches a longer name
+for file in $FILES; do
     tar -tzf "dist/$NAME.tar.gz" | grep -qx "$NAME/$file" ||
         { echo "error: the package is missing $file" >&2; exit 1; }
 done

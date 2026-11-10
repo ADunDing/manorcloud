@@ -39,6 +39,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # shell 腳本的常見錯誤：沒加引號的變數、不可攜的語法等。
+      # GitHub 的 Ubuntu 執行環境已內建 shellcheck
+      - name: Shell scripts
+        run: shellcheck install.sh package.sh deploy/export-files.sh
       - name: Format
         run: cargo fmt --check
       - name: Clippy

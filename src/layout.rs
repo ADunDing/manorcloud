@@ -1,6 +1,6 @@
 //! 安裝後的檔案位置。
 //!
-//! 必須與 deploy/install.sh、deploy/manorcloud.service 一致：
+//! 必須與根目錄的 install.sh（包括其中的 systemd 服務檔）一致：
 //! 這些路徑同時出現在 Rust 與 shell 腳本中，修改時兩邊都要改。
 
 use std::path::{Path, PathBuf};

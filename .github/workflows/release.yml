@@ -69,6 +69,11 @@ jobs:
       # 只有這個工作需要寫入權限：建立 Release
       contents: write
     steps:
+      # 取得 install.sh：它也要放上 Release，一行安裝從這裡下載它
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -85,6 +90,7 @@ jobs:
             arch=${arch%.tar.gz}
             cp "$file" "release/manorcloud-linux-$arch.tar.gz"
           done
+          cp install.sh release/
           ls -l release
           (cd release && sha256sum * > SHA256SUMS)
           cat release/SHA256SUMS
