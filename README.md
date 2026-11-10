@@ -86,14 +86,14 @@ Settings are in `/etc/manorcloud/manorcloud.env`, which explains each option. Af
 sudo systemctl restart manorcloud
 ```
 
-| Setting | Default | Meaning |
-|---|---|---|
-| `MANORCLOUD_BIND` | `0.0.0.0:3000` | Address and port to listen on |
-| `MANORCLOUD_DATA_DIR` | `/var/lib/manorcloud/data` | Where uploaded files are stored |
-| `MANORCLOUD_DATABASE_URL` | `sqlite:///var/lib/manorcloud/manorcloud.db` | The database; must be on a local disk |
-| `MANORCLOUD_MAX_UPLOAD_BYTES` | 10 GiB | Largest single upload |
-| `MANORCLOUD_MAX_PENDING_UPLOADS` | `5` | Unfinished uploads each user may have at once |
-| `MANORCLOUD_SECURE_COOKIES` | `false` | Set to `true` only when serving over HTTPS |
+| Setting                          | Default                                      | Meaning                                       |
+|----------------------------------|----------------------------------------------|-----------------------------------------------|
+| `MANORCLOUD_BIND`                | `0.0.0.0:3000`                               | Address and port to listen on                 |
+| `MANORCLOUD_DATA_DIR`            | `/var/lib/manorcloud/data`                   | Where uploaded files are stored               |
+| `MANORCLOUD_DATABASE_URL`        | `sqlite:///var/lib/manorcloud/manorcloud.db` | The database; must be on a local disk         |
+| `MANORCLOUD_MAX_UPLOAD_BYTES`    | 10 GiB                                       | Largest single upload                         |
+| `MANORCLOUD_MAX_PENDING_UPLOADS` | `5`                                          | Unfinished uploads each user may have at once |
+| `MANORCLOUD_SECURE_COOKIES`      | `false`                                      | Set to `true` only when serving over HTTPS    |
 
 To store files on an external disk, change `MANORCLOUD_DATA_DIR` and allow the service to write
 there; the comments in the configuration file show how.
@@ -106,58 +106,18 @@ is set up, set `MANORCLOUD_SECURE_COOKIES=true`.
 
 ## Everyday tasks
 
-| Task | Command |
-|---|---|
-| Upgrade | Run the install command again. Your settings and files are kept |
-| Status | `systemctl status manorcloud` |
-| Logs | `journalctl -u manorcloud -f` |
-| Export all files with their original names | `sudo manorcloud export <output-dir>` |
-| Uninstall, keeping your files | `sudo manorcloud uninstall` |
-| Uninstall and delete everything | `sudo manorcloud uninstall --purge` |
+| Task                                       | Command                                                         |
+|--------------------------------------------|-----------------------------------------------------------------|
+| Upgrade                                    | Run the install command again. Your settings and files are kept |
+| Status                                     | `systemctl status manorcloud`                                   |
+| Logs                                       | `journalctl -u manorcloud -f`                                   |
+| Export all files with their original names | `sudo manorcloud export <output-dir>`                           |
+| Uninstall, keeping your files              | `sudo manorcloud uninstall`                                     |
+| Uninstall and delete everything            | `sudo manorcloud uninstall --purge`                             |
 
 `export` writes every user's files to `<output-dir>/<username>/` with their original names,
 folders and modification times. It needs no network and no other software, so your files are
 never locked inside ManorCloud.
-
-## Development
-
-You need Rust 1.94 or later and Node.js 24.
-
-```sh
-git clone https://github.com/ADunDing/manorcloud.git
-cd manorcloud
-
-# The web interface: builds into frontend/public/js, rebuilding on changes
-npm --prefix frontend ci
-npm --prefix frontend run watch
-
-# In another terminal: the server, on http://127.0.0.1:3000
-SQLX_OFFLINE=true cargo run -- run
-```
-
-SQL queries are checked at compile time. Without a database, `SQLX_OFFLINE=true` uses the saved
-results in `.sqlx/`. After changing a query, update them with
-[sqlx-cli](https://crates.io/crates/sqlx-cli) and commit the changes:
-
-```sh
-cargo sqlx prepare -- --all-targets
-```
-
-Tests:
-
-```sh
-SQLX_OFFLINE=true cargo test
-npm --prefix frontend test
-```
-
-Release packages are built with [cross](https://github.com/cross-rs/cross) (which needs Docker):
-
-```sh
-./package.sh aarch64-unknown-linux-gnu
-./package.sh x86_64-unknown-linux-gnu
-```
-
-Pushing a tag such as `v0.2.0` builds both and publishes a GitHub release.
 
 ## License
 
@@ -165,4 +125,3 @@ Pushing a tag such as `v0.2.0` builds both and publishes a GitHub release.
 
 You may use, modify and share ManorCloud freely. If you run a modified version as a service for
 others, you must make your modified source code available to them.
-
