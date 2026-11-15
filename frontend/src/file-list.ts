@@ -13,6 +13,7 @@
 import { h } from "./dom.js";
 import { formatSize, formatTime } from "./format.js";
 import { icon } from "./icons.js";
+import type { SortKey, SortOptions } from "./sort.js";
 import type { FileItem } from "./types.js";
 
 export type ViewMode = "list" | "grid";
@@ -33,6 +34,12 @@ export interface FileListOptions {
   readonly onContextMenu: (x: number, y: number) => void;
   /** 原位改名按下 Enter。失敗時拋出錯誤，名稱會恢復原狀 */
   readonly onRename: (item: FileItem, name: string) => Promise<void>;
+  /** 目前的排序：欄位標題顯示 ↑／↓ */
+  readonly sort: SortOptions;
+  /** 點欄位標題：依那一欄排序，再點一次反轉方向 */
+  readonly onSort: (key: SortKey) => void;
+  /** 排序按鈕與選單：List 時放在 Modified 的右邊，Grid 時放在方塊上方 */
+  readonly sortControl: HTMLElement;
   /**
    * 框選的範圍：選取框畫在這個元素裡，座標也以它為準。
    * 是整個內容區而不只是列表，所以從路徑旁、列表下方等任何空白處都能開始框選
@@ -62,13 +69,15 @@ const MIN_WIDTH: Columns = { name: 140, size: 70 };
 /** Modified 自動佔用剩下的空間，但至少保留這麼寬 */
 const MIN_MODIFIED = 150;
 const CHECK_COLUMN = 44;
+/** 排序按鈕那一欄的寬度：與 CSS 的 .col-sort 相同 */
+const SORT_COLUMN = 120;
 /** 滑鼠移動超過這個距離才算拖曳，否則是點擊 */
 const DRAG_THRESHOLD = 4;
 /** 用鍵盤調整欄寬時，每按一次的寬度 */
 const RESIZE_STEP = 16;
 
 export class FileList {
-  /** 列表的區域：可以捲動，也是拖曳框選的範圍 */
+  /** 列表的區域：太窄時可以橫向捲動。框選的範圍是更外層的 marqueeHost */
   readonly element: HTMLElement;
   private readonly nodes = new Map<number, ItemNodes>();
   /** 項目的順序，Shift＋點擊與方向鍵依此計算範圍 */
@@ -225,11 +234,16 @@ export class FileList {
     box.addEventListener("change", () => (box.checked ? this.selectAll() : this.clear()));
     this.selectAllBox = box;
 
-    const name = h("th", { scope: "col", class: "col-name" }, "Name", this.resizer("name", "Name"));
+    const name = h(
+      "th",
+      { scope: "col", class: "col-name", "aria-sort": this.ariaSort("name") },
+      this.sortButton("name", "Name"),
+      this.resizer("name", "Name"),
+    );
     const size = h(
       "th",
-      { scope: "col", class: "col-size num" },
-      "Size",
+      { scope: "col", class: "col-size num", "aria-sort": this.ariaSort("size") },
+      this.sortButton("size", "Size"),
       this.resizer("size", "Size"),
     );
     this.headers.set("name", name);
@@ -247,7 +261,16 @@ export class FileList {
           h("th", { scope: "col", class: "col-check" }, box),
           name,
           size,
-          h("th", { scope: "col", class: "num" }, "Modified"),
+          h(
+            "th",
+            { scope: "col", class: "num", "aria-sort": this.ariaSort("modified") },
+            this.sortButton("modified", "Modified"),
+          ),
+          h(
+            "th",
+            { scope: "col", class: "col-sort" },
+            this.options.sortControl,
+          ),
         ),
       ),
       h(
@@ -256,6 +279,32 @@ export class FileList {
         this.items.map((item) => this.row(item)),
       ),
     );
+  }
+
+  /** 欄位標題：點了依這一欄排序。目前排序的那一欄顯示方向的箭頭 */
+  private sortButton(key: SortKey, label: string): HTMLButtonElement {
+    const { sort } = this.options;
+    const active = sort.key === key;
+    return h(
+      "button",
+      {
+        type: "button",
+        class: active ? "sort-button active" : "sort-button",
+        title: `Sort by ${label.toLowerCase()}`,
+        onClick: () => this.options.onSort(key),
+      },
+      label,
+      active ? icon(sort.direction === "asc" ? "arrowUp" : "arrowDown", 14) : null,
+    );
+  }
+
+  /** 螢幕閱讀器用的排序狀態：只有目前排序的那一欄有 */
+  private ariaSort(key: SortKey): string | null {
+    const { sort } = this.options;
+    if (sort.key !== key) {
+      return null;
+    }
+    return sort.direction === "asc" ? "ascending" : "descending";
   }
 
   private row(item: FileItem): HTMLElement {
@@ -282,6 +331,7 @@ export class FileList {
       h("td", {}, handle),
       h("td", { class: "num" }, formatSize(item.size)),
       h("td", { class: "num" }, formatTime(item.updated_at)),
+      h("td", { class: "col-sort" }),
     );
     this.bind(item, row, box, name, handle);
     return row;
@@ -289,9 +339,15 @@ export class FileList {
 
   private grid(): HTMLElement {
     return h(
-      "ul",
-      { class: "tiles", role: "listbox", "aria-label": "Files", "aria-multiselectable": "true" },
-      this.items.map((item) => this.tile(item)),
+      "div",
+      {},
+      // Grid 沒有標題列：排序按鈕放在方塊上方的右邊，位置與 List 時相同
+      h("div", { class: "grid-header" }, this.options.sortControl),
+      h(
+        "ul",
+        { class: "tiles", role: "listbox", "aria-label": "Files", "aria-multiselectable": "true" },
+        this.items.map((item) => this.tile(item)),
+      ),
     );
   }
 
@@ -552,7 +608,8 @@ export class FileList {
     transfer.effectAllowed = "move";
     transfer.setData(DRAG_TYPE, ids.join(","));
 
-    const ghost = h("div", { class: "drag-ghost" }, ids.length === 1 ? item.name : `${ids.length} items`);
+    const label = ids.length === 1 ? item.name : `${ids.length} items`;
+    const ghost = h("div", { class: "drag-ghost" }, label);
     document.body.append(ghost);
     transfer.setDragImage(ghost, 14, 14);
     // 瀏覽器在這個事件結束時擷取拖曳圖片，之後就可以移除
@@ -711,7 +768,7 @@ export class FileList {
     const other = column === "name" ? this.columns.size : this.columns.name;
     const max = Math.max(
       MIN_WIDTH[column],
-      this.element.clientWidth - CHECK_COLUMN - other - MIN_MODIFIED,
+      this.element.clientWidth - CHECK_COLUMN - other - MIN_MODIFIED - SORT_COLUMN,
     );
     const value = Math.round(Math.max(MIN_WIDTH[column], Math.min(max, width)));
     this.columns = { ...this.columns, [column]: value };

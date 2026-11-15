@@ -23,7 +23,11 @@ export type IconName =
   | "user"
   | "users"
   | "logout"
-  | "disk";
+  | "disk"
+  | "sort"
+  | "arrowUp"
+  | "arrowDown"
+  | "check";
 
 /** 每個圖示的路徑，座標系為 24 × 24 */
 const PATHS: Readonly<Record<IconName, readonly string[]>> = {
@@ -70,6 +74,10 @@ const PATHS: Readonly<Record<IconName, readonly string[]>> = {
     "M18.5 14a6.5 6.5 0 0 1 3 6",
   ],
   logout: ["M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3", "M10 17l5-5-5-5", "M15 12H4"],
+  sort: ["M4 7h16", "M7 12h10", "M10 17h4"],
+  arrowUp: ["M12 19V5", "M6 11l6-6 6 6"],
+  arrowDown: ["M12 5v14", "M6 13l6 6 6-6"],
+  check: ["M5 12l5 5 9-10"],
   disk: [
     "M5 4h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
     "M5 13h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z",

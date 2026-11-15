@@ -587,6 +587,76 @@ table.files tbody tr:focus-visible {
     cursor: pointer;
 }
 
+/* 欄位標題：點了依這一欄排序 */
+.sort-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+}
+
+.sort-button:hover,
+.sort-button.active {
+    color: var(--fg);
+}
+
+/* 排序按鈕：圖示加文字，與 Google Drive 相同 */
+.sort-menu-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.sort-menu-button:hover {
+    background: var(--bar);
+}
+
+.sort-wrap {
+    position: relative;
+    display: inline-block;
+}
+
+/* List：標題列最右邊的一欄。寬度與 file-list.ts 的 SORT_COLUMN 相同 */
+table.files .col-sort {
+    box-sizing: border-box;
+    width: 120px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    text-align: right;
+}
+
+/* Grid：方塊上方，靠右 */
+.grid-header {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 8px;
+}
+
+.menu-section {
+    padding: 8px 14px 4px;
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+/* 勾選記號的位置：沒勾選的項目也保留同樣寬度，文字才對齊 */
+.check-slot {
+    display: inline-flex;
+    width: 16px;
+}
+
 /* 欄寬的拖曳把手：標題儲存格右緣的細線 */
 .col-resizer {
     position: absolute;

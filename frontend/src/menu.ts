@@ -56,8 +56,17 @@ export function menuSeparator(): HTMLElement {
   return h("div", { class: "menu-separator", role: "separator" });
 }
 
-/** 讓按鈕開關它的下拉選單 */
-export function dropdown(button: HTMLButtonElement, menu: HTMLElement): void {
+/**
+ * 讓按鈕開關它的下拉選單。
+ *
+ * fixed：選單相對於視窗定位（對齊按鈕的右下方）。按鈕在會捲動或裁切內容的區域裡時使用，
+ * 否則選單會被那個區域裁切
+ */
+export function dropdown(
+  button: HTMLButtonElement,
+  menu: HTMLElement,
+  { fixed = false }: { fixed?: boolean } = {},
+): void {
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   menu.hidden = true;
@@ -69,6 +78,13 @@ export function dropdown(button: HTMLButtonElement, menu: HTMLElement): void {
       return;
     }
     menu.hidden = false;
+    if (fixed) {
+      const rect = button.getBoundingClientRect();
+      menu.style.position = "fixed";
+      menu.style.top = `${rect.bottom + 6}px`;
+      menu.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+      menu.style.left = "auto";
+    }
     button.setAttribute("aria-expanded", "true");
     close = track(menu, button, () => {
       menu.hidden = true;
@@ -153,13 +169,15 @@ function track(
   );
   window.addEventListener("blur", close, { signal });
   window.addEventListener("resize", close, { signal });
+  // 頁面捲動時選單會與它的按鈕分開：直接收起（capture：任何區域的捲動都算）
+  document.addEventListener("scroll", close, { capture: true, signal });
 
   // 選了項目就收起。項目自己的 onClick 先執行（它掛在項目上，比這裡更早收到事件）
   menu.addEventListener(
     "click",
     (event) => {
       const target = event.target;
-      if (target instanceof Element && target.closest('[role="menuitem"]:enabled') !== null) {
+      if (target instanceof Element && target.closest('[role^="menuitem"]:enabled') !== null) {
         close();
       }
     },
@@ -171,7 +189,8 @@ function track(
 }
 
 function enabledItems(menu: HTMLElement): HTMLElement[] {
-  return Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]:enabled'));
+  // menuitem 與 menuitemradio（排序選單中可以勾選的項目）
+  return Array.from(menu.querySelectorAll<HTMLElement>('[role^="menuitem"]:enabled'));
 }
 
 function focusFirst(menu: HTMLElement): void {

@@ -7,9 +7,18 @@ import { h } from "./dom.js";
 import { chooseDownload, nameDialog } from "./dialogs.js";
 import { DRAG_TYPE, FileList, type ViewMode } from "./file-list.js";
 import { icon, type IconName } from "./icons.js";
-import { openContextMenu, type MenuEntry } from "./menu.js";
+import { dropdown, menuSeparator, openContextMenu, type MenuEntry } from "./menu.js";
 import { chooseFolder } from "./move-dialog.js";
 import { PendingUploads } from "./pending-uploads.js";
+import {
+  defaultDirection,
+  directionLabel,
+  loadSort,
+  saveSort,
+  sortItems,
+  type SortKey,
+  type SortOptions,
+} from "./sort.js";
 import { folderHref } from "./router.js";
 import { refreshStorage } from "./sidebar.js";
 import type { Crumb, FileItem, ItemDetail, ServerConfig } from "./types.js";
@@ -195,6 +204,15 @@ class FolderView {
   private readonly overlay: HTMLElement;
   private list: FileList;
   private view: ViewMode = loadView();
+  private sort: SortOptions = loadSort();
+  /** 排序選單：每次排序改變時重新產生內容，勾選的項目才會正確 */
+  private readonly sortMenu = h("div", {
+    class: "menu dropdown-menu",
+    role: "menu",
+    "aria-label": "Sort",
+  });
+  /** 排序按鈕與選單：只建立一次，交給列表放在 Modified 的右邊（Grid 時放在方塊上方） */
+  private readonly sortWrap: HTMLElement;
   /** 鍵盤與拖放的監聽，離開這個畫面時一次移除 */
   private readonly controller = new AbortController();
   /** 操作進行中，避免重複送出（例如連點兩次刪除） */
@@ -257,6 +275,7 @@ class FolderView {
       ),
     );
 
+    this.sortWrap = this.sortControl();
     this.list = this.createList();
   }
 
@@ -335,13 +354,16 @@ class FolderView {
   // ---------- 列表與檢視 ----------
 
   private createList(): FileList {
-    return new FileList(this.items, {
+    return new FileList(sortItems(this.items, this.sort), {
       view: this.view,
       onOpen: (item) => this.open(item),
       onSelectionChange: () => this.updateToolbar(),
       onContextMenu: (x, y) => this.showContextMenu(x, y),
       onRename: (item, name) => this.rename(item, name),
       marqueeHost: this.container,
+      sort: this.sort,
+      onSort: (key) => this.sortBy(key),
+      sortControl: this.sortWrap,
     });
   }
 
@@ -350,14 +372,95 @@ class FolderView {
     if (view === this.view) {
       return;
     }
-    const selected = this.list.selectedItems().map((item) => item.id);
     this.view = view;
     saveView(view);
+    this.rebuildList();
+    this.updateViewButtons();
+  }
+
+  /** 點欄位標題：同一欄反轉方向；換到另一欄時用那一欄最常用的方向 */
+  private sortBy(key: SortKey): void {
+    const { sort } = this;
+    this.setSort(
+      sort.key === key
+        ? { ...sort, direction: sort.direction === "asc" ? "desc" : "asc" }
+        : { ...sort, key, direction: defaultDirection(key) },
+    );
+  }
+
+  private setSort(sort: SortOptions): void {
+    this.sort = sort;
+    saveSort(sort);
+    this.rebuildList();
+    this.renderSortMenu();
+  }
+
+  /** 依目前的檢視與排序重新產生列表，保留選取 */
+  private rebuildList(): void {
+    const selected = this.list.selectedItems().map((item) => item.id);
     const next = this.createList();
     this.list.element.replaceWith(next.element);
     this.list = next;
     this.list.select(selected);
-    this.updateViewButtons();
+  }
+
+  /** 排序按鈕與選單（與 Google Drive 相同）：List 時在 Modified 的右邊，Grid 時在方塊上方 */
+  private sortControl(): HTMLElement {
+    const button = h(
+      "button",
+      { type: "button", class: "sort-menu-button", title: "Sort" },
+      icon("sort"),
+      "Sort",
+    );
+    // 選單相對於視窗定位：放在可以左右捲動的列表裡，選單不會被裁切
+    dropdown(button, this.sortMenu, { fixed: true });
+    this.renderSortMenu();
+    return h("div", { class: "sort-wrap" }, button, this.sortMenu);
+  }
+
+  private renderSortMenu(): void {
+    const { sort } = this;
+    const option = (label: string, checked: boolean, next: SortOptions): HTMLElement =>
+      h(
+        "button",
+        {
+          type: "button",
+          role: "menuitemradio",
+          "aria-checked": String(checked),
+          class: "menu-item",
+          onClick: () => this.setSort(next),
+        },
+        h("span", { class: "check-slot" }, checked ? icon("check", 16) : null),
+        h("span", {}, label),
+      );
+    const section = (label: string): HTMLElement => h("div", { class: "menu-section" }, label);
+    const keys: [SortKey, string][] = [
+      ["name", "Name"],
+      ["modified", "Modified"],
+      ["size", "Size"],
+    ];
+
+    this.sortMenu.replaceChildren(
+      section("Sort by"),
+      ...keys.map(([key, label]) =>
+        option(
+          label,
+          sort.key === key,
+          sort.key === key ? sort : { ...sort, key, direction: defaultDirection(key) },
+        ),
+      ),
+      menuSeparator(),
+      section("Order"),
+      option(directionLabel(sort.key, "asc"), sort.direction === "asc", { ...sort, direction: "asc" }),
+      option(directionLabel(sort.key, "desc"), sort.direction === "desc", {
+        ...sort,
+        direction: "desc",
+      }),
+      menuSeparator(),
+      section("Folders"),
+      option("On top", sort.foldersFirst, { ...sort, foldersFirst: true }),
+      option("Mixed with files", !sort.foldersFirst, { ...sort, foldersFirst: false }),
+    );
   }
 
   private updateViewButtons(): void {
