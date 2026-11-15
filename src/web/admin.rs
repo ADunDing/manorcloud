@@ -23,7 +23,7 @@ use crate::{
     db::user::{self, AdminUpdateError, UserSummary},
 };
 
-const USER_NOT_FOUND: &str = "找不到使用者";
+const USER_NOT_FOUND: &str = "User not found";
 
 /// 含有臨時密碼的回應：不得被瀏覽器或任何中間快取保存
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
@@ -128,7 +128,7 @@ async fn create_user(
         .await
         .map_err(|e| {
             if is_unique_violation(&e) {
-                AppError::Conflict("帳號已被使用".to_string())
+                AppError::Conflict("That username is already taken".to_string())
             } else {
                 AppError::internal(e)
             }
@@ -136,7 +136,7 @@ async fn create_user(
 
     let summary = user::find_user_summary(&pool, id)
         .await?
-        .ok_or_else(|| AppError::internal("剛建立的使用者不存在"))?;
+        .ok_or_else(|| AppError::internal("the user that was just created does not exist"))?;
 
     Ok((
         StatusCode::CREATED,
@@ -168,10 +168,12 @@ async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<UserItem>, AppError> {
     if req.role.is_none() && req.disabled.is_none() {
-        return Err(AppError::BadRequest("沒有要修改的內容".to_string()));
+        return Err(AppError::BadRequest("Nothing to change".to_string()));
     }
     if id == admin.id && req.disabled == Some(true) {
-        return Err(AppError::BadRequest("不能停用自己的帳號".to_string()));
+        return Err(AppError::BadRequest(
+            "You can't disable your own account".to_string(),
+        ));
     }
 
     user::update_user(&pool, id, req.role.map(Role::as_str), req.disabled)
@@ -179,7 +181,7 @@ async fn update_user(
         .map_err(|e| match e {
             AdminUpdateError::NotFound => user_not_found(),
             AdminUpdateError::LastAdmin => {
-                AppError::Conflict("至少需要保留一位有效的管理員".to_string())
+                AppError::Conflict("At least one active administrator is required".to_string())
             }
             AdminUpdateError::Db(e) => AppError::internal(e),
         })?;
@@ -216,7 +218,7 @@ async fn reset_password(
 > {
     if id == admin.id {
         return Err(AppError::BadRequest(
-            "請從「帳號設定」修改自己的密碼".to_string(),
+            "Change your own password in Account settings".to_string(),
         ));
     }
 

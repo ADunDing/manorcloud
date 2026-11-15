@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::OK,
-            "找不到 /js/main.js：請先在 frontend/ 執行 npm run build"
+            "/js/main.js not found: run npm run build in frontend/ first"
         );
         // nosniff 之下，MIME 不是 JavaScript 的腳本會被瀏覽器拒絕執行
         assert!(header_str(&headers, header::CONTENT_TYPE).contains("javascript"));

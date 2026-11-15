@@ -1,29 +1,31 @@
 // 進入點：依登入狀態與網址決定要顯示哪個畫面。
 
-import {
-  api,
-  ApiError,
-  onPasswordChangeRequired,
-  onUnauthorized,
-} from "./api.js";
+import { api, ApiError, onPasswordChangeRequired, onUnauthorized } from "./api.js";
 import { renderAdmin } from "./admin-view.js";
 import { renderChangeCredentials, renderLogin } from "./auth-view.js";
-import { renderBrowser } from "./browser-view.js";
+import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
 import { h } from "./dom.js";
+import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
 import { ADMIN_HREF, currentRoute, folderHref } from "./router.js";
+import { hideSidebar, renderSidebar } from "./sidebar.js";
 import type { User } from "./types.js";
 
 /** 取得 index.html 中一定存在的元素；不存在代表 HTML 與程式碼不同步，直接報錯 */
 function requireElement(id: string): HTMLElement {
   const el = document.getElementById(id);
   if (el === null) {
-    throw new Error(`index.html 中找不到 #${id}`);
+    throw new Error(`#${id} is missing from index.html`);
   }
   return el;
 }
 
 const app = requireElement("app");
-const userSlot = requireElement("user");
+const account = requireElement("account");
+const sidebar = requireElement("sidebar");
+const panels = requireElement("panels");
+const brand = requireElement("brand");
+
+mountPanels(panels);
 
 /** 目前顯示的畫面。登入與強制修改的畫面不受網址影響 */
 type Screen = "login" | "change" | "home" | "settings";
@@ -31,6 +33,8 @@ let screen: Screen = "login";
 
 /** 目前登入的使用者；未登入時為 null */
 let currentUser: User | null = null;
+
+const sidebarActions = { newFolder, upload: chooseFiles };
 
 // ==================== 畫面 ====================
 
@@ -40,37 +44,45 @@ let currentUser: User | null = null;
  */
 function showScreen(user: User): void {
   currentUser = user;
+  panels.hidden = false;
   if (user.must_change_password) {
     screen = "change";
-    showTopbar(user, { navigation: false });
+    leaveBrowser();
+    hideSidebar(sidebar);
+    showAccount(user, { navigation: false });
     renderChangeCredentials(app, user, showScreen, { forced: true });
   } else {
     showHome(user);
   }
 }
 
-/** 依網址顯示「我的檔案」或「使用者管理」 */
+/** 依網址顯示「My files」或「Users」 */
 function showHome(user: User): void {
   currentUser = user;
   screen = "home";
-  showTopbar(user, { navigation: true });
+  closeMenus();
+  showAccount(user, { navigation: true });
 
   const route = currentRoute();
   if (route.view === "admin") {
     if (user.role === "admin") {
+      leaveBrowser();
+      renderSidebar(sidebar, sidebarActions, false);
       // 降級自己之後重新讀取使用者，交給 showScreen 決定畫面
       renderAdmin(app, user, () => void refresh());
       return;
     }
-    // 不是管理員：回到我的檔案。replaceState 不會觸發 hashchange，也不會留下歷史紀錄
+    // 不是管理員：回到 My files。replaceState 不會觸發 hashchange，也不會留下歷史紀錄
     history.replaceState(null, "", folderHref(null));
   }
+  renderSidebar(sidebar, sidebarActions, true);
   renderBrowser(app, route.view === "files" ? route.folderId : null);
 }
 
 function showSettings(user: User): void {
   screen = "settings";
-  showTopbar(user, { navigation: true });
+  leaveBrowser();
+  renderSidebar(sidebar, sidebarActions, false);
   renderChangeCredentials(app, user, showScreen, {
     forced: false,
     onCancel: () => showHome(user),
@@ -80,43 +92,65 @@ function showSettings(user: User): void {
 function showLoggedOut(notice?: string): void {
   screen = "login";
   currentUser = null;
-  userSlot.replaceChildren();
+  leaveBrowser();
+  closeMenus();
+  account.replaceChildren();
+  hideSidebar(sidebar);
+  panels.hidden = true;
   renderLogin(app, showScreen, notice);
 }
 
 /**
- * 頂部列：使用者名稱、我的檔案、使用者管理（只有管理員）、帳號設定、登出。
- * 必須修改密碼的狀態下只顯示登出。
+ * 右上角的頭像與帳號選單：名稱與身分、Account settings、Users（只有管理員）、Log out。
+ * 必須修改密碼的狀態下只有 Log out。
  *
- * 「使用者管理」只對管理員顯示，但這只是使用體驗；真正的權限檢查在後端的 AdminUser。
+ * 「Users」只對管理員顯示，但這只是使用體驗；真正的權限檢查在後端的 AdminUser。
  */
-function showTopbar(user: User, { navigation }: { navigation: boolean }): void {
-  // replaceChildren 是瀏覽器內建的方法，不接受 null（與 h() 不同），
-  // 所以先組成陣列，只放入要顯示的項目
-  const items: Node[] = [h("span", { class: "username" }, user.username)];
+function showAccount(user: User, { navigation }: { navigation: boolean }): void {
+  const avatar = h(
+    "button",
+    {
+      type: "button",
+      class: "avatar",
+      "aria-label": `Account menu for ${user.username}`,
+      title: user.username,
+    },
+    // 帳號名稱只能是小寫英文、數字、底線與連字號，第一個字一定能顯示
+    user.username.charAt(0).toUpperCase(),
+  );
 
+  const items: Node[] = [
+    h(
+      "div",
+      { class: "menu-header" },
+      h("strong", {}, user.username),
+      h("span", { class: "muted" }, user.role === "admin" ? "Administrator" : "Member"),
+    ),
+  ];
   if (navigation) {
-    items.push(navButton("我的檔案", () => go(user, folderHref(null))));
+    items.push(menuItem({ label: "Account settings", icon: "user", onSelect: () => showSettings(user) }));
     if (user.role === "admin") {
-      items.push(navButton("使用者管理", () => go(user, ADMIN_HREF)));
+      items.push(menuItem({ label: "Users", icon: "users", onSelect: () => go(user, ADMIN_HREF) }));
     }
-    items.push(navButton("帳號設定", () => showSettings(user)));
+    items.push(menuSeparator());
   }
-  items.push(navButton("登出", () => void logout()));
+  items.push(menuItem({ label: "Log out", icon: "logout", onSelect: () => void logout() }));
 
-  userSlot.replaceChildren(...items);
-}
-
-function navButton(text: string, onClick: () => void): HTMLButtonElement {
-  return h("button", { type: "button", class: "link", onClick }, text);
+  const menu = h(
+    "div",
+    { class: "menu dropdown-menu account-menu", role: "menu", "aria-label": "Account" },
+    items,
+  );
+  dropdown(avatar, menu);
+  account.replaceChildren(avatar, menu);
 }
 
 /**
- * 前往某個網址。網址相同時 hashchange 不會觸發（例如在帳號設定頁點「我的檔案」，
+ * 前往某個網址。網址相同時 hashchange 不會觸發（例如在帳號設定頁點 My files，
  * 而網址本來就是 #/），所以直接重新顯示。
  */
 function go(user: User, href: string): void {
-  if (window.location.hash === href) {
+  if (window.location.hash === href || (href === folderHref(null) && window.location.hash === "")) {
     showHome(user);
   } else {
     window.location.hash = href;
@@ -136,7 +170,7 @@ async function logout(): Promise<void> {
     await api.post("/api/logout");
   } catch (error) {
     // 登出失敗（例如連不到伺服器）時，Cookie 仍然有效，不能假裝已經登出
-    showError(error instanceof ApiError ? error.message : "登出失敗");
+    showError(error instanceof ApiError ? error.message : "Couldn't log out");
     return;
   }
   showLoggedOut();
@@ -161,7 +195,7 @@ async function refresh(): Promise<void> {
       h(
         "p",
         { class: "error", role: "alert" },
-        error instanceof ApiError ? error.message : "發生未預期的錯誤",
+        error instanceof ApiError ? error.message : "Something went wrong",
       ),
     );
   }
@@ -170,12 +204,12 @@ async function refresh(): Promise<void> {
 // ==================== 全域事件 ====================
 
 // 操作途中遇到 401（Cookie 過期、在其他分頁登出、被停用）：回到登入畫面並說明原因
-onUnauthorized(() => showLoggedOut("登入已過期，請重新登入"));
+onUnauthorized(() => showLoggedOut("Your session has expired. Log in again."));
 
 // 任何 API 回「必須先修改密碼」：重新讀取使用者，切換到修改畫面
 onPasswordChangeRequired(() => void refresh());
 
-// 網址改變（點了資料夾、麵包屑、上一頁、頂部列的連結）：
+// 網址改變（點了資料夾、路徑、上一頁、側欄的連結）：
 // 登入後、且不在強制修改的畫面時，依網址顯示對應的頁面
 window.addEventListener("hashchange", () => {
   if (currentUser !== null && (screen === "home" || screen === "settings")) {
@@ -183,8 +217,29 @@ window.addEventListener("hashchange", () => {
   }
 });
 
+// 點 ManorCloud 回到 My files；在帳號設定頁時網址可能沒有改變，所以自己處理
+brand.addEventListener("click", (event) => {
+  if (currentUser !== null && screen !== "change") {
+    event.preventDefault();
+    go(currentUser, folderHref(null));
+  }
+});
+
+// 側欄的 My files：同樣處理網址沒有改變的情況（例如從帳號設定頁回來）
+sidebar.addEventListener("click", (event) => {
+  const target = event.target;
+  if (
+    currentUser !== null &&
+    target instanceof Element &&
+    target.closest(".nav-link") !== null
+  ) {
+    event.preventDefault();
+    go(currentUser, folderHref(null));
+  }
+});
+
 // 檔案被拖放到上傳區域以外的地方時，瀏覽器預設會直接開啟那個檔案、離開 ManorCloud。
-// 在整個視窗攔截預設行為；只有上傳區域（.dropzone）會實際處理放下的檔案。
+// 在整個視窗攔截預設行為；只有檔案頁面的內容區會實際處理放下的檔案。
 window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => event.preventDefault());
 

@@ -4,39 +4,22 @@
 // 這個模組從結構上保證這件事：字串子節點一律變成文字節點，
 // 整個前端只要都用 h() 建立畫面，就不需要在每個地方記得「這裡要用 textContent」。
 // 請勿在其他地方使用 innerHTML、outerHTML、insertAdjacentHTML。
+// （SVG 圖示由 icons.ts 以 createElementNS 建立，同樣不經過 HTML 解析。）
 
 import { isSafeUrl } from "./url.js";
 
 /** 子節點：字串與數字變成文字節點；陣列會被展開；null、undefined、false 被忽略 */
-export type Child =
-  | Node
-  | string
-  | number
-  | null
-  | undefined
-  | false
-  | readonly Child[];
+export type Child = Node | string | number | null | undefined | false | readonly Child[];
 
 export type EventHandler = (event: Event) => void;
 
 /** 屬性值：`onXxx` 必須是函式，其他屬性不能是函式 */
-export type PropValue =
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | EventHandler;
+export type PropValue = string | number | boolean | null | undefined | EventHandler;
 
 export type Props = Readonly<Record<string, PropValue>>;
 
 /** 值是網址的屬性：只接受 http、https、blob */
-const URL_ATTRIBUTES: ReadonlySet<string> = new Set([
-  "href",
-  "src",
-  "action",
-  "formaction",
-]);
+const URL_ATTRIBUTES: ReadonlySet<string> = new Set(["href", "src", "action", "formaction"]);
 
 /** 會把字串當成 HTML 解析的屬性，一律禁止 */
 const FORBIDDEN_ATTRIBUTES: ReadonlySet<string> = new Set(["srcdoc"]);
@@ -45,7 +28,7 @@ const FORBIDDEN_ATTRIBUTES: ReadonlySet<string> = new Set(["srcdoc"]);
  * 建立一個元素。
  *
  * @example
- * h("p", { class: "note" }, "檔名：", h("strong", {}, file.name))
+ * h("p", { class: "note" }, "File: ", h("strong", {}, file.name))
  */
 export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -65,17 +48,17 @@ export function h<K extends keyof HTMLElementTagNameMap>(
       // 事件只能是函式。傳入字串（例如 onclick: "..."）會被 CSP 擋下而默默失效，
       // 與其讓按鈕點了沒反應，不如在開發時就報錯。
       if (typeof value !== "function") {
-        throw new TypeError(`事件屬性 ${key} 必須是函式`);
+        throw new TypeError(`event attribute ${key} must be a function`);
       }
       el.addEventListener(name.slice(2), value);
       continue;
     }
 
     if (typeof value === "function") {
-      throw new TypeError(`${key} 不是事件屬性，不能傳入函式`);
+      throw new TypeError(`${key} is not an event attribute and cannot be a function`);
     }
     if (FORBIDDEN_ATTRIBUTES.has(name)) {
-      throw new TypeError(`不可設定 ${key} 屬性`);
+      throw new TypeError(`the ${key} attribute is not allowed`);
     }
     if (name === "class") {
       el.className = String(value);
@@ -85,7 +68,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(
     const text = value === true ? "" : String(value);
     // CSP 也會擋下 javascript: 網址，這裡是第二道防線
     if (URL_ATTRIBUTES.has(name) && !isSafeUrl(text, document.baseURI)) {
-      throw new TypeError(`${key} 只接受 http、https 或 blob 網址`);
+      throw new TypeError(`${key} only accepts http, https or blob URLs`);
     }
     el.setAttribute(key, text);
   }

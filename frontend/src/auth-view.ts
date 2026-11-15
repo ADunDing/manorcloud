@@ -12,7 +12,7 @@ import type { User } from "./types.js";
 const USERNAME_MIN = 3;
 const USERNAME_MAX = 32;
 const USERNAME_PATTERN = "[a-z0-9_\\-]+"; // pattern 屬性會自動比對整個字串
-const USERNAME_HINT = `${USERNAME_MIN}～${USERNAME_MAX} 個字元，只能使用小寫英文、數字、底線與連字號`;
+const USERNAME_HINT = `${USERNAME_MIN}–${USERNAME_MAX} characters: lowercase letters, digits, underscores and hyphens`;
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 128;
 
@@ -47,17 +47,17 @@ export function renderLogin(
     maxlength: PASSWORD_MAX,
   });
   const errorBox = errorContainer();
-  const submitButton = h("button", { type: "submit" }, "登入");
+  const submitButton = h("button", { type: "submit" }, "Log in");
 
   // method="post"：萬一 JS 沒有載入、瀏覽器以原生方式送出表單，
   // 密碼也不會出現在網址裡（預設的 GET 會把它放進網址、瀏覽紀錄與伺服器 log）
   const form = h(
     "form",
     { method: "post", class: "auth-form" },
-    h("h1", {}, "登入 ManorCloud"),
+    h("h1", {}, "Log in to ManorCloud"),
     notice ? h("p", { class: "notice", role: "status" }, notice) : null,
-    labeled("帳號", usernameInput),
-    labeled("密碼", passwordInput),
+    labeled("Username", usernameInput),
+    labeled("Password", passwordInput),
     errorBox,
     submitButton,
   );
@@ -144,7 +144,7 @@ export function renderChangeCredentials(
     autocomplete: "new-password",
     minlength: PASSWORD_MIN,
     maxlength: PASSWORD_MAX,
-    placeholder: forced ? undefined : "不修改請留空",
+    placeholder: forced ? undefined : "Leave empty to keep your password",
   });
   const confirmInput = h("input", {
     name: "confirm_password",
@@ -154,46 +154,34 @@ export function renderChangeCredentials(
     maxlength: PASSWORD_MAX,
   });
   const errorBox = errorContainer();
-  const submitButton = h(
-    "button",
-    { type: "submit" },
-    forced ? "完成設定" : "儲存",
-  );
+  const submitButton = h("button", { type: "submit" }, forced ? "Finish setup" : "Save changes");
 
   const form = h(
     "form",
     { method: "post", class: "auth-form" },
-    h("h1", {}, forced ? "設定你的帳號" : "帳號設定"),
+    h("h1", {}, forced ? "Set up your account" : "Account settings"),
     forced
       ? h(
           "p",
           { class: "notice", role: "status" },
-          "你目前使用的是臨時密碼。請設定自己的密碼，也可以順便修改帳號名稱。完成後臨時密碼即失效。",
+          "You're using a temporary password. Choose your own password; you can also change your username. The temporary password stops working afterwards.",
         )
       : null,
+    labeled("Username", usernameInput, h("span", { class: "hint" }, USERNAME_HINT)),
+    labeled(forced ? "Current password (the temporary one)" : "Current password", currentInput),
     labeled(
-      "帳號名稱",
-      usernameInput,
-      h("span", { class: "hint" }, USERNAME_HINT),
-    ),
-    labeled(forced ? "目前的密碼（臨時密碼）" : "目前的密碼", currentInput),
-    labeled(
-      "新密碼",
+      "New password",
       newInput,
-      h("span", { class: "hint" }, `${PASSWORD_MIN}～${PASSWORD_MAX} 個字元`),
+      h("span", { class: "hint" }, `${PASSWORD_MIN}–${PASSWORD_MAX} characters`),
     ),
-    labeled("確認新密碼", confirmInput),
+    labeled("Confirm new password", confirmInput),
     errorBox,
     h(
       "div",
       { class: "actions" },
       submitButton,
       onCancel && !forced
-        ? h(
-            "button",
-            { type: "button", class: "secondary", onClick: onCancel },
-            "取消",
-          )
+        ? h("button", { type: "button", class: "secondary", onClick: onCancel }, "Cancel")
         : null,
     ),
   );
@@ -207,7 +195,7 @@ export function renderChangeCredentials(
       const newPassword = textField(data, "new_password");
 
       if (newPassword !== textField(data, "confirm_password")) {
-        throw new FormError("兩次輸入的新密碼不一致", confirmInput);
+        throw new FormError("The new passwords don't match", confirmInput);
       }
 
       // 只送出有改變的欄位
@@ -221,7 +209,7 @@ export function renderChangeCredentials(
         body.new_password = newPassword;
       }
       if (!("new_username" in body) && !("new_password" in body)) {
-        throw new FormError("沒有要修改的內容", usernameInput);
+        throw new FormError("Nothing to change", usernameInput);
       }
 
       const updated = await api.post<User>("/api/me/credentials", body);
@@ -237,10 +225,7 @@ export function renderChangeCredentials(
       // 依錯誤原因把游標放到最需要修改的欄位
       if (error instanceof FormError) {
         error.field.focus();
-      } else if (
-        error instanceof ApiError &&
-        error.code === "wrong_current_password"
-      ) {
+      } else if (error instanceof ApiError && error.code === "wrong_current_password") {
         currentInput.focus();
       } else if (error instanceof ApiError && error.status === 409) {
         usernameInput.focus();
@@ -292,7 +277,7 @@ function bindSubmit(
 
     busy = true;
     button.disabled = true;
-    button.textContent = "處理中…";
+    button.textContent = "Working…";
 
     void (async () => {
       try {
@@ -310,11 +295,7 @@ function bindSubmit(
 }
 
 /** <input> 包在 <label> 裡：點文字就能聚焦，螢幕閱讀器也知道它的名稱 */
-function labeled(
-  text: string,
-  input: HTMLInputElement,
-  hint?: HTMLElement,
-): HTMLLabelElement {
+function labeled(text: string, input: HTMLInputElement, hint?: HTMLElement): HTMLLabelElement {
   return h("label", {}, text, input, hint ?? null);
 }
 
@@ -327,7 +308,7 @@ function messageOf(error: unknown): string {
   if (error instanceof ApiError || error instanceof FormError) {
     return error.message;
   }
-  return "發生未預期的錯誤";
+  return "Something went wrong";
 }
 
 /**

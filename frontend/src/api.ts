@@ -100,7 +100,7 @@ async function request<T>(
     response = await fetch(path, init);
   } catch {
     // fetch 只有在網路層失敗時才會拋出（伺服器沒開、斷線），HTTP 錯誤不會
-    throw new ApiError(0, "無法連線到伺服器");
+    throw new ApiError(0, "Can't reach the server");
   }
 
   const body = await readBody(response);
@@ -134,31 +134,22 @@ async function readBody(response: Response): Promise<unknown> {
  * 我們自己的錯誤是 {"error": "...", "code": "..."}；axum 內建的錯誤（400、415、422）目前是純文字，
  * 兩種都要能處理，直到後端統一格式為止。
  */
-function parseError(
-  status: number,
-  body: unknown,
-): { message: string; code: ErrorCode | null } {
+function parseError(status: number, body: unknown): { message: string; code: ErrorCode | null } {
   if (typeof body === "object" && body !== null) {
     const message =
-      "error" in body && typeof body.error === "string"
-        ? body.error
-        : `請求失敗（${status}）`;
+      "error" in body && typeof body.error === "string" ? body.error : `Request failed (${status})`;
     // 代碼的型別相信伺服器；未知的代碼仍會原樣保留，判斷時比對不到而已
-    const code =
-      "code" in body && typeof body.code === "string"
-        ? (body.code as ErrorCode)
-        : null;
+    const code = "code" in body && typeof body.code === "string" ? (body.code as ErrorCode) : null;
     return { message, code };
   }
   if (typeof body === "string" && body.trim() !== "") {
     return { message: body.trim(), code: null };
   }
-  return { message: `請求失敗（${status}）`, code: null };
+  return { message: `Request failed (${status})`, code: null };
 }
 
 export const api = {
-  get: <T>(path: string, options?: RequestOptions) =>
-    request<T>("GET", path, undefined, options),
+  get: <T>(path: string, options?: RequestOptions) => request<T>("GET", path, undefined, options),
 
   post: <T>(path: string, json?: unknown, options?: RequestOptions) =>
     request<T>("POST", path, json, options),

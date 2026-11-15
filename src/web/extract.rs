@@ -23,7 +23,7 @@ use super::{
 use crate::{auth, db::session};
 
 /// 未登入時統一的訊息：不區分是沒帶 Cookie 還是 session 失效
-const NOT_LOGGED_IN: &str = "尚未登入或登入已過期";
+const NOT_LOGGED_IN: &str = "You're not logged in, or your session has expired";
 
 /// 已登入且未停用的使用者，包含「必須修改密碼」的狀態。
 ///

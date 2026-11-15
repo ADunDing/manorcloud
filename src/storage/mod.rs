@@ -9,6 +9,7 @@
 
 mod temp;
 
+pub mod archive;
 pub mod resumable;
 
 pub use temp::{DEFAULT_MAX_UPLOAD_BYTES, StorageError, TempBlob};
@@ -17,6 +18,8 @@ use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use tokio::io::AsyncReadExt;
 
 /// storage_key 的長度：128 位元以小寫 hex 編碼為 32 個字元
 pub const KEY_LEN: usize = 32;
@@ -29,6 +32,9 @@ const BLOBS_DIR: &str = "blobs";
 /// 分段上傳的暫存檔目錄。與 tmp/ 分開：垃圾回收會刪除 tmp/ 中超過 24 小時的檔案，
 /// 而分段上傳的暫存檔只要還有進度，就必須保留
 const UPLOADS_DIR: &str = "uploads";
+
+/// 複製 blob 時每次讀取的大小：固定的一小塊，記憶體用量與檔案大小無關
+const COPY_CHUNK_BYTES: usize = 256 * 1024;
 
 /// 啟動時呼叫：建立 `tmp/` 與 `blobs/`，並讓它們在 `data_dir` 中的紀錄落盤。
 ///
@@ -73,6 +79,33 @@ pub async fn remove_blob(data_dir: &Path, key: &str) -> io::Result<()> {
     let path = blob_path(data_dir, key)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid storage key"))?;
     tokio::fs::remove_file(path).await
+}
+
+/// 把一個 blob 的內容複製成新的 blob，回傳新的 storage_key 與大小。
+///
+/// 經過 TempBlob：內容先寫進 tmp/ 的暫存檔並落盤，才原子地搬到正式位置，
+/// 與上傳完全相同的保證。中途失敗或被取消時，暫存檔由 TempBlob 的 Drop 清掉。
+///
+/// 真的複製一份，而不是讓兩筆紀錄共用同一個 blob：共用就必須計算引用次數，
+/// 刪除與垃圾回收都要跟著改，任何一處算錯都會刪掉別人還在用的內容。
+pub async fn copy_blob(data_dir: &Path, key: &str) -> Result<(String, u64), StorageError> {
+    let source = blob_path(data_dir, key).ok_or(StorageError::InvalidKey)?;
+    let mut input = tokio::fs::File::open(&source).await?;
+    // 複製的大小由來源決定，上傳上限不適用（來源本身已經通過了上限）
+    let mut blob = TempBlob::create(data_dir, u64::MAX).await?;
+
+    let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
+    loop {
+        let read = input.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        blob.write_chunk(&buffer[..read]).await?;
+    }
+
+    let new_key = generate_storage_key();
+    let size = blob.persist(&new_key).await?;
+    Ok((new_key, size))
 }
 
 /// 完成檔案的根目錄：`{data_dir}/blobs`
@@ -130,6 +163,34 @@ pub fn blob_path(data_dir: &Path, key: &str) -> Option<PathBuf> {
     // 已驗證全為 ASCII，以位元組切片是安全的
     let shard = &key[..2];
     Some(data_dir.join(BLOBS_DIR).join(shard).join(key))
+}
+
+/// 檔案系統的容量（位元組）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSpace {
+    pub total: u64,
+    /// 一般使用者可以使用的空間（不含保留給 root 的部分），與 available_bytes 相同
+    pub available: u64,
+}
+
+/// 路徑所在檔案系統的總容量與可用空間，給畫面上的容量顯示
+// statvfs 欄位的型別依平台而不同（u32 或 u64），一律轉成 u64；在 u64 的平台上 clippy 會說轉換多餘
+#[allow(clippy::useless_conversion)]
+pub fn disk_space(path: &Path) -> io::Result<DiskSpace> {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: c_path 是以 NUL 結尾的有效路徑；stat 指向足夠大小的記憶體，成功時由 statvfs 填滿
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: rc == 0 代表 statvfs 已經完整寫入 stat
+    let stat = unsafe { stat.assume_init() };
+    let fragment = u64::from(stat.f_frsize);
+    Ok(DiskSpace {
+        total: u64::from(stat.f_blocks).saturating_mul(fragment),
+        available: u64::from(stat.f_bavail).saturating_mul(fragment),
+    })
 }
 
 #[cfg(test)]
@@ -280,5 +341,57 @@ mod tests {
         ] {
             assert!(!is_temp_file_name(name), "{name:?}");
         }
+    }
+
+    #[test]
+    fn disk_space_reports_a_plausible_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let space = disk_space(dir.path()).unwrap();
+        assert!(space.total > 0);
+        assert!(space.available <= space.total);
+    }
+
+    #[test]
+    fn disk_space_of_a_missing_path_is_an_error() {
+        assert!(disk_space(Path::new("/definitely/not/here")).is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_blob_creates_an_independent_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        // 比一次讀取的大小還大，確認分段複製的接縫正確
+        let content: Vec<u8> = (0..COPY_CHUNK_BYTES * 2 + 123)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let mut blob = TempBlob::create(dir.path(), u64::MAX).await.unwrap();
+        blob.write_chunk(&content).await.unwrap();
+        blob.persist(VALID).await.unwrap();
+
+        let (key, size) = copy_blob(dir.path(), VALID).await.unwrap();
+
+        assert_ne!(key, VALID);
+        assert_eq!(size, content.len() as u64);
+        assert_eq!(
+            std::fs::read(blob_path(dir.path(), &key).unwrap()).unwrap(),
+            content
+        );
+        // 刪掉原本的，複本不受影響
+        remove_blob(dir.path(), VALID).await.unwrap();
+        assert!(blob_path(dir.path(), &key).unwrap().exists());
+        // 暫存檔都已搬走或清掉
+        assert_eq!(std::fs::read_dir(tmp_dir(dir.path())).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn copy_blob_of_a_missing_source_fails_without_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        init_dirs(dir.path()).unwrap();
+
+        let result = copy_blob(dir.path(), VALID).await;
+
+        assert!(
+            matches!(result, Err(StorageError::Io(ref e)) if e.kind() == io::ErrorKind::NotFound)
+        );
+        assert_eq!(std::fs::read_dir(tmp_dir(dir.path())).unwrap().count(), 0);
     }
 }

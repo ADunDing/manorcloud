@@ -1,7 +1,13 @@
-// 上傳佇列：依序上傳多個檔案，顯示每個檔案的進度與狀態。
+// 上傳佇列：依序上傳檔案，進度顯示在右下角的面板。
 //
-// 佇列是獨立存在的物件，自己持有一個 DOM 元素。檔案列表每次重新載入都會換掉整個畫面，
-// 但只要把同一個元素再放回去，進度與狀態就會保留（DOM 元素被重新 append 時是搬移，不是複製）。
+// 面板的三種狀態：
+// - 上傳中：標題「Uploading… (23%)」，總進度、速度、剩餘時間，以及每個檔案
+// - 全部成功：標題「Uploads complete」，幾秒後自動消失
+// - 有失敗：標題「1 upload failed」，失敗的項目留著顯示原因，使用者按關閉才消失
+//   （失敗的訊息如果一閃即逝，使用者會以為檔案已經傳好了）
+// 使用者取消的檔案直接從清單移除，不算失敗。
+//
+// 佇列是獨立存在的物件，自己持有面板的元素，切換資料夾時面板與進度都保留。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import {
@@ -9,36 +15,68 @@ import {
   isSameFile,
   startChunkedUpload,
   type UploadInfo,
+  whenDiscarded,
 } from "./chunked-upload.js";
 import { h } from "./dom.js";
-import { formatSize } from "./format.js";
+import { formatDuration, formatSize } from "./format.js";
+import { icon } from "./icons.js";
 import { startUpload, UploadCancelled, type UploadHandle } from "./upload.js";
 
-type Status = "pending" | "uploading" | "done" | "failed" | "cancelled";
+type Status = "pending" | "uploading" | "done" | "failed";
 
-/** 佇列中的一個檔案。畫面上的元素也存在這裡，更新進度時只改這一列，不重繪整個佇列 */
+/** 佇列中的一個檔案。畫面上的元素也存在這裡，更新進度時只改這一列 */
 interface Entry {
   readonly file: File;
-  /** 上傳的目標資料夾：使用者中途切換到別的資料夾，檔案仍然傳到原本的地方 */
+  /** 上傳的目標資料夾：使用者中途切換資料夾，檔案仍然傳到原本的地方 */
   readonly folderId: number | null;
-  /** 要續傳的伺服器上的上傳（從未完成的清單按「繼續」時） */
+  /** 要續傳的伺服器上的上傳（從未完成的清單按 Resume 時） */
   readonly resume: UploadInfo | null;
   status: Status;
   handle: UploadHandle | null;
   /** 分段上傳的編號：未完成的清單用它排除這個分頁正在傳的上傳 */
   uploadId: string | null;
+  /** 已傳的比例，0～1 */
+  fraction: number;
   readonly row: HTMLElement;
-  readonly bar: HTMLProgressElement;
+  readonly fill: HTMLElement;
   readonly statusText: HTMLElement;
+  readonly sizeText: HTMLElement;
   readonly cancelButton: HTMLButtonElement;
 }
 
+const MINIMIZED_KEY = "manorcloud.uploads.minimized";
+/** 全部成功後，面板停留多久才消失 */
+const HIDE_AFTER_MS = 3000;
+/** 速度的平滑程度：新的量測佔多少比重。數字越小，顯示的速度越不會跳動 */
+const SPEED_SMOOTHING = 0.3;
+
 export class UploadQueue {
-  /** 佇列的畫面，由檔案瀏覽畫面每次重繪時放回去 */
+  /** 面板，由檔案瀏覽畫面放進右下角 */
   readonly element: HTMLElement;
+  private readonly title: HTMLElement;
+  private readonly count: HTMLElement;
+  private readonly closeButton: HTMLButtonElement;
+  private readonly toggleButton: HTMLButtonElement;
+  private readonly body: HTMLElement;
+  private readonly summary: HTMLElement;
+  private readonly summaryFill: HTMLElement;
+  private readonly statBytes: HTMLElement;
+  private readonly statSpeed: HTMLElement;
+  private readonly statLeft: HTMLElement;
   private readonly list: HTMLElement;
   private entries: Entry[] = [];
+  /**
+   * 已取消、伺服器正在刪除的分段上傳。刪除要一點時間：這段期間它還在伺服器的清單裡，
+   * 但不該被顯示成「未完成」，否則使用者會以為取消的檔案還可以續傳，過一會兒它又自己消失
+   */
+  private readonly cancelledIds = new Set<string>();
   private running = false;
+  private minimized = loadFlag(MINIMIZED_KEY);
+  private hideTimer: number | undefined;
+  private ticker: number | undefined;
+  private lastSample: { time: number; bytes: number } | null = null;
+  /** 每秒位元組數；0 代表還不知道 */
+  private speed = 0;
 
   /**
    * @param onUploaded 一個檔案上傳完成時呼叫，傳入它的目標資料夾（用來決定要不要重新載入列表）
@@ -50,27 +88,49 @@ export class UploadQueue {
     private readonly uploadLimit: () => Promise<number | null>,
     private readonly onChunkedSettled: () => void,
   ) {
-    this.list = h("ul", { class: "upload-list" });
+    this.title = h("strong", { class: "panel-title" });
+    this.count = h("span", { class: "panel-count" });
+    this.closeButton = h(
+      "button",
+      { type: "button", class: "round-button", onClick: () => this.closeOrCancel() },
+      icon("close", 16),
+    );
+    this.toggleButton = h(
+      "button",
+      {
+        type: "button",
+        class: "round-button toggle",
+        onClick: () => this.setMinimized(!this.minimized),
+      },
+      icon("chevronUp"),
+    );
+
+    this.summaryFill = h("div", { class: "bar-fill" });
+    this.statBytes = h("span", {});
+    this.statSpeed = h("span", {});
+    this.statLeft = h("span", {});
+    this.summary = h(
+      "div",
+      { class: "panel-summary" },
+      h("div", { class: "bar" }, this.summaryFill),
+      h("div", { class: "panel-stats" }, this.statBytes, this.statSpeed, this.statLeft),
+    );
+    this.list = h("ul", { class: "panel-list" });
+    this.body = h("div", { class: "panel-body" }, this.summary, this.list);
+
     this.element = h(
       "section",
-      { class: "upload-queue", "aria-label": "上傳" },
+      { class: "panel", "aria-label": "Uploads", hidden: true },
       h(
         "div",
-        { class: "upload-header" },
-        h("strong", {}, "上傳"),
-        h(
-          "button",
-          {
-            type: "button",
-            class: "link",
-            onClick: () => this.clearFinished(),
-          },
-          "清除已完成",
-        ),
+        { class: "panel-header" },
+        h("div", { class: "panel-heading" }, this.title, " ", this.count),
+        this.closeButton,
+        this.toggleButton,
       ),
-      this.list,
+      this.body,
     );
-    this.element.hidden = true;
+    this.applyMinimized();
   }
 
   /** 加入檔案並開始依序上傳 */
@@ -91,24 +151,21 @@ export class UploadQueue {
 
   /** 是否還有檔案正在上傳或等待上傳 */
   isBusy(): boolean {
-    return this.entries.some(
-      (entry) => entry.status === "pending" || entry.status === "uploading",
-    );
+    return this.entries.some(isActive);
   }
 
-  /** 這個分頁正在傳、或等待續傳的分段上傳編號 */
+  /** 這個分頁正在傳、等待續傳、或剛取消還在刪除中的分段上傳編號：未完成的清單不顯示它們 */
   activeUploadIds(): Set<string> {
-    const ids = new Set<string>();
+    const ids = new Set<string>(this.cancelledIds);
     for (const entry of this.entries) {
-      const active = entry.status === "pending" || entry.status === "uploading";
-      if (active && entry.uploadId !== null) {
+      if (isActive(entry) && entry.uploadId !== null) {
         ids.add(entry.uploadId);
       }
     }
     return ids;
   }
 
-  // ---------- 執行 ----------
+  // ==================== 執行 ====================
 
   /**
    * 依序上傳：一次只傳一個。樹莓派的 CPU 與磁碟寫入速度有限，
@@ -136,24 +193,19 @@ export class UploadQueue {
     // 送出前先檢查大小：不必傳到一半才收到 413。後端的檢查仍是唯一的權威
     const limit = await this.uploadLimit();
     if (limit !== null && entry.file.size > limit) {
-      this.setStatus(entry, "failed", `超過大小上限（${formatSize(limit)}）`);
+      this.setStatus(entry, "failed", `Larger than the ${formatSize(limit)} limit`);
       return;
     }
 
-    this.setStatus(entry, "uploading", "上傳中 0%");
-    const onProgress = (fraction: number): void => {
-      entry.bar.value = fraction;
-      entry.statusText.textContent = `上傳中 ${Math.floor(fraction * 100)}%`;
-    };
+    this.setStatus(entry, "uploading", "Uploading 0%");
+    const onProgress = (fraction: number): void => this.setProgress(entry, fraction);
     // 重試等提示暫時取代進度文字；清除時恢復顯示目前的百分比
     const onNotice = (message: string | null): void => {
-      entry.statusText.textContent =
-        message ?? `上傳中 ${Math.floor(entry.bar.value * 100)}%`;
+      entry.statusText.textContent = message ?? progressText(entry.fraction);
     };
 
     // 大檔案分段上傳：斷線後自動從中斷處繼續；小檔案一次送出
-    const chunked =
-      entry.resume !== null || entry.file.size > CHUNKED_THRESHOLD;
+    const chunked = entry.resume !== null || entry.file.size > CHUNKED_THRESHOLD;
     if (chunked) {
       // 重新整理後把同一個檔案再拖進同一個資料夾：接著伺服器上未完成的上傳繼續
       const resume = entry.resume ?? (await this.findResumable(entry));
@@ -178,18 +230,15 @@ export class UploadQueue {
 
     try {
       await entry.handle.done;
-      entry.bar.value = 1;
-      this.setStatus(entry, "done", "完成");
+      this.setProgress(entry, 1);
+      this.setStatus(entry, "done", "Done");
       this.onUploaded(entry.folderId);
     } catch (error) {
       if (error instanceof UploadCancelled) {
-        this.setStatus(entry, "cancelled", "已取消");
+        this.remove(entry);
+        this.hideUntilDiscarded(entry.uploadId);
       } else {
-        this.setStatus(
-          entry,
-          "failed",
-          error instanceof ApiError ? error.message : "上傳失敗",
-        );
+        this.setStatus(entry, "failed", error instanceof ApiError ? error.message : "Upload failed");
         // 登入失效或必須修改密碼：後面的檔案也一定會失敗，全部取消
         if (isHandledGlobally(error)) {
           this.cancelPending();
@@ -224,53 +273,83 @@ export class UploadQueue {
     }
   }
 
+  // ==================== 取消與關閉 ====================
+
   private cancel(entry: Entry): void {
-    if (entry.status === "uploading") {
-      if (entry.handle !== null) {
-        // 中斷連線；結果由 uploadOne 的 catch 處理
-        entry.handle.cancel();
-      } else {
-        // 還在查詢可續傳的上傳，沒有可以中斷的請求：直接標記，uploadOne 查詢結束後會停下
-        this.setStatus(entry, "cancelled", "已取消");
-      }
-    } else if (entry.status === "pending") {
-      this.setStatus(entry, "cancelled", "已取消");
+    if (entry.status === "uploading" && entry.handle !== null) {
+      // 中斷連線；結果由 uploadOne 的 catch 處理（從清單移除）
+      entry.handle.cancel();
+    } else if (isActive(entry)) {
+      // 等待中，或還在查詢可續傳的上傳：直接移除，uploadOne 看到狀態變了就會停下
+      entry.status = "failed";
+      this.remove(entry);
     }
+  }
+
+  /** 取消的分段上傳：伺服器確認刪除之前不顯示在未完成的清單，刪除結束後再更新清單 */
+  private hideUntilDiscarded(id: string | null): void {
+    if (id === null) {
+      return;
+    }
+    this.cancelledIds.add(id);
+    void whenDiscarded(id).then(() => {
+      this.cancelledIds.delete(id);
+      this.onChunkedSettled();
+    });
   }
 
   private cancelPending(): void {
-    for (const entry of this.entries) {
+    for (const entry of [...this.entries]) {
       if (entry.status === "pending") {
-        this.setStatus(entry, "cancelled", "已取消");
+        this.cancel(entry);
       }
     }
   }
 
-  private clearFinished(): void {
-    this.entries = this.entries.filter(
-      (entry) => entry.status === "pending" || entry.status === "uploading",
-    );
+  /** 上傳中按 ⓧ：全部取消。只剩失敗的項目時按 ⓧ：關閉面板 */
+  private closeOrCancel(): void {
+    if (this.isBusy()) {
+      for (const entry of [...this.entries]) {
+        this.cancel(entry);
+      }
+      return;
+    }
+    this.entries = [];
     this.renderList();
   }
 
-  // ---------- 畫面 ----------
+  private remove(entry: Entry): void {
+    this.entries = this.entries.filter((other) => other !== entry);
+    this.renderList();
+  }
 
-  private createEntry(
-    file: File,
-    folderId: number | null,
-    resume: UploadInfo | null,
-  ): Entry {
-    const bar = h("progress", { max: 1, value: 0 });
-    const statusText = h("span", { class: "upload-status" }, "等待中");
-    const cancelButton = h("button", { type: "button", class: "link" }, "取消");
+  // ==================== 畫面 ====================
+
+  private createEntry(file: File, folderId: number | null, resume: UploadInfo | null): Entry {
+    const fill = h("div", { class: "bar-fill" });
+    const statusText = h("span", { class: "item-status" }, "Waiting");
+    const sizeText = h("span", { class: "item-size" }, formatSize(file.size));
+    const cancelButton = h(
+      "button",
+      {
+        type: "button",
+        class: "icon-button small",
+        "aria-label": `Cancel ${file.name}`,
+        title: "Cancel",
+      },
+      icon("close", 16),
+    );
     const row = h(
       "li",
-      {},
-      h("span", { class: "upload-name" }, file.name),
-      h("span", { class: "muted" }, formatSize(file.size)),
-      bar,
-      statusText,
-      cancelButton,
+      { class: "panel-item", "data-status": "pending" },
+      h(
+        "div",
+        { class: "item-line" },
+        h("span", { class: "item-name", title: file.name }, file.name),
+        statusText,
+        cancelButton,
+      ),
+      h("div", { class: "item-line" }, h("div", { class: "bar" }, fill), sizeText),
     );
 
     const entry: Entry = {
@@ -279,11 +358,13 @@ export class UploadQueue {
       resume,
       status: "pending",
       handle: null,
-      // 續傳的編號一開始就知道：等待中時清單就不會重複顯示它
+      // 續傳的編號一開始就知道：等待中時未完成的清單就不會重複顯示它
       uploadId: resume?.id ?? null,
+      fraction: 0,
       row,
-      bar,
+      fill,
       statusText,
+      sizeText,
       cancelButton,
     };
     cancelButton.addEventListener("click", () => this.cancel(entry));
@@ -294,12 +375,176 @@ export class UploadQueue {
     entry.status = status;
     entry.statusText.textContent = text;
     entry.row.dataset.status = status;
-    // 只有等待中與上傳中可以取消
-    entry.cancelButton.hidden = status !== "pending" && status !== "uploading";
+    entry.cancelButton.hidden = !isActive(entry);
+    entry.fill.classList.toggle("done", status === "done");
+    entry.fill.classList.toggle("failed", status === "failed");
+    this.refresh();
+  }
+
+  private setProgress(entry: Entry, fraction: number): void {
+    entry.fraction = Math.max(0, Math.min(1, fraction));
+    entry.fill.style.width = `${(entry.fraction * 100).toFixed(1)}%`;
+    entry.sizeText.textContent =
+      entry.fraction >= 1
+        ? formatSize(entry.file.size)
+        : `${formatSize(entry.file.size * entry.fraction)} / ${formatSize(entry.file.size)}`;
+    if (entry.status === "uploading") {
+      entry.statusText.textContent = progressText(entry.fraction);
+    }
+    this.refreshSummary();
   }
 
   private renderList(): void {
     this.list.replaceChildren(...this.entries.map((entry) => entry.row));
+    this.refresh();
+  }
+
+  /** 依目前的狀態更新標題、按鈕與總進度，決定面板是否顯示 */
+  private refresh(): void {
+    window.clearTimeout(this.hideTimer);
     this.element.hidden = this.entries.length === 0;
+    if (this.entries.length === 0) {
+      this.stopTicker();
+      return;
+    }
+
+    const active = this.isBusy();
+    const failed = this.entries.filter((entry) => entry.status === "failed").length;
+    this.element.classList.toggle("failed", !active && failed > 0);
+    this.summary.hidden = !active;
+
+    if (active) {
+      this.title.textContent = "Uploading…";
+      this.setButton("Cancel all uploads");
+      this.startTicker();
+    } else if (failed > 0) {
+      this.title.textContent = failed === 1 ? "1 upload failed" : `${failed} uploads failed`;
+      this.count.textContent = "";
+      this.setButton("Close");
+      this.stopTicker();
+    } else {
+      this.title.textContent = "Uploads complete";
+      this.count.textContent = "";
+      this.closeButton.hidden = true;
+      this.stopTicker();
+      // 全部成功：讓使用者看一眼，然後自動消失
+      this.hideTimer = window.setTimeout(() => {
+        this.entries = [];
+        this.renderList();
+      }, HIDE_AFTER_MS);
+    }
+    this.refreshSummary();
+  }
+
+  private setButton(label: string): void {
+    this.closeButton.hidden = false;
+    this.closeButton.setAttribute("aria-label", label);
+    this.closeButton.title = label;
+  }
+
+  /** 總進度：這一批所有檔案（失敗的除外）已傳的位元組 */
+  private refreshSummary(): void {
+    if (!this.isBusy()) {
+      return;
+    }
+    const { done, total } = this.totals();
+    const fraction = total > 0 ? done / total : 0;
+    this.count.textContent = `(${Math.floor(fraction * 100)}%)`;
+    this.summaryFill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    this.statBytes.textContent = `${formatSize(done)} / ${formatSize(total)}`;
+  }
+
+  private totals(): { done: number; total: number } {
+    let done = 0;
+    let total = 0;
+    for (const entry of this.entries) {
+      if (entry.status !== "failed") {
+        total += entry.file.size;
+        done += entry.file.size * entry.fraction;
+      }
+    }
+    return { done, total };
+  }
+
+  // ---------- 速度與剩餘時間 ----------
+
+  /** 上傳中每秒量測一次速度，用移動平均讓數字不要跳動得太厲害 */
+  private startTicker(): void {
+    if (this.ticker !== undefined) {
+      return;
+    }
+    this.lastSample = null;
+    this.speed = 0;
+    this.ticker = window.setInterval(() => this.sample(), 1000);
+  }
+
+  private stopTicker(): void {
+    window.clearInterval(this.ticker);
+    this.ticker = undefined;
+    this.lastSample = null;
+    this.speed = 0;
+    this.statSpeed.textContent = "";
+    this.statLeft.textContent = "";
+  }
+
+  private sample(): void {
+    const now = performance.now();
+    const { done, total } = this.totals();
+    if (this.lastSample !== null) {
+      const seconds = (now - this.lastSample.time) / 1000;
+      const current = seconds > 0 ? Math.max(0, done - this.lastSample.bytes) / seconds : 0;
+      this.speed =
+        this.speed === 0 ? current : this.speed + SPEED_SMOOTHING * (current - this.speed);
+    }
+    this.lastSample = { time: now, bytes: done };
+
+    if (this.speed > 0) {
+      this.statSpeed.textContent = `${formatSize(this.speed)}/s`;
+      this.statLeft.textContent = `About ${formatDuration((total - done) / this.speed)} left`;
+    } else {
+      this.statSpeed.textContent = "";
+      this.statLeft.textContent = "";
+    }
+  }
+
+  // ---------- 縮小 ----------
+
+  private setMinimized(minimized: boolean): void {
+    this.minimized = minimized;
+    saveFlag(MINIMIZED_KEY, minimized);
+    this.applyMinimized();
+  }
+
+  private applyMinimized(): void {
+    this.body.hidden = this.minimized;
+    const label = this.minimized ? "Show uploads" : "Minimize uploads";
+    this.toggleButton.setAttribute("aria-expanded", String(!this.minimized));
+    this.toggleButton.setAttribute("aria-label", label);
+    this.toggleButton.title = label;
+  }
+}
+
+function isActive(entry: Entry): boolean {
+  return entry.status === "pending" || entry.status === "uploading";
+}
+
+function progressText(fraction: number): string {
+  return `Uploading ${Math.floor(fraction * 100)}%`;
+}
+
+/** 讀取記在瀏覽器中的開關；無法使用 localStorage 時視為關閉 */
+export function loadFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveFlag(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // 無法儲存只代表下次回到預設
   }
 }

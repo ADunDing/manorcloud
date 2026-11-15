@@ -6,18 +6,13 @@
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { formatUtcText } from "./format.js";
-import type {
-  CreatedUser,
-  ManagedUser,
-  ResetPasswordResponse,
-  User,
-} from "./types.js";
+import type { CreatedUser, ManagedUser, ResetPasswordResponse, User } from "./types.js";
 
 // 與後端 src/web/auth.rs 的帳號規則一致（同 auth-view.ts）。後端才是唯一的權威
 const USERNAME_MIN = 3;
 const USERNAME_MAX = 32;
 const USERNAME_PATTERN = "[a-z0-9_\\-]+";
-const USERNAME_HINT = `${USERNAME_MIN}～${USERNAME_MAX} 個字元，只能使用小寫英文、數字、底線與連字號`;
+const USERNAME_HINT = `${USERNAME_MIN}–${USERNAME_MAX} characters: lowercase letters, digits, underscores and hyphens`;
 
 /**
  * 在 container 中顯示使用者管理頁。
@@ -25,11 +20,7 @@ const USERNAME_HINT = `${USERNAME_MIN}～${USERNAME_MAX} 個字元，只能使�
  * @param me            目前登入的管理員
  * @param onSelfChanged 修改了自己的角色之後呼叫（例如降級為成員，已經不能再看這一頁）
  */
-export function renderAdmin(
-  container: HTMLElement,
-  me: User,
-  onSelfChanged: () => void,
-): void {
+export function renderAdmin(container: HTMLElement, me: User, onSelfChanged: () => void): void {
   new AdminView(container, me, onSelfChanged).mount();
 }
 
@@ -49,7 +40,7 @@ class AdminView {
 
   mount(): void {
     this.container.replaceChildren(
-      h("h1", { class: "page-title" }, "使用者管理"),
+      h("h1", { class: "page-title" }, "Users"),
       this.noticeSlot,
       this.createForm(),
       this.errorBox,
@@ -62,15 +53,13 @@ class AdminView {
 
   /** 只重新載入列表這一塊，臨時密碼面板保留 */
   private async loadTable(): Promise<void> {
-    this.tableSlot.replaceChildren(h("p", { class: "muted" }, "載入中…"));
+    this.tableSlot.replaceChildren(h("p", { class: "muted" }, "Loading…"));
     try {
       const users = await api.get<ManagedUser[]>("/api/admin/users");
       this.tableSlot.replaceChildren(this.table(users));
     } catch (error) {
       if (!isHandledGlobally(error)) {
-        this.tableSlot.replaceChildren(
-          h("p", { class: "error", role: "alert" }, messageOf(error)),
-        );
+        this.tableSlot.replaceChildren(h("p", { class: "error", role: "alert" }, messageOf(error)));
       }
     }
   }
@@ -78,22 +67,18 @@ class AdminView {
   private table(users: readonly ManagedUser[]): HTMLElement {
     return h(
       "table",
-      { class: "files" },
+      { class: "users" },
       h(
         "thead",
         {},
         h(
           "tr",
           {},
-          h("th", { scope: "col" }, "帳號"),
-          h("th", { scope: "col" }, "角色"),
-          h("th", { scope: "col" }, "狀態"),
-          h("th", { scope: "col" }, "建立時間"),
-          h(
-            "th",
-            { scope: "col" },
-            h("span", { class: "visually-hidden" }, "操作"),
-          ),
+          h("th", { scope: "col" }, "Username"),
+          h("th", { scope: "col" }, "Role"),
+          h("th", { scope: "col" }, "Status"),
+          h("th", { scope: "col" }, "Created"),
+          h("th", { scope: "col" }, h("span", { class: "visually-hidden" }, "Actions")),
         ),
       ),
       h(
@@ -107,28 +92,19 @@ class AdminView {
   private row(user: ManagedUser): HTMLElement {
     const isSelf = user.id === this.me.id;
     const status = user.disabled
-      ? "已停用"
+      ? "Disabled"
       : user.must_change_password
-        ? "待設定密碼"
-        : "使用中";
+        ? "Waiting for first login"
+        : "Active";
 
     return h(
       "tr",
       { class: user.disabled ? "disabled-row" : null },
-      h(
-        "td",
-        { class: "name" },
-        user.username,
-        isSelf ? h("span", { class: "muted" }, "（你）") : null,
-      ),
+      h("td", {}, user.username, isSelf ? h("span", { class: "muted" }, " (you)") : null),
       h(
         "td",
         {},
-        h(
-          "span",
-          { class: `badge ${user.role}` },
-          user.role === "admin" ? "管理員" : "成員",
-        ),
+        h("span", { class: `badge ${user.role}` }, user.role === "admin" ? "Administrator" : "Member"),
       ),
       h("td", {}, status),
       h("td", {}, formatUtcText(user.created_at)),
@@ -137,35 +113,23 @@ class AdminView {
         { class: "actions-cell" },
         h(
           "button",
-          {
-            type: "button",
-            class: "link",
-            onClick: () => this.toggleRole(user, isSelf),
-          },
-          user.role === "admin" ? "取消管理員" : "設為管理員",
+          { type: "button", class: "link", onClick: () => this.toggleRole(user, isSelf) },
+          user.role === "admin" ? "Remove admin" : "Make admin",
         ),
         // 後端不允許停用自己、重設自己的密碼：自己那一列不顯示這兩個按鈕
         isSelf
           ? null
           : h(
               "button",
-              {
-                type: "button",
-                class: "link",
-                onClick: () => this.toggleDisabled(user),
-              },
-              user.disabled ? "啟用" : "停用",
+              { type: "button", class: "link", onClick: () => this.toggleDisabled(user) },
+              user.disabled ? "Enable" : "Disable",
             ),
         isSelf
           ? null
           : h(
               "button",
-              {
-                type: "button",
-                class: "link",
-                onClick: () => this.resetPassword(user),
-              },
-              "重設密碼",
+              { type: "button", class: "link", onClick: () => this.resetPassword(user) },
+              "Reset password",
             ),
       ),
     );
@@ -192,23 +156,17 @@ class AdminView {
     const form = h(
       "form",
       { method: "post", class: "admin-create" },
-      h("label", {}, "新帳號名稱", input),
-      h("button", { type: "submit" }, "建立帳號"),
+      h("label", {}, "New username", input),
+      h("button", { type: "submit" }, "Create user"),
     );
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const username = input.value;
       this.perform(async () => {
-        const created = await api.post<CreatedUser>("/api/admin/users", {
-          username,
-        });
+        const created = await api.post<CreatedUser>("/api/admin/users", { username });
         input.value = "";
-        this.showPassword(
-          created.user.username,
-          created.temporary_password,
-          "建立",
-        );
+        this.showPassword(created.user.username, created.temporary_password, "created");
       });
     });
 
@@ -221,18 +179,16 @@ class AdminView {
     const promote = user.role !== "admin";
     // confirm 的文字是純文字，帳號名稱不會被當成 HTML 解析
     const message = promote
-      ? `確定要讓「${user.username}」成為管理員嗎？管理員可以建立帳號、停用帳號、重設任何人的密碼。`
+      ? `Make ${user.username} an administrator? Administrators can create and disable accounts and reset anyone's password.`
       : isSelf
-        ? "確定要取消自己的管理員身分嗎？取消後將無法再進入這一頁。"
-        : `確定要取消「${user.username}」的管理員身分嗎？`;
+        ? "Remove your own administrator rights? You won't be able to open this page afterwards."
+        : `Remove administrator rights from ${user.username}?`;
     if (!window.confirm(message)) {
       return;
     }
 
     this.perform(async () => {
-      await api.patch(`/api/admin/users/${user.id}`, {
-        role: promote ? "admin" : "member",
-      });
+      await api.patch(`/api/admin/users/${user.id}`, { role: promote ? "admin" : "member" });
       if (isSelf) {
         // 已經不是管理員：交給上層重新決定畫面，不重新載入這個列表（只會得到 403）
         this.onSelfChanged();
@@ -246,20 +202,18 @@ class AdminView {
     if (
       !user.disabled &&
       !window.confirm(
-        `確定要停用「${user.username}」嗎？他將立刻被登出所有裝置，且無法再登入。`,
+        `Disable ${user.username}? They'll be logged out on every device and won't be able to log in.`,
       )
     ) {
       return;
     }
-    this.perform(() =>
-      api.patch(`/api/admin/users/${user.id}`, { disabled: !user.disabled }),
-    );
+    this.perform(() => api.patch(`/api/admin/users/${user.id}`, { disabled: !user.disabled }));
   }
 
   private resetPassword(user: ManagedUser): void {
     if (
       !window.confirm(
-        `確定要重設「${user.username}」的密碼嗎？他將立刻被登出所有裝置，並需要用新的臨時密碼登入。`,
+        `Reset the password of ${user.username}? They'll be logged out on every device and need a new temporary password to log in.`,
       )
     ) {
       return;
@@ -268,7 +222,7 @@ class AdminView {
       const result = await api.post<ResetPasswordResponse>(
         `/api/admin/users/${user.id}/reset-password`,
       );
-      this.showPassword(user.username, result.temporary_password, "重設");
+      this.showPassword(user.username, result.temporary_password, "reset");
     });
   }
 
@@ -303,19 +257,15 @@ class AdminView {
 
   /**
    * 顯示臨時密碼。同時只顯示一組：新的會取代舊的。
-   * 「我已記下，關閉」會先清空值，再把整個面板從 DOM 移除。
+   * 「I've noted it」會先清空值，再把整個面板從 DOM 移除。
    */
-  private showPassword(
-    username: string,
-    password: string,
-    action: "建立" | "重設",
-  ): void {
+  private showPassword(username: string, password: string, action: "created" | "reset"): void {
     const field = h("input", {
       type: "text",
       readonly: true,
       value: password,
       class: "temp-password",
-      "aria-label": `${username} 的臨時密碼`,
+      "aria-label": `Temporary password for ${username}`,
       // 不讓密碼管理器把它當成自己的密碼儲存
       autocomplete: "off",
       spellcheck: "false",
@@ -324,26 +274,19 @@ class AdminView {
 
     const panel = h(
       "div",
-      { class: "notice temp-panel", role: "region", "aria-label": "臨時密碼" },
+      { class: "notice temp-panel", role: "region", "aria-label": "Temporary password" },
       h(
         "p",
         {},
-        `已${action}「`,
+        action === "created" ? "Created " : "Reset the password of ",
         h("strong", {}, username),
-        "」的臨時密碼。這組密碼只會顯示這一次，請現在記下並轉告對方；對方首次登入時必須修改。",
+        ". This temporary password is shown only once: write it down and pass it on. They must change it when they first log in.",
       ),
       h(
         "div",
         { class: "temp-row" },
         field,
-        h(
-          "button",
-          {
-            type: "button",
-            onClick: () => void copyPassword(field, copyStatus),
-          },
-          "複製",
-        ),
+        h("button", { type: "button", onClick: () => void copyPassword(field, copyStatus) }, "Copy"),
         copyStatus,
       ),
       h(
@@ -357,7 +300,7 @@ class AdminView {
             panel.remove();
           },
         },
-        "我已記下，關閉",
+        "I've noted it, close",
       ),
     );
 
@@ -372,23 +315,20 @@ class AdminView {
  * 剪貼簿 API 只在安全環境（HTTPS 或 localhost）可用；用 http://192.168.x.x 連線時不存在。
  * 不可用或失敗時，選取文字並請使用者自己按複製鍵。
  */
-async function copyPassword(
-  field: HTMLInputElement,
-  status: HTMLElement,
-): Promise<void> {
+async function copyPassword(field: HTMLInputElement, status: HTMLElement): Promise<void> {
   field.select();
   if (window.isSecureContext && "clipboard" in navigator) {
     try {
       await navigator.clipboard.writeText(field.value);
-      status.textContent = "已複製";
+      status.textContent = "Copied";
       return;
     } catch {
       // 使用者拒絕權限等情況：退回手動複製
     }
   }
-  status.textContent = "已選取，請按 Ctrl+C（Mac 為 ⌘C）複製";
+  status.textContent = "Selected. Press Ctrl+C (⌘C on a Mac) to copy";
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "發生未預期的錯誤";
+  return error instanceof ApiError ? error.message : "Something went wrong";
 }

@@ -125,11 +125,44 @@ class Control {
   }
 }
 
-/** 通知伺服器刪除上傳，立刻釋放空間。失敗也沒關係：24 小時後由垃圾回收刪除 */
+/** 刪除請求最多嘗試幾次，每次間隔逐漸拉長（總共約 15 秒） */
+const DISCARD_ATTEMPTS = 6;
+
+/** 正在向伺服器刪除的上傳。刪除要一點時間，期間這些上傳不該被當成「未完成」 */
+const discarding = new Map<string, Promise<void>>();
+
+/**
+ * 通知伺服器刪除上傳，立刻釋放空間。
+ *
+ * 取消的當下，伺服器可能還在處理剛被中斷的那一段（握著檔案鎖），刪除會暫時失敗，
+ * 所以隔一下再試。全部失敗也沒關係：24 小時後由垃圾回收刪除。
+ */
 function discard(id: string): void {
-  void fetch(`/api/uploads/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  }).catch(() => undefined);
+  if (discarding.has(id)) {
+    return;
+  }
+  const done = (async () => {
+    for (let attempt = 1; attempt <= DISCARD_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await fetch(`/api/uploads/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        // 已刪除，或早就不存在
+        if (response.ok || response.status === 404) {
+          return;
+        }
+      } catch {
+        // 連不到伺服器：隔一下再試
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+    }
+  })().finally(() => discarding.delete(id));
+  discarding.set(id, done);
+}
+
+/** 這個上傳的刪除結束時完成（已刪除或放棄重試）；沒有在刪除時立刻完成 */
+export function whenDiscarded(id: string): Promise<void> {
+  return discarding.get(id) ?? Promise.resolve();
 }
 
 /** 等待之後可以重試的錯誤：網路或伺服器暫時的問題 */
@@ -147,9 +180,21 @@ function isRetryable(error: unknown): boolean {
 function retryDelay(failures: number): number {
   // 專案開啟了 noUncheckedIndexedAccess：索引取值的結果可能是 undefined，
   // 即使這裡的計算不會超出範圍，也要提供預設值（與陣列最後一個相同）
-  return (
-    RETRY_DELAYS_MS[Math.min(failures, RETRY_DELAYS_MS.length - 1)] ?? 30_000
-  );
+  return RETRY_DELAYS_MS[Math.min(failures, RETRY_DELAYS_MS.length - 1)] ?? 30_000;
+}
+
+/**
+ * 重試前顯示的說明。區分兩種原因，使用者（與除錯時）才知道發生了什麼：
+ * - upload_busy：伺服器還在處理上一次被中斷的請求，握著這個上傳的鎖
+ * - 其他：連不到伺服器或連線中斷
+ */
+function retryNotice(error: unknown, delay: number): string {
+  const seconds = Math.round(delay / 1000);
+  if (error instanceof ApiError && error.code === "upload_busy") {
+    return `The server is still finishing the previous attempt. Retrying in ${seconds} s…`;
+  }
+  const status = error instanceof ApiError && error.status !== 0 ? ` (${error.status})` : "";
+  return `Connection lost${status}. Retrying in ${seconds} s…`;
 }
 
 // ==================== 流程 ====================
@@ -199,9 +244,7 @@ async function sendChunks(
     control.check();
     try {
       if (needsSync) {
-        const status = await api.get<UploadInfo>(
-          `/api/uploads/${encodeURIComponent(info.id)}`,
-        );
+        const status = await api.get<UploadInfo>(`/api/uploads/${encodeURIComponent(info.id)}`);
         offset = status.received;
         needsSync = false;
       }
@@ -212,12 +255,8 @@ async function sendChunks(
 
       const start = offset;
       const end = Math.min(start + CHUNK_SIZE, file.size);
-      offset = await putChunk(
-        info.id,
-        start,
-        file.slice(start, end),
-        control,
-        (loaded) => onProgress((start + loaded) / file.size),
+      offset = await putChunk(info.id, start, file.slice(start, end), control, (loaded) =>
+        onProgress((start + loaded) / file.size),
       );
       failures = 0;
       onNotice(null);
@@ -240,7 +279,7 @@ async function sendChunks(
 
       const delay = retryDelay(failures);
       failures += 1;
-      onNotice(`連線中斷，${Math.round(delay / 1000)} 秒後重試⋯⋯`);
+      onNotice(retryNotice(error, delay));
       await control.sleep(delay);
       // 斷線前伺服器可能已經收到並確認了一部分
       needsSync = true;
@@ -256,15 +295,12 @@ async function complete(
 ): Promise<void> {
   control.check();
   control.completing = true;
-  onNotice("完成中⋯⋯");
+  onNotice("Finishing…");
 
   let failures = 0;
   for (;;) {
     try {
-      await api.post(
-        `/api/uploads/${encodeURIComponent(info.id)}/complete`,
-        {},
-      );
+      await api.post(`/api/uploads/${encodeURIComponent(info.id)}/complete`, {});
       onNotice(null);
       return;
     } catch (error) {
@@ -279,7 +315,7 @@ async function complete(
 
       const delay = retryDelay(failures);
       failures += 1;
-      onNotice(`連線中斷，${Math.round(delay / 1000)} 秒後重試⋯⋯`);
+      onNotice(retryNotice(error, delay));
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -290,7 +326,7 @@ function interrupted(error: unknown): unknown {
   if (error instanceof ApiError && error.status === 0) {
     return new ApiError(
       0,
-      "連線中斷，上傳已暫停。重新選擇同一個檔案即可從中斷處繼續",
+      "Connection lost. The upload is paused: choose the same file again to continue where it stopped",
     );
   }
   return error;
@@ -326,7 +362,7 @@ function putChunk(
         if (typeof received === "number") {
           resolve(received);
         } else {
-          reject(new ApiError(xhr.status, "伺服器的回應格式不正確"));
+          reject(new ApiError(xhr.status, "The server sent an unexpected response"));
         }
       } else {
         // 與 fetch 一樣觸發 401 與「必須修改密碼」的全域處理
@@ -335,11 +371,11 @@ function putChunk(
     });
     xhr.addEventListener("error", () => {
       control.track(null);
-      reject(new ApiError(0, "無法連線到伺服器"));
+      reject(new ApiError(0, "Can't reach the server"));
     });
     xhr.addEventListener("timeout", () => {
       control.track(null);
-      reject(new ApiError(0, "連線逾時"));
+      reject(new ApiError(0, "The connection timed out"));
     });
     xhr.addEventListener("abort", () => {
       control.track(null);

@@ -21,13 +21,17 @@ pub enum NameError {
 impl fmt::Display for NameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg = match self {
-            NameError::Empty => "名稱不能為空".to_string(),
-            NameError::DotName => "名稱不能是 . 或 ..".to_string(),
-            NameError::Separator => "名稱不能包含 / 或 \\".to_string(),
-            NameError::ControlChar => "名稱不能包含控制字元".to_string(),
-            NameError::BidiControl => "名稱不能包含文字方向控制字元".to_string(),
-            NameError::SurroundingWhitespace => "名稱開頭與結尾不能有空白".to_string(),
-            NameError::TooLong => format!("名稱不能超過 {MAX_NAME_BYTES} 位元組"),
+            NameError::Empty => "The name can't be empty".to_string(),
+            NameError::DotName => "The name can't be . or ..".to_string(),
+            NameError::Separator => "The name can\'t contain / or \\".to_string(),
+            NameError::ControlChar => "The name can't contain control characters".to_string(),
+            NameError::BidiControl => {
+                "The name can't contain text-direction control characters".to_string()
+            }
+            NameError::SurroundingWhitespace => {
+                "The name can't start or end with a space".to_string()
+            }
+            NameError::TooLong => format!("The name can't be longer than {MAX_NAME_BYTES} bytes"),
         };
         f.write_str(&msg)
     }

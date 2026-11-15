@@ -1,5 +1,6 @@
-//! 對既有項目（檔案或資料夾）的操作：查詢、刪除、重新命名與搬移。
+//! 對既有項目（檔案或資料夾）的操作：查詢、刪除、重新命名、搬移與複製。
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use axum::{
     Json, Router,
     extract::{Path as UrlPath, State},
     http::StatusCode,
-    routing::delete,
+    routing::{delete, post},
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::SqlitePool;
@@ -20,19 +21,21 @@ use super::{
     state::AppState,
 };
 use crate::{
-    db::files::{self as files_db, UpdateError},
-    files::name::validate_file_name,
-    storage,
+    db::files::{self as files_db, CreateFileError, FileEntry, TreeEntry, UpdateError},
+    files::name::{numbered_name, validate_file_name},
+    storage::{self, StorageError},
 };
 
 /// 「不存在」與「屬於別人」對外一律使用這個訊息
-const ITEM_NOT_FOUND: &str = "找不到項目";
+const ITEM_NOT_FOUND: &str = "Item not found";
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/api/files/{id}",
-        delete(delete_item).patch(patch_item).get(get_item),
-    )
+    Router::new()
+        .route(
+            "/api/files/{id}",
+            delete(delete_item).patch(patch_item).get(get_item),
+        )
+        .route("/api/files/{id}/copy", post(copy_item))
 }
 
 // ==================== 查詢 ====================
@@ -97,17 +100,20 @@ async fn delete_item(
         .await?
         .ok_or_else(item_not_found)?;
 
-    // 資料庫已 commit；逐一刪除 blob，任何一個失敗都不中斷其他的
-    for key in &keys {
-        match storage::remove_blob(&data_dir, key).await {
+    remove_blobs(&data_dir, &keys).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 逐一刪除 blob，任何一個失敗都不中斷其他的；失敗的留給垃圾回收
+async fn remove_blobs(data_dir: &Path, keys: &[String]) {
+    for key in keys {
+        match storage::remove_blob(data_dir, key).await {
             Ok(()) => {}
             // 目標是「blob 不存在」，已經不在就是達成了
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => eprintln!("failed to remove blob {key} (garbage collection will retry): {e}"),
         }
     }
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // ==================== 重新命名與搬移 ====================
@@ -142,7 +148,7 @@ async fn patch_item(
     Json(req): Json<UpdateRequest>,
 ) -> Result<Json<FileResponse>, AppError> {
     if req.name.is_none() && req.parent_id.is_none() {
-        return Err(AppError::BadRequest("沒有要修改的內容".to_string()));
+        return Err(AppError::BadRequest("Nothing to change".to_string()));
     }
 
     // 有給名稱才驗證；Option<Result> 經 transpose 變成 Result<Option>，才能用 ?
@@ -160,10 +166,206 @@ async fn patch_item(
     Ok(Json(entry.into()))
 }
 
+// ==================== 複製 ====================
+
+/// POST 的請求內容
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CopyRequest {
+    /// 目的地資料夾；`null`（或沒有這個欄位）代表根目錄
+    #[serde(default)]
+    parent_id: Option<i64>,
+}
+
+/// POST /api/files/{id}/copy：把檔案或資料夾（連同底下所有內容）複製到另一個資料夾。
+///
+/// - 目的地有同名項目時，最上層的複本自動改名為「名稱 (1)」，與上傳相同
+/// - 資料夾不能複製進它自己或它的子資料夾（會無窮地包含自己）
+/// - 開始前檢查剩餘空間：不夠就直接拒絕，不會複製到一半才失敗
+/// - 每個檔案都真的複製一份內容（見 `storage::copy_blob`）
+///
+/// 複製在獨立的工作中執行：使用者在途中關掉頁面，複製仍會完成或完整地復原，
+/// 不會因為 handler 被取消而留下複製到一半的資料夾。
+async fn copy_item(
+    user: CurrentUser,
+    State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
+    UrlPath(id): UrlPath<i64>,
+    Json(req): Json<CopyRequest>,
+) -> Result<(StatusCode, Json<FileResponse>), AppError> {
+    if let Some(target) = req.parent_id
+        && !files_db::is_owned_folder(&pool, user.id, target).await?
+    {
+        return Err(folder_not_found());
+    }
+
+    // 一條 SQL 取得整棵子樹：之後的複製都依照這個時間點的狀態
+    let tree = files_db::subtree(&pool, user.id, id).await?;
+    let Some(root) = tree.first() else {
+        return Err(item_not_found());
+    };
+
+    if root.kind == "folder"
+        && let Some(target) = req.parent_id
+        && files_db::is_inside(&pool, user.id, root.id, target).await?
+    {
+        return Err(AppError::Conflict(
+            "A folder can't be copied into itself or one of its subfolders".to_string(),
+        ));
+    }
+
+    let needed = tree
+        .iter()
+        .filter_map(|entry| entry.size)
+        .map(|size| u64::try_from(size).unwrap_or(0))
+        .fold(0u64, u64::saturating_add);
+    let available = storage::available_bytes(&data_dir).map_err(AppError::internal)?;
+    if needed > available {
+        return Err(not_enough_space());
+    }
+
+    let task = tokio::spawn(copy_tree(pool, data_dir, user.id, tree, req.parent_id));
+    let copy = task.await.map_err(AppError::internal)??;
+    Ok((StatusCode::CREATED, Json(copy.into())))
+}
+
+/// 複製整棵子樹。失敗時刪掉已經建立的部分：要嘛得到完整的複本，要嘛什麼都沒有
+async fn copy_tree(
+    pool: SqlitePool,
+    data_dir: Arc<Path>,
+    owner: i64,
+    tree: Vec<TreeEntry>,
+    target: Option<i64>,
+) -> Result<FileEntry, AppError> {
+    let mut new_keys = Vec::new();
+    let mut new_root = None;
+    let result = copy_entries(
+        &pool,
+        &data_dir,
+        owner,
+        &tree,
+        target,
+        &mut new_keys,
+        &mut new_root,
+    )
+    .await;
+
+    if result.is_err() {
+        // 先刪資料庫的紀錄，再刪 blob：與刪除項目相同的順序，中途失敗只會留下孤兒 blob
+        if let Some(root) = new_root
+            && let Err(e) = files_db::delete_tree(&pool, owner, root).await
+        {
+            eprintln!("failed to remove a partial copy (item {root}): {e}");
+        }
+        remove_blobs(&data_dir, &new_keys).await;
+    }
+    result
+}
+
+/// 依序建立每個項目的複本。子樹已經依深度排列，父資料夾一定比它的內容先建立
+async fn copy_entries(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    owner: i64,
+    tree: &[TreeEntry],
+    target: Option<i64>,
+    new_keys: &mut Vec<String>,
+    new_root: &mut Option<i64>,
+) -> Result<FileEntry, AppError> {
+    // 原本的編號 → 複本的編號：子項目依此找到它的新父資料夾
+    let mut copies: HashMap<i64, i64> = HashMap::new();
+    let mut root_copy = None;
+
+    for entry in tree {
+        let is_root = entry.depth == 0;
+        let parent = if is_root {
+            target
+        } else {
+            let original = entry
+                .parent_id
+                .ok_or_else(|| AppError::internal("copy: an item inside the tree has no parent"))?;
+            let copied = copies.get(&original).ok_or_else(|| {
+                AppError::internal("copy: the parent folder was not copied first")
+            })?;
+            Some(*copied)
+        };
+
+        let content = if entry.kind == "folder" {
+            None
+        } else {
+            let key = entry.storage_key.as_deref().ok_or_else(|| {
+                AppError::internal(format!("file {} has no storage_key", entry.id))
+            })?;
+            let (new_key, size) = storage::copy_blob(data_dir, key)
+                .await
+                .map_err(copy_storage_error)?;
+            new_keys.push(new_key.clone());
+            Some((new_key, i64::try_from(size).map_err(AppError::internal)?))
+        };
+
+        let created = create_copy(
+            pool,
+            owner,
+            parent,
+            &entry.name,
+            entry.mime.as_deref(),
+            content.as_ref(),
+            is_root,
+        )
+        .await?;
+
+        copies.insert(entry.id, created.id);
+        if is_root {
+            *new_root = Some(created.id);
+            root_copy = Some(created);
+        }
+    }
+
+    root_copy.ok_or_else(item_not_found)
+}
+
+/// 建立一筆複本的紀錄（`content` 為 None 是資料夾）。
+///
+/// 最上層的項目遇到同名時自動改名為「名稱 (1)」、「名稱 (2)」⋯⋯；
+/// 資料夾裡面的項目放進全新建立的資料夾，不會有同名的問題。
+async fn create_copy(
+    pool: &SqlitePool,
+    owner: i64,
+    parent: Option<i64>,
+    name: &str,
+    mime: Option<&str>,
+    content: Option<&(String, i64)>,
+    rename_on_conflict: bool,
+) -> Result<FileEntry, AppError> {
+    let mut candidate = name.to_string();
+    // 編號的型別由 numbered_name 決定；最多嘗試到「名稱 (999)」
+    let mut number = 0;
+    loop {
+        let result = match content {
+            None => files_db::create_folder(pool, owner, parent, &candidate).await,
+            Some((key, size)) => {
+                files_db::create_file(pool, owner, parent, &candidate, *size, mime, key).await
+            }
+        };
+        match result {
+            Ok(entry) => return Ok(entry),
+            Err(CreateFileError::NameConflict) if rename_on_conflict && number < 999 => {
+                number += 1;
+                candidate = numbered_name(name, number);
+            }
+            Err(e) => return Err(create_error(e)),
+        }
+    }
+}
+
 // ==================== 錯誤對應 ====================
 
 fn item_not_found() -> AppError {
     AppError::NotFound(ITEM_NOT_FOUND.to_string())
+}
+
+fn not_enough_space() -> AppError {
+    AppError::InsufficientStorage("Not enough storage space on the server".to_string())
 }
 
 /// 更新失敗的原因 → HTTP 狀態碼。
@@ -172,11 +374,33 @@ fn update_error(e: UpdateError) -> AppError {
     match e {
         UpdateError::NotFound => item_not_found(),
         UpdateError::TargetNotFolder => folder_not_found(),
-        UpdateError::Cycle => {
-            AppError::Conflict("不能把資料夾搬進它自己或它的子資料夾".to_string())
+        UpdateError::Cycle => AppError::Conflict(
+            "A folder can't be moved into itself or one of its subfolders".to_string(),
+        ),
+        UpdateError::NameConflict => {
+            AppError::Conflict("An item with this name already exists".to_string())
         }
-        UpdateError::NameConflict => AppError::Conflict("同名項目已存在".to_string()),
         UpdateError::Db(e) => AppError::internal(e),
+    }
+}
+
+/// 建立複本失敗的原因。目的地在複製途中被刪除時是 ParentNotFolder，與一開始就不存在相同
+fn create_error(e: CreateFileError) -> AppError {
+    match e {
+        CreateFileError::NameConflict => {
+            AppError::Conflict("An item with this name already exists".to_string())
+        }
+        CreateFileError::ParentNotFolder | CreateFileError::ParentNotOwned => folder_not_found(),
+        CreateFileError::Db(e) => AppError::internal(e),
+    }
+}
+
+fn copy_storage_error(e: StorageError) -> AppError {
+    match e {
+        StorageError::Io(ref io_error) if io_error.kind() == io::ErrorKind::StorageFull => {
+            not_enough_space()
+        }
+        e => AppError::internal(e),
     }
 }
 
@@ -199,6 +423,19 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(json.to_string()))
             .unwrap();
+        let (status, _, body) = t.send(req).await;
+        (status, body)
+    }
+
+    async fn copy(t: &TestApp, id: i64, json: &str) -> (StatusCode, Bytes) {
+        let req = request(
+            Method::POST,
+            &format!("/api/files/{id}/copy"),
+            Some(&t.cookie),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json.to_string()))
+        .unwrap();
         let (status, _, body) = t.send(req).await;
         (status, body)
     }
@@ -541,5 +778,122 @@ mod tests {
         let (status, _, _) = t.send(req).await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ==================== 複製 ====================
+
+    #[sqlx::test]
+    async fn copy_file_into_a_folder_is_independent(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let docs = t.make_folder(t.user_id, None, "docs").await;
+        let (id, key) = t.store_file(t.user_id, None, "a.txt", b"hello").await;
+
+        let (status, body) = copy(&t, id, &format!(r#"{{"parent_id":{docs}}}"#)).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        let body = json(&body);
+        assert_eq!(body["name"], "a.txt");
+        assert_eq!(body["parent_id"], docs);
+        assert_eq!(body["size"], 5);
+        assert!(body.get("storage_key").is_none());
+        assert_eq!(t.blob_count(), 2);
+
+        // 刪掉原本的檔案，複本與它的內容仍然存在
+        t.send(empty_request(
+            Method::DELETE,
+            &item_uri(id),
+            Some(&t.cookie),
+        ))
+        .await;
+        assert!(!t.blob_exists(&key));
+        assert_eq!(t.blob_count(), 1);
+        assert_eq!(t.row_count().await, 2);
+    }
+
+    #[sqlx::test]
+    async fn copy_into_the_same_folder_is_renamed(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let (id, _) = t.store_file(t.user_id, None, "a.txt", b"x").await;
+
+        let (_, first) = copy(&t, id, r#"{"parent_id":null}"#).await;
+        let (_, second) = copy(&t, id, "{}").await;
+
+        assert_eq!(json(&first)["name"], "a (1).txt");
+        assert_eq!(json(&second)["name"], "a (2).txt");
+    }
+
+    #[sqlx::test]
+    async fn copy_folder_copies_the_whole_subtree(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        // docs/
+        //   a.txt
+        //   sub/
+        //     b.txt
+        let docs = t.make_folder(t.user_id, None, "docs").await;
+        let sub = t.make_folder(t.user_id, Some(docs), "sub").await;
+        t.store_file(t.user_id, Some(docs), "a.txt", b"a").await;
+        t.store_file(t.user_id, Some(sub), "b.txt", b"b").await;
+
+        let (status, body) = copy(&t, docs, "{}").await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json(&body)["name"], "docs (1)");
+        assert_eq!(json(&body)["kind"], "folder");
+        // 4 筆紀錄變成 8 筆，2 個 blob 變成 4 個
+        assert_eq!(t.row_count().await, 8);
+        assert_eq!(t.blob_count(), 4);
+    }
+
+    #[sqlx::test]
+    async fn copy_folder_into_itself_is_409(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let a = t.make_folder(t.user_id, None, "a").await;
+        let b = t.make_folder(t.user_id, Some(a), "b").await;
+
+        let (into_self, _) = copy(&t, a, &format!(r#"{{"parent_id":{a}}}"#)).await;
+        let (into_child, _) = copy(&t, a, &format!(r#"{{"parent_id":{b}}}"#)).await;
+
+        assert_eq!(into_self, StatusCode::CONFLICT);
+        assert_eq!(into_child, StatusCode::CONFLICT);
+        assert_eq!(t.row_count().await, 2);
+    }
+
+    #[sqlx::test]
+    async fn copy_foreign_and_missing_are_indistinguishable(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let alice = t.other_user("alice").await;
+        let (foreign, _) = t.store_file(alice, None, "secret.txt", b"x").await;
+        let foreign_folder = t.make_folder(alice, None, "secret").await;
+        let (own, _) = t.store_file(t.user_id, None, "a.txt", b"x").await;
+
+        let foreign_item = copy(&t, foreign, "{}").await;
+        let missing_item = copy(&t, 999_999, "{}").await;
+        assert_eq!(foreign_item.0, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_item, missing_item);
+
+        let foreign_target = copy(&t, own, &format!(r#"{{"parent_id":{foreign_folder}}}"#)).await;
+        let missing_target = copy(&t, own, r#"{"parent_id":999999}"#).await;
+        assert_eq!(foreign_target.0, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_target, missing_target);
+
+        // 什麼都沒有被建立
+        assert_eq!(t.blob_count(), 2);
+    }
+
+    #[sqlx::test]
+    async fn copy_with_a_missing_blob_leaves_nothing_behind(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let docs = t.make_folder(t.user_id, None, "docs").await;
+        t.store_file(t.user_id, Some(docs), "a.txt", b"a").await;
+        let (_, broken) = t.store_file(t.user_id, Some(docs), "b.txt", b"b").await;
+        // 模擬資料損壞：第二個檔案的 blob 不見了，複製會在途中失敗
+        std::fs::remove_file(crate::storage::blob_path(t.dir.path(), &broken).unwrap()).unwrap();
+
+        let (status, _) = copy(&t, docs, "{}").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // 已經建立的資料夾與已經複製的 blob 都被復原了
+        assert_eq!(t.row_count().await, 3);
+        assert_eq!(t.blob_count(), 1);
     }
 }

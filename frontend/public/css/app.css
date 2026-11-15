@@ -1,14 +1,28 @@
+/* ManorCloud 的樣式。顏色全部用變數，深色模式只需要換一組值 */
+
 :root {
     --fg: #1f2328;
     --muted: #656d76;
+    --subtle: #8c959f;
     --border: #d0d7de;
+    --border-soft: #eaeef2;
     --error: #cf222e;
+    --success: #1a7f37;
     --accent: #0969da;
+    --accent-strong: #0550ae;
     --accent-fg: #ffffff;
-    --notice-bg: #ddf4ff;
+    --accent-soft: #ddf4ff;
     --bg: #ffffff;
     --bar: #f6f8fa;
+    --overlay: rgba(9, 105, 218, 0.10);
+    --drop-bg: rgba(255, 255, 255, 0.72);
+    --marquee: rgba(9, 105, 218, 0.12);
+    --backdrop: rgba(31, 35, 40, 0.4);
+    --shadow: 0 8px 24px rgba(31, 35, 40, 0.16);
+    --topbar-height: 56px;
+    color-scheme: light;
     font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+    line-height: 1.5;
     color: var(--fg);
     background: var(--bg);
 }
@@ -17,13 +31,23 @@
     :root {
         --fg: #e6edf3;
         --muted: #8d96a0;
+        --subtle: #6e7681;
         --border: #30363d;
+        --border-soft: #21262d;
         --error: #f85149;
+        --success: #3fb950;
         --accent: #2f81f7;
+        --accent-strong: #79c0ff;
         --accent-fg: #ffffff;
-        --notice-bg: #121d2f;
+        --accent-soft: rgba(56, 139, 253, 0.15);
         --bg: #0d1117;
         --bar: #161b22;
+        --overlay: rgba(47, 129, 247, 0.12);
+        --drop-bg: rgba(13, 17, 23, 0.72);
+        --marquee: rgba(47, 129, 247, 0.18);
+        --backdrop: rgba(1, 4, 9, 0.6);
+        --shadow: 0 8px 24px rgba(1, 4, 9, 0.6);
+        color-scheme: dark;
     }
 }
 
@@ -31,32 +55,8 @@ body {
     margin: 0;
 }
 
-/* ---------- 頂部列 ---------- */
-
-.topbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.75rem 1.25rem;
-    background: var(--bar);
-    border-bottom: 1px solid var(--border);
-}
-
-.brand {
-    font-weight: 600;
-}
-
-.user {
-    display: flex;
-    gap: 0.75rem;
-    align-items: center;
-    color: var(--muted);
-}
-
-main {
-    max-width: 960px;
-    margin: 0 auto;
-    padding: 1.25rem;
+[hidden] {
+    display: none !important;
 }
 
 /* ---------- 共用 ---------- */
@@ -78,7 +78,11 @@ main {
     margin: 0;
     padding: 0.5rem 0.75rem;
     border-radius: 6px;
-    background: var(--notice-bg);
+    background: var(--accent-soft);
+}
+
+a {
+    color: var(--accent);
 }
 
 button {
@@ -87,11 +91,16 @@ button {
 }
 
 button:disabled {
-    cursor: progress;
-    opacity: 0.7;
+    cursor: not-allowed;
 }
 
-/* 外觀像連結的按鈕：語意上是動作（帳號設定、登出），所以用 button 而不是 a */
+/* 鍵盤操作時清楚顯示焦點位置 */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* 外觀像連結的按鈕：語意上是動作，所以用 button 而不是 a */
 button.link {
     padding: 0;
     border: none;
@@ -100,11 +109,1054 @@ button.link {
     text-decoration: underline;
 }
 
-/* 鍵盤操作時清楚顯示焦點位置 */
-input:focus-visible,
-button:focus-visible {
+button.primary {
+    padding: 0.4rem 0.8rem;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-weight: 600;
+}
+
+button.secondary {
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+}
+
+/* 畫面上看不到，但螢幕閱讀器會念出來 */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* ---------- 頂部列 ---------- */
+
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    box-sizing: border-box;
+    height: var(--topbar-height);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 0 16px;
+    background: var(--bar);
+    border-bottom: 1px solid var(--border);
+}
+
+.brand {
+    color: var(--fg);
+    font-weight: 600;
+    font-size: 1.125rem;
+    text-decoration: none;
+}
+
+.account {
+    position: relative;
+}
+
+/* 圓形頭像：只顯示名稱的第一個字 */
+.avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+/* ---------- 版面 ---------- */
+
+.shell {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    min-height: calc(100vh - var(--topbar-height));
+}
+
+.sidebar {
+    flex: 0 0 240px;
+    box-sizing: border-box;
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* 內容區：position: relative 讓拖放提示只蓋住這一區；底部留出右下角面板的高度 */
+.content {
+    position: relative;
+    flex: 999 1 560px;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 20px 24px calc(var(--panels-height, 0px) + 24px);
+}
+
+@media (max-width: 720px) {
+    .sidebar {
+        flex-basis: 100%;
+    }
+
+    .content {
+        padding-left: 16px;
+        padding-right: 16px;
+    }
+}
+
+/* ---------- 左側欄 ---------- */
+
+.new-wrap {
+    position: relative;
+}
+
+.new-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 22px 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--bg);
+    box-shadow: 0 1px 3px rgba(31, 35, 40, 0.12);
+    color: var(--fg);
+    font-weight: 600;
+}
+
+.new-button:disabled {
+    color: var(--subtle);
+    box-shadow: none;
+}
+
+.nav-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.nav-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.nav-link:hover {
+    background: var(--bar);
+}
+
+.nav-link[aria-current="page"] {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-weight: 600;
+}
+
+.storage {
+    padding: 12px 14px 0;
+    border-top: 1px solid var(--border-soft);
+}
+
+.storage-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.storage .meter {
+    margin: 10px 0 6px;
+}
+
+.storage-text {
+    margin: 0;
+    font-size: 0.8125rem;
+}
+
+/* ---------- 選單 ---------- */
+
+.menu {
+    box-sizing: border-box;
+    min-width: 210px;
+    padding: 6px 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    z-index: 50;
+}
+
+.new-wrap .dropdown-menu {
+    left: 0;
+}
+
+.account-menu {
+    right: 0;
+    width: 240px;
+}
+
+.context-menu {
+    position: fixed;
+    z-index: 60;
+}
+
+.menu-header {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 14px 10px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--border-soft);
+}
+
+.menu-header .muted {
+    font-size: 0.8125rem;
+}
+
+.menu-title {
+    padding: 4px 14px 8px;
+    font-size: 0.75rem;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 14px;
+    border: none;
+    background: none;
+    color: var(--fg);
+    font-size: 0.875rem;
+    text-align: left;
+}
+
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+    background: var(--bar);
+    outline: none;
+}
+
+.menu-item:disabled {
+    color: var(--subtle);
+}
+
+.menu-item.danger {
+    color: var(--error);
+}
+
+.menu-shortcut {
+    margin-left: auto;
+    font: inherit;
+    font-size: 0.75rem;
+    color: var(--subtle);
+}
+
+.menu-separator {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--border-soft);
+}
+
+/* ---------- 路徑、工具列、檢視切換 ---------- */
+
+.folder-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    margin-bottom: 12px;
+}
+
+.breadcrumbs {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.breadcrumbs ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 1.1rem;
+}
+
+/* 每一層之間的分隔線，第一層前面不加 */
+.breadcrumbs li+li::before {
+    content: "/";
+    margin-right: 0.25rem;
+    color: var(--muted);
+}
+
+.breadcrumbs [aria-current="page"] {
+    font-weight: 600;
+}
+
+.toolbar {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--fg);
+}
+
+.icon-button:hover:not(:disabled) {
+    background: var(--bar);
+}
+
+.icon-button:disabled {
+    color: var(--subtle);
+}
+
+.icon-button.small {
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--muted);
+}
+
+.view-switch {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.view-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    background: var(--bg);
+    color: var(--muted);
+}
+
+.view-button+.view-button {
+    border-left: 1px solid var(--border);
+}
+
+.view-button[aria-pressed="true"] {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+}
+
+/* ---------- 檔案列表 ---------- */
+
+/* 拖曳框選時不選取文字；框選的方框以這一區為定位基準 */
+.file-area {
+    position: relative;
+    min-height: 360px;
+    overflow-x: auto;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.empty-state {
+    margin: 0;
+    padding: 48px 0;
+    text-align: center;
+    color: var(--muted);
+}
+
+table.files {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+table.files th,
+table.files td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+table.files th {
+    position: relative;
+    overflow: visible;
+    font-weight: 600;
+    color: var(--muted);
+}
+
+table.files .col-check {
+    box-sizing: border-box;
+    width: 44px;
+    padding-right: 0;
+}
+
+table.files .num {
+    text-align: right;
+}
+
+table.files tbody tr {
+    cursor: default;
+}
+
+table.files tbody tr:hover {
+    background: var(--bar);
+}
+
+table.files tbody tr.selected {
+    background: var(--accent-soft);
+}
+
+table.files tbody tr:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+/* 圖示與檔名：只有這一段可以拖曳搬移，所以寬度只包住內容，右邊的空白留給框選 */
+.name-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+    vertical-align: middle;
+}
+
+.name-cell svg {
+    flex: none;
+    color: var(--muted);
+}
+
+.item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.is-folder .item-name {
+    font-weight: 500;
+}
+
+.select-box {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    vertical-align: middle;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+/* 欄寬的拖曳把手：標題儲存格右緣的細線 */
+.col-resizer {
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    right: -5px;
+    z-index: 1;
+    width: 10px;
+    display: flex;
+    justify-content: center;
+    cursor: col-resize;
+}
+
+.col-resizer::after {
+    content: "";
+    width: 2px;
+    border-radius: 1px;
+    background: var(--border);
+}
+
+.col-resizer:hover::after,
+.col-resizer:focus-visible::after {
+    background: var(--accent);
+}
+
+.col-resizer:focus-visible {
+    outline: none;
+}
+
+body.resizing,
+body.resizing * {
+    cursor: col-resize !important;
+}
+
+.marquee {
+    position: absolute;
+    z-index: 2;
+    background: var(--marquee);
+    border: 1px solid var(--accent);
+    pointer-events: none;
+}
+
+.tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+    margin: 0;
+    padding: 4px 0;
+    list-style: none;
+}
+
+.tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 22px 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: default;
+}
+
+.tile:hover {
+    background: var(--bar);
+}
+
+.tile.selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.tile:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+}
+
+.tile .select-box {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+}
+
+.tile-icon {
+    color: var(--muted);
+}
+
+.tile.is-folder .tile-icon {
+    color: var(--accent);
+}
+
+.tile .item-name {
+    width: 100%;
+    text-align: center;
+    font-size: 0.875rem;
+}
+
+.tile-meta {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.rename-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 2px 6px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    outline: 2px solid var(--marquee);
+}
+
+.tile .rename-input {
+    width: 100%;
+    font-size: 0.875rem;
+    text-align: center;
+}
+
+/* ---------- 拖放 ---------- */
+
+/* 從電腦拖進檔案時：內容區加上淡淡的底色與虛線框，底下的資料夾仍然看得到，
+   拖到某個資料夾上時它會反白，提示也換成那個資料夾的名稱 */
+.drop-overlay {
+    position: absolute;
+    inset: 8px;
+    z-index: 20;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: calc(var(--panels-height, 0px) + 24px);
+    border: 3px dashed var(--accent);
+    border-radius: 16px;
+    background: var(--overlay);
+    pointer-events: none;
+}
+
+.drop-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    box-shadow: var(--shadow);
+}
+
+/* 可以放下的資料夾：列表中的一列、Grid 的方塊、上方路徑的一層 */
+table.files tbody tr.drop-hover,
+.tile.drop-hover {
+    background: var(--accent-soft);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+.breadcrumbs a.drop-hover {
+    border-radius: 4px;
+    background: var(--accent-soft);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* 拖曳時游標旁顯示的名稱或數量。放在畫面外，瀏覽器只用它產生拖曳圖片 */
+.drag-ghost {
+    position: fixed;
+    top: -1000px;
+    left: 0;
+    max-width: 280px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 0.875rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- 右下角的面板 ---------- */
+
+/* 面板由下往上排：只剩一個時，它貼齊最下方 */
+.panels {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 40;
+    box-sizing: border-box;
+    width: min(440px, calc(100vw - 32px));
+    /* 最高只到頂部列下方：兩個面板都展開時，上面那個不會被推出畫面 */
+    max-height: calc(100vh - var(--topbar-height) - 32px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    pointer-events: none;
+}
+
+.panels>* {
+    pointer-events: auto;
+}
+
+/* 空間不夠時面板一起縮小，標題列永遠看得到，內容在面板裡捲動 */
+.panel {
+    flex: 0 1 auto;
+    min-height: 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+
+.panel-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px 8px 16px;
+    background: var(--bar);
+}
+
+.panel-heading {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.9375rem;
+}
+
+.panel-count {
+    font-weight: 400;
+    color: var(--muted);
+}
+
+.panel.failed .panel-title {
+    color: var(--error);
+}
+
+.panel-body {
+    min-height: 0;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+
+.round-button {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--bg);
+    color: var(--fg);
+}
+
+/* 箭頭朝上代表「展開」；展開之後朝下，代表「縮小」 */
+.round-button.toggle[aria-expanded="true"] svg {
+    transform: rotate(180deg);
+}
+
+.panel-hint {
+    margin: 0;
+    padding: 10px 16px 4px;
+    font-size: 0.8125rem;
+    color: var(--muted);
+}
+
+.panel-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-soft);
+}
+
+.panel-stats {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 12px;
+    row-gap: 2px;
+    font-size: 0.8125rem;
+    color: var(--muted);
+}
+
+.panel-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.panel-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-soft);
+}
+
+.panel-item:last-child {
+    border-bottom: none;
+}
+
+.item-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.panel-item .item-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.875rem;
+}
+
+.item-status {
+    font-size: 0.8125rem;
+    color: var(--muted);
+    text-align: right;
+}
+
+.panel-item[data-status="uploading"] .item-status {
+    color: var(--fg);
+}
+
+.panel-item[data-status="failed"] .item-status {
+    color: var(--error);
+}
+
+/* 重試等較長的說明可以換行，不要被截斷 */
+.panel-item .item-status {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.item-size {
+    flex: none;
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.bar,
+.meter {
+    flex: 1 1 auto;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border-soft);
+    overflow: hidden;
+}
+
+.bar-fill,
+.meter-fill {
+    width: 0;
+    height: 100%;
+    background: var(--accent);
+}
+
+.bar-fill.done {
+    background: var(--success);
+}
+
+.bar-fill.failed {
+    background: var(--error);
+}
+
+.meter.almost-full .meter-fill {
+    background: var(--error);
+}
+
+.pending-item {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.pending-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.pending-progress {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.pending-item button.primary,
+.pending-item button.link {
+    font-size: 0.875rem;
+}
+
+/* 錯誤訊息獨佔一整行；沒有內容時不佔空間 */
+.pending-message {
+    flex-basis: 100%;
+    font-size: 0.8125rem;
+    color: var(--error);
+}
+
+.pending-message:empty {
+    display: none;
+}
+
+/* ---------- 對話框（選擇資料夾） ---------- */
+
+.dialog {
+    box-sizing: border-box;
+    width: min(480px, calc(100vw - 32px));
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--shadow);
+}
+
+.dialog::backdrop {
+    background: var(--backdrop);
+}
+
+.dialog-title {
+    margin: 0 0 12px;
+    font-size: 1.125rem;
+}
+
+.dialog-path {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 8px;
+    font-size: 0.875rem;
+}
+
+.dialog-path .separator {
+    color: var(--muted);
+}
+
+.folder-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.folder-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    border: none;
+    background: none;
+    color: var(--fg);
+    text-align: left;
+}
+
+.folder-button svg {
+    flex: none;
+    color: var(--muted);
+}
+
+.folder-button:hover:not(:disabled) {
+    background: var(--bar);
+}
+
+.folder-button:disabled {
+    color: var(--subtle);
+}
+
+.folder-empty {
+    margin: 0;
+    padding: 16px;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.dialog-form {
+    margin: 0;
+}
+
+.dialog-message {
+    margin: 0 0 10px;
+    color: var(--muted);
+}
+
+.dialog-input {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+}
+
+.dialog-location {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0 0;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+.dialog-location svg {
+    flex: none;
+}
+
+.dialog .error {
+    margin: 10px 0 0;
+}
+
+.choices {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    border: none;
+}
+
+.choice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.choice:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.choice.disabled {
+    color: var(--subtle);
+    cursor: not-allowed;
+}
+
+.choice input {
+    margin-top: 3px;
+    accent-color: var(--accent);
+}
+
+.choice-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
 }
 
 /* ---------- 登入與帳號設定表單 ---------- */
@@ -165,220 +1217,9 @@ button:focus-visible {
     font-weight: 600;
 }
 
-button.secondary {
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg);
-}
-
-/* ---------- 檔案瀏覽 ---------- */
-
-.breadcrumbs ol {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-    margin: 0 0 1rem;
-    padding: 0;
-    list-style: none;
-    font-size: 1.1rem;
-}
-
-/* 每一層之間的分隔線，第一層前面不加 */
-.breadcrumbs li+li::before {
-    content: "/";
-    margin-right: 0.25rem;
-    color: var(--muted);
-}
-
-.breadcrumbs [aria-current="page"] {
-    font-weight: 600;
-}
-
-a {
-    color: var(--accent);
-}
-
-.toolbar {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-
-.toolbar button {
-    padding: 0.4rem 0.8rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bar);
-    color: var(--fg);
-}
-
-.empty {
-    padding: 2rem 0;
-    text-align: center;
-}
-
-table.files {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-table.files th,
-table.files td {
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-    text-align: left;
-}
-
-table.files th {
-    font-weight: 600;
-    color: var(--muted);
-}
-
-table.files .num {
-    text-align: right;
-    white-space: nowrap;
-}
-
-table.files .name {
-    /* 很長的檔名可以換行，不會撐破表格 */
-    overflow-wrap: anywhere;
-}
-
-table.files .icon {
-    margin-right: 0.4rem;
-}
-
-table.files .actions-cell {
-    display: flex;
-    gap: 0.75rem;
-    justify-content: flex-end;
-    white-space: nowrap;
-}
-
-/* 畫面上看不到，但螢幕閱讀器會念出來（例如「操作」欄的標題） */
-.visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-}
-
-/* ---------- 上傳 ---------- */
-
-.upload-queue {
-    margin-bottom: 1rem;
-    padding: 0.75rem 1rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bar);
-}
-
-/* hidden 屬性要能蓋過 display 設定 */
-.upload-queue[hidden] {
-    display: none;
-}
-
-.upload-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5rem;
-}
-
-.upload-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.upload-list li {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto 8rem 9rem auto;
-    gap: 0.75rem;
-    align-items: center;
-}
-
-.upload-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.upload-list progress {
-    width: 100%;
-}
-
-.upload-list li[data-status="failed"] .upload-status {
-    color: var(--error);
-}
-
-.upload-list li[data-status="done"] .upload-status,
-.upload-list li[data-status="cancelled"] .upload-status {
-    color: var(--muted);
-}
-
-.upload-list button[hidden] {
-    display: none;
-}
-
-/* 未完成的上傳：與上傳佇列相同的外框 */
-.pending-uploads {
-    margin-bottom: 1rem;
-    padding: 0.75rem 1rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bar);
-}
-
-.pending-uploads[hidden] {
-    display: none;
-}
-
-.pending-uploads p {
-    margin: 0.25rem 0 0.5rem;
-}
-
-.pending-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.pending-list li {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
-    gap: 0.75rem;
-    align-items: center;
-}
-
-/* 錯誤訊息獨佔一整行；沒有內容時不佔空間 */
-.pending-message {
-    grid-column: 1 / -1;
-    color: var(--error);
-}
-
-.pending-message:empty {
-    display: none;
-}
-
-/* 拖放區域：有檔案拖到上方時顯示虛線框 */
-.dropzone {
-    min-height: 8rem;
-    border: 2px dashed transparent;
-    border-radius: 6px;
-}
-
-.dropzone.dragging {
-    border-color: var(--accent);
-    background: var(--notice-bg);
+.auth-form button:disabled {
+    cursor: progress;
+    opacity: 0.7;
 }
 
 /* ---------- 使用者管理 ---------- */
@@ -390,6 +1231,7 @@ table.files .actions-cell {
 
 .admin-create {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.75rem;
     align-items: flex-end;
     margin-bottom: 1rem;
@@ -451,6 +1293,30 @@ table.files .actions-cell {
     align-self: flex-start;
 }
 
+table.users {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+table.users th,
+table.users td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
+
+table.users th {
+    font-weight: 600;
+    color: var(--muted);
+}
+
+table.users .actions-cell {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: flex-end;
+}
+
 .badge {
     display: inline-block;
     padding: 0.1rem 0.5rem;
@@ -466,4 +1332,10 @@ table.files .actions-cell {
 
 tr.disabled-row td {
     color: var(--muted);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .round-button.toggle svg {
+        transition: transform 0.15s ease;
+    }
 }

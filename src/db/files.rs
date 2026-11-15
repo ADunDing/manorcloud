@@ -613,6 +613,90 @@ pub async fn ancestors(
     .await
 }
 
+// ==================== 子樹（複製與打包下載） ====================
+
+/// 子樹中的一個項目。
+///
+/// `path` 是相對於子樹根的路徑，以 / 分隔：根本身就是它的名稱，子項目是「根/子/孫」。
+/// 名稱都通過了 `validate_file_name`（不含 / 與 \），所以路徑不會有歧義。
+#[derive(Debug, sqlx::FromRow)]
+pub struct TreeEntry {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub kind: String,
+    pub size: Option<i64>,
+    pub mime: Option<String>,
+    pub storage_key: Option<String>,
+    pub updated_at: i64,
+    pub path: String,
+    pub depth: i64,
+}
+
+/// 子樹的最大深度：與 `MAX_ANCESTOR_DEPTH` 相同的保險，資料被改壞形成循環時查詢不會失控
+const MAX_TREE_DEPTH: i64 = 256;
+
+/// 一個項目與它底下的所有內容：依深度排列（父項目一定在子項目之前），同一層依路徑排序。
+/// 項目不存在或不屬於該使用者時回傳空的清單。
+///
+/// 一條 SQL 取得整棵樹：同一個查詢看到的是同一個時間點的資料，
+/// 複製或打包的途中有人新增或刪除檔案，也不會拿到前後不一致的子樹。
+///
+/// 起點帶 owner_id；往下走的每一層由複合外鍵保證屬於同一個使用者。
+/// 用執行期的查詢而不是 query! 巨集：新增這個函式不需要重新產生 .sqlx。
+pub async fn subtree(
+    pool: &SqlitePool,
+    owner_id: i64,
+    id: i64,
+) -> Result<Vec<TreeEntry>, sqlx::Error> {
+    sqlx::query_as(
+        "WITH RECURSIVE tree(id, parent_id, name, kind, size, mime, storage_key, updated_at, path, depth) AS (
+             SELECT id, parent_id, name, kind, size, mime, storage_key, updated_at, name, 0
+             FROM files WHERE id = ? AND owner_id = ?
+             UNION ALL
+             SELECT f.id, f.parent_id, f.name, f.kind, f.size, f.mime, f.storage_key, f.updated_at,
+                    t.path || '/' || f.name, t.depth + 1
+             FROM files f JOIN tree t ON f.parent_id = t.id
+             WHERE t.depth < ?
+         )
+         SELECT id, parent_id, name, kind, size, mime, storage_key, updated_at, path, depth
+         FROM tree
+         ORDER BY depth, path",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(MAX_TREE_DEPTH)
+    .fetch_all(pool)
+    .await
+}
+
+/// `target` 是否就是 `folder`，或位於它底下的任何一層。用來阻止「把資料夾複製進它自己」。
+///
+/// 從 target 往上走祖先鏈，與 `update_item` 的循環檢查相同的想法；
+/// 起點帶 owner_id，別人的項目一律得到 false。
+pub async fn is_inside(
+    pool: &SqlitePool,
+    owner_id: i64,
+    folder: i64,
+    target: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>(
+        "WITH RECURSIVE chain(id, depth) AS (
+             SELECT id, 0 FROM files WHERE id = ? AND owner_id = ?
+             UNION ALL
+             SELECT f.parent_id, c.depth + 1 FROM files f JOIN chain c ON f.id = c.id
+             WHERE f.parent_id IS NOT NULL AND c.depth < ?
+         )
+         SELECT EXISTS (SELECT 1 FROM chain WHERE id = ?)",
+    )
+    .bind(target)
+    .bind(owner_id)
+    .bind(MAX_TREE_DEPTH)
+    .bind(folder)
+    .fetch_one(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,5 +1421,77 @@ mod tests {
                 .unwrap(),
             ReplaceOutcome::IsFolder
         ));
+    }
+
+    // ==================== 子樹 ====================
+
+    #[sqlx::test]
+    async fn subtree_lists_parents_before_children_with_paths(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        // 相片/
+        //   2026/
+        //     b.jpg
+        //   a.jpg
+        // other.txt（不在子樹裡）
+        let photos = make_folder(&pool, owner, None, "相片").await;
+        let year = make_folder(&pool, owner, Some(photos), "2026").await;
+        create_file(&pool, owner, Some(year), "b.jpg", 2, None, &key(1))
+            .await
+            .unwrap();
+        create_file(&pool, owner, Some(photos), "a.jpg", 1, None, &key(2))
+            .await
+            .unwrap();
+        create_file(&pool, owner, None, "other.txt", 0, None, &key(3))
+            .await
+            .unwrap();
+
+        let tree = subtree(&pool, owner, photos).await.unwrap();
+        let paths: Vec<&str> = tree.iter().map(|e| e.path.as_str()).collect();
+
+        assert_eq!(
+            paths,
+            ["相片", "相片/2026", "相片/a.jpg", "相片/2026/b.jpg"]
+        );
+        assert_eq!(tree[0].depth, 0);
+        assert_eq!(tree[3].parent_id, Some(year));
+        assert_eq!(tree[3].storage_key.as_deref(), Some(key(1).as_str()));
+    }
+
+    #[sqlx::test]
+    async fn subtree_of_a_file_is_just_the_file(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let file = create_file(&pool, owner, None, "a.txt", 3, None, &key(1))
+            .await
+            .unwrap();
+
+        let tree = subtree(&pool, owner, file.id).await.unwrap();
+
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].path, "a.txt");
+        assert_eq!(tree[0].size, Some(3));
+    }
+
+    #[sqlx::test]
+    async fn subtree_of_other_users_item_is_empty(pool: SqlitePool) {
+        let alice = make_user(&pool, "alice").await;
+        let mallory = make_user(&pool, "mallory").await;
+        let docs = make_folder(&pool, alice, None, "docs").await;
+
+        assert!(subtree(&pool, mallory, docs).await.unwrap().is_empty());
+        assert!(subtree(&pool, mallory, 9999).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    async fn is_inside_covers_itself_and_descendants_only(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let a = make_folder(&pool, owner, None, "a").await;
+        let b = make_folder(&pool, owner, Some(a), "b").await;
+        let c = make_folder(&pool, owner, Some(b), "c").await;
+        let sibling = make_folder(&pool, owner, None, "sibling").await;
+
+        assert!(is_inside(&pool, owner, a, a).await.unwrap());
+        assert!(is_inside(&pool, owner, a, c).await.unwrap());
+        assert!(!is_inside(&pool, owner, b, a).await.unwrap());
+        assert!(!is_inside(&pool, owner, a, sibling).await.unwrap());
     }
 }

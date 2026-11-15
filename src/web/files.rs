@@ -30,7 +30,7 @@ use crate::{
 const MULTIPART_OVERHEAD: u64 = 1024 * 1024;
 
 /// 父資料夾「不存在」與「屬於別人」對外一律使用這個訊息，避免他人資料夾被探測
-const FOLDER_NOT_FOUND: &str = "找不到資料夾";
+const FOLDER_NOT_FOUND: &str = "Folder not found";
 
 /// 檔案相關路由。
 pub fn router(upload_limit: UploadLimit) -> Router<AppState> {
@@ -47,6 +47,7 @@ pub fn router(upload_limit: UploadLimit) -> Router<AppState> {
         )
         .route("/api/folders", post(create_folder))
         .route("/api/config", get(config))
+        .route("/api/storage", get(storage_info))
 }
 
 /// 計算請求本體上限。
@@ -217,11 +218,11 @@ async fn upload(
         .next_field()
         .await
         .map_err(multipart_error)?
-        .ok_or_else(|| AppError::BadRequest("缺少檔案欄位".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("The file field is missing".to_string()))?;
 
     if field.name() != Some("file") {
         return Err(AppError::BadRequest(
-            "第一個欄位必須是名為 file 的檔案".to_string(),
+            "The first field must be the file field".to_string(),
         ));
     }
 
@@ -233,7 +234,7 @@ async fn upload(
         Some(name) => name,
         None => field
             .file_name()
-            .ok_or_else(|| AppError::BadRequest("缺少檔名".to_string()))?
+            .ok_or_else(|| AppError::BadRequest("The file name is missing".to_string()))?
             .to_string(),
     };
     let name = validate_file_name(&raw_name).map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -280,6 +281,30 @@ async fn upload(
     }
 }
 
+// ==================== 儲存空間 ====================
+
+/// GET /api/storage 的回應：檔案所在硬碟的容量（位元組）
+#[derive(Serialize)]
+struct StorageResponse {
+    total_bytes: u64,
+    available_bytes: u64,
+}
+
+/// GET /api/storage：檔案所在硬碟的總容量與可用空間，給畫面左側的容量顯示。
+///
+/// 目前所有檔案都在同一個資料目錄；之後支援多個儲存位置時，改成依資料夾回傳它所在的位置。
+/// 需要登入：硬碟的容量不是公開資訊。
+async fn storage_info(
+    _user: CurrentUser,
+    State(data_dir): State<Arc<Path>>,
+) -> Result<Json<StorageResponse>, AppError> {
+    let space = storage::disk_space(&data_dir).map_err(AppError::internal)?;
+    Ok(Json(StorageResponse {
+        total_bytes: space.total,
+        available_bytes: space.available,
+    }))
+}
+
 // ==================== 錯誤對應 ====================
 
 pub(super) fn folder_not_found() -> AppError {
@@ -290,7 +315,9 @@ pub(super) fn folder_not_found() -> AppError {
 /// ParentNotFolder 與 ParentNotOwned 必須完全相同，見 `CreateFileError` 的說明。
 fn create_error(e: CreateFileError) -> AppError {
     match e {
-        CreateFileError::NameConflict => AppError::Conflict("同名項目已存在".to_string()),
+        CreateFileError::NameConflict => {
+            AppError::Conflict("An item with this name already exists".to_string())
+        }
         CreateFileError::ParentNotFolder | CreateFileError::ParentNotOwned => folder_not_found(),
         CreateFileError::Db(e) => AppError::internal(e),
     }
@@ -299,12 +326,12 @@ fn create_error(e: CreateFileError) -> AppError {
 /// 儲存層錯誤 → HTTP 狀態碼
 fn storage_error(e: StorageError) -> AppError {
     match e {
-        StorageError::TooLarge { limit } => {
-            AppError::PayloadTooLarge(format!("檔案超過大小上限（{limit} 位元組）"))
-        }
+        StorageError::TooLarge { limit } => AppError::PayloadTooLarge(format!(
+            "The file is larger than the limit of {limit} bytes"
+        )),
         StorageError::Io(io_err) if io_err.kind() == io::ErrorKind::StorageFull => {
             eprintln!("disk full: {io_err}");
-            AppError::InsufficientStorage("伺服器儲存空間不足".to_string())
+            AppError::InsufficientStorage("Not enough storage space on the server".to_string())
         }
         // InvalidKey 是伺服器自己產生的 key 格式錯誤，屬於程式 bug
         other => AppError::internal(other),
@@ -325,18 +352,18 @@ fn multipart_error(e: MultipartError) -> AppError {
     let status = e.status();
 
     if status == StatusCode::PAYLOAD_TOO_LARGE {
-        return AppError::PayloadTooLarge("上傳內容超過大小上限".to_string());
+        return AppError::PayloadTooLarge("The upload is larger than the size limit".to_string());
     }
 
     if status.is_client_error() {
-        return AppError::BadRequest(format!("上傳內容格式錯誤：{}", e.body_text()));
+        return AppError::BadRequest(format!("The upload is malformed: {}", e.body_text()));
     }
 
     eprintln!(
         "upload interrupted (client connection problem): {}",
         error_chain(&e)
     );
-    AppError::BadRequest("上傳中斷".to_string())
+    AppError::BadRequest("The upload was interrupted".to_string())
 }
 
 /// 把錯誤與它所有的來源串成一行，例如：

@@ -43,7 +43,7 @@ fn verify_origin(request: &Request) -> Result<(), AppError> {
     } else {
         // 記錄實際值，部署在反向代理後若設定錯誤，可以從這裡看出原因
         eprintln!(
-            "拒絕跨來源請求：{} {}，Origin={origin}，Host={host}",
+            "rejected a cross-origin request: {} {}, Origin={origin}, Host={host}",
             request.method(),
             request.uri().path()
         );

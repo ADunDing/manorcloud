@@ -18,6 +18,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -153,28 +154,35 @@ impl IntoResponse for UploadError {
             UploadError::App(e) => return e.into_response(),
             UploadError::OffsetMismatch { received } => (
                 "offset_mismatch",
-                "上傳位置與伺服器不一致".to_string(),
+                "The upload position doesn't match the server".to_string(),
                 Some(received),
             ),
             UploadError::Busy => (
                 "upload_busy",
-                "這個檔案正在其他分頁或裝置上傳".to_string(),
+                "This file is being uploaded in another tab or on another device".to_string(),
                 None,
             ),
             UploadError::Damaged => (
                 "upload_damaged",
-                "上傳的暫存資料已損毀，請取消後重新上傳".to_string(),
+                "The partly uploaded data is damaged. Cancel the upload and start again"
+                    .to_string(),
                 None,
             ),
             UploadError::Incomplete { received } => (
                 "upload_incomplete",
-                "檔案還沒有傳完".to_string(),
+                "The file hasn't finished uploading".to_string(),
                 Some(received),
             ),
-            UploadError::NameConflict => ("name_conflict", "同名項目已存在".to_string(), None),
+            UploadError::NameConflict => (
+                "name_conflict",
+                "An item with this name already exists".to_string(),
+                None,
+            ),
             UploadError::TooMany { limit } => (
                 "too_many_uploads",
-                format!("未完成的上傳已達 {limit} 個，請先完成或取消其中一些"),
+                format!(
+                    "You already have {limit} unfinished uploads. Finish or cancel some of them first"
+                ),
                 None,
             ),
         };
@@ -191,7 +199,7 @@ impl IntoResponse for UploadError {
 }
 
 fn upload_not_found() -> AppError {
-    AppError::NotFound("找不到這個上傳".to_string())
+    AppError::NotFound("Upload not found".to_string())
 }
 
 /// 同名處理的錯誤 → 回應。同名有分段上傳自己的代碼，前端據此詢問使用者
@@ -236,10 +244,11 @@ fn part_error(e: PartError) -> UploadError {
             UploadError::Damaged
         }
         PartError::TooLarge { .. } => {
-            AppError::PayloadTooLarge("超過宣告的檔案大小".to_string()).into()
+            AppError::PayloadTooLarge("More data than the declared file size".to_string()).into()
         }
         PartError::Io(e) if e.kind() == io::ErrorKind::StorageFull => {
-            AppError::InsufficientStorage("伺服器儲存空間不足".to_string()).into()
+            AppError::InsufficientStorage("Not enough storage space on the server".to_string())
+                .into()
         }
         // 上傳編號在查到紀錄之後才會用來組路徑，格式一定正確；長度在呼叫 finish 之前已檢查
         PartError::InvalidId | PartError::Incomplete { .. } | PartError::Io(_) => {
@@ -303,10 +312,13 @@ async fn create(
 ) -> Result<(StatusCode, Json<UploadResponse>), UploadError> {
     // 1. 檔名與大小
     let name = validate_file_name(&req.name).map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let size =
-        u64::try_from(req.size).map_err(|_| AppError::BadRequest("檔案大小不正確".to_string()))?;
+    let size = u64::try_from(req.size)
+        .map_err(|_| AppError::BadRequest("Invalid file size".to_string()))?;
     if size > limit {
-        return Err(AppError::PayloadTooLarge("檔案超過上傳大小上限".to_string()).into());
+        return Err(AppError::PayloadTooLarge(
+            "The file is larger than the upload limit".to_string(),
+        )
+        .into());
     }
 
     // 2. 父項目必須是自己的資料夾。uploads 表只有外鍵，擋不住「父項目是一個檔案」；
@@ -359,7 +371,10 @@ async fn ensure_space(pool: &SqlitePool, data_dir: &Path, size: u64) -> Result<(
     let available = storage::available_bytes(data_dir).map_err(AppError::internal)?;
     let reserved = to_u64(uploads_db::pending_bytes(pool).await?)?;
     if available.saturating_sub(reserved) < size {
-        return Err(AppError::InsufficientStorage("伺服器儲存空間不足".to_string()).into());
+        return Err(AppError::InsufficientStorage(
+            "Not enough storage space on the server".to_string(),
+        )
+        .into());
     }
     Ok(())
 }
@@ -391,6 +406,14 @@ struct OffsetQuery {
     offset: i64,
 }
 
+/// 接收一段上傳時，超過這段時間沒有收到任何資料，就當成連線中斷。
+///
+/// 連線被正常關閉時，讀取會立刻得到錯誤；但連線「靜靜地斷掉」時（Wi-Fi 斷線、筆電休眠、
+/// 中間的代理沒有把中斷傳過來），讀取會無限期等待，同時一直握著暫存檔的鎖，
+/// 之後的續傳就永遠得到 upload_busy。
+/// 30 秒遠長於正常情況下兩塊資料的間隔，又短於前端自動重試的總時間（約 5 分鐘）。
+const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// PUT /api/uploads/{id}?offset=N：從第 N 個位元組續寫。
 ///
 /// 請求內容一塊一塊地寫入；連線中途中斷時，已收到的部分照樣 fsync 並確認，
@@ -407,7 +430,12 @@ async fn append(
     find_own(&pool, &user, &id).await?;
 
     // 2. 先拿鎖，再讀已確認的長度：這時讀到的一定是最新的（見 lock_part）
-    let lock = lock_part(&pool, &data_dir, &user, &id).await?;
+    let lock = lock_part(&pool, &data_dir, &user, &id)
+        .await
+        .inspect_err(|_| {
+            eprintln!("upload {id}: rejected, another request still holds the lock")
+        })?;
+    eprintln!("upload {id}: request at offset {} started", query.offset);
     let upload = find_own(&pool, &user, &id).await?;
 
     // 3. 位置必須與伺服器已確認的長度相同
@@ -427,11 +455,27 @@ async fn append(
     // 5. 一塊一塊地寫入；出錯時先記下來，不立刻 return，下一步要先保住已寫入的部分
     let mut stream = body.into_data_stream();
     let mut failure: Option<UploadError> = None;
-    while let Some(frame) = stream.next().await {
+    loop {
+        // 等待下一塊資料有時間限制：見 CHUNK_IDLE_TIMEOUT
+        let frame = match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(frame)) => frame,
+            // 資料傳完了
+            Ok(None) => break,
+            // 太久沒有資料：與連線中斷相同的處理
+            Err(_) => {
+                eprintln!(
+                    "upload {id}: no data for {} seconds, giving up on this request",
+                    CHUNK_IDLE_TIMEOUT.as_secs()
+                );
+                failure =
+                    Some(AppError::BadRequest("The upload was interrupted".to_string()).into());
+                break;
+            }
+        };
         let result = match frame {
             Ok(bytes) => part.write_chunk(&bytes).await.map_err(part_error),
             // 連線中斷是客戶端的問題，不是 500
-            Err(_) => Err(AppError::BadRequest("上傳中斷".to_string()).into()),
+            Err(_) => Err(AppError::BadRequest("The upload was interrupted".to_string()).into()),
         };
         if let Err(e) = result {
             failure = Some(e);
@@ -452,6 +496,14 @@ async fn append(
         received = new_len;
     }
 
+    eprintln!(
+        "upload {id}: request ended, {received} bytes confirmed{}",
+        if failure.is_some() {
+            " (interrupted)"
+        } else {
+            ""
+        }
+    );
     match failure {
         Some(e) => Err(e),
         None => Ok(Json(ProgressResponse { received })),
@@ -522,9 +574,10 @@ async fn complete(
                 eprintln!("failed to remove the unregistered blob {key}: {remove_err}");
             }
             Err(match e {
-                RegisterError::NameConflict => {
-                    AppError::Conflict("同名項目已存在，請重新上傳".to_string()).into()
-                }
+                RegisterError::NameConflict => AppError::Conflict(
+                    "An item with this name already exists. Upload the file again".to_string(),
+                )
+                .into(),
                 other => other.into_app_error().into(),
             })
         }

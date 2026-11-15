@@ -44,7 +44,7 @@ const COOKIE_PATH: &str = "/";
 const SESSION_DAYS: i64 = 30;
 
 /// 登入失敗時統一的訊息：不透露是帳號不存在、沒有密碼，還是密碼錯誤
-const LOGIN_FAILED: &str = "帳號或密碼錯誤";
+const LOGIN_FAILED: &str = "Incorrect username or password";
 
 /// 被鎖定時的錯誤代碼，前端依此顯示「請 X 分鐘後再試」
 const TOO_MANY_ATTEMPTS: &str = "too_many_attempts";
@@ -94,7 +94,10 @@ impl IntoResponse for LoginError {
             LoginError::Locked(wait) => {
                 let seconds = retry_after_secs(wait);
                 let body = LockedBody {
-                    error: format!("登入失敗次數過多，請 {} 分鐘後再試", seconds.div_ceil(60)),
+                    error: format!(
+                        "Too many failed attempts. Try again in {} min",
+                        seconds.div_ceil(60)
+                    ),
                     code: TOO_MANY_ATTEMPTS,
                     retry_after: seconds,
                 };
@@ -387,11 +390,11 @@ async fn update_credentials(
 ) -> Result<(CookieJar, Json<UserResponse>), AppError> {
     // 1. 便宜的檢查先做，不合法的請求不必跑 Argon2
     if req.new_username.is_none() && req.new_password.is_none() {
-        return Err(AppError::BadRequest("沒有要修改的內容".to_string()));
+        return Err(AppError::BadRequest("Nothing to change".to_string()));
     }
     // 只改名稱就清除旗標的話，log 中的臨時密碼會繼續有效
     if me.must_change_password && req.new_password.is_none() {
-        return Err(AppError::BadRequest("必須設定新的密碼".to_string()));
+        return Err(AppError::BadRequest("Choose a new password".to_string()));
     }
     if let Some(username) = &req.new_username {
         validate_username(username)?;
@@ -401,7 +404,7 @@ async fn update_credentials(
         // 請求中本來就有兩者的明文，直接比較字串，不需要額外的 Argon2
         if *password == req.current_password {
             return Err(AppError::BadRequest(
-                "新密碼不能與目前的密碼相同".to_string(),
+                "The new password must be different from the current one".to_string(),
             ));
         }
     }
@@ -431,7 +434,9 @@ async fn update_credentials(
     )
     .await
     .map_err(|e| match e {
-        UpdateCredentialsError::UsernameTaken => AppError::Conflict("帳號已被使用".to_string()),
+        UpdateCredentialsError::UsernameTaken => {
+            AppError::Conflict("That username is already taken".to_string())
+        }
         UpdateCredentialsError::Db(e) => AppError::internal(e),
     })?;
 
@@ -509,14 +514,15 @@ pub(super) fn validate_username(username: &str) -> Result<(), AppError> {
 
     if !allowed {
         return Err(AppError::BadRequest(
-            "帳號只能包含小寫英文、數字、底線與連字號".to_string(),
+            "A username may only contain lowercase letters, digits, underscores and hyphens"
+                .to_string(),
         ));
     }
 
     // 已確認全為 ASCII，所以 bytes 長度就等於字元數
     if !(USERNAME_MIN..=USERNAME_MAX).contains(&username.len()) {
         return Err(AppError::BadRequest(format!(
-            "帳號長度需為 {USERNAME_MIN}～{USERNAME_MAX} 個字元"
+            "A username must be {USERNAME_MIN}–{USERNAME_MAX} characters long"
         )));
     }
 
@@ -529,7 +535,7 @@ fn validate_password(password: &str) -> Result<(), AppError> {
 
     if !(PASSWORD_MIN..=PASSWORD_MAX).contains(&len) {
         return Err(AppError::BadRequest(format!(
-            "密碼長度需為 {PASSWORD_MIN}～{PASSWORD_MAX} 個字元"
+            "A password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters long"
         )));
     }
 
@@ -703,7 +709,7 @@ mod tests {
         let (status, _, body) = login(&t, "dave", DAVE_PASSWORD).await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(String::from_utf8_lossy(&body).contains("停用"));
+        assert!(String::from_utf8_lossy(&body).contains("disabled"));
         // 沒有建立任何 session：只有 TestApp 為 carol 建立的那一筆
         let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
             .fetch_one(&t.pool)

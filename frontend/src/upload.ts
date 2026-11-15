@@ -8,7 +8,7 @@ import { ApiError, errorFromResponse } from "./api.js";
 /** 使用者取消了上傳 */
 export class UploadCancelled extends Error {
   constructor() {
-    super("已取消");
+    super("Cancelled");
     this.name = "UploadCancelled";
   }
 }
@@ -56,9 +56,7 @@ export function startUpload(
       }
     });
 
-    xhr.addEventListener("error", () =>
-      reject(new ApiError(0, "無法連線到伺服器")),
-    );
+    xhr.addEventListener("error", () => reject(new ApiError(0, "Can't reach the server")));
     // 伺服器端的 TempBlob 守衛會刪除寫到一半的暫存檔
     xhr.addEventListener("abort", () => reject(new UploadCancelled()));
   });

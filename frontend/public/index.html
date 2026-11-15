@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="en">
 
 <head>
   <meta charset="utf-8">
@@ -14,13 +14,19 @@
 
 <body>
   <header class="topbar">
-    <span class="brand">ManorCloud</span>
-    <span id="user" class="user"></span>
+    <a id="brand" class="brand" href="#/">ManorCloud</a>
+    <div id="account" class="account"></div>
   </header>
-  <main id="app">
-    <p class="muted">載入中…</p>
-  </main>
-  <noscript>ManorCloud 需要啟用 JavaScript 才能使用。</noscript>
+  <div class="shell">
+    <!-- 左側欄：登入後才顯示 -->
+    <aside id="sidebar" class="sidebar" aria-label="Navigation" hidden></aside>
+    <main id="app" class="content">
+      <p class="muted">Loading…</p>
+    </main>
+  </div>
+  <!-- 右下角的面板：未完成的上傳、上傳進度 -->
+  <div id="panels" class="panels" hidden></div>
+  <noscript>ManorCloud needs JavaScript to work.</noscript>
 </body>
 
 </html>

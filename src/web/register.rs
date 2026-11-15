@@ -66,10 +66,12 @@ impl RegisterError {
     /// 一般的錯誤回應。分段上傳的同名有自己的代碼，由呼叫端另外處理
     pub fn into_app_error(self) -> AppError {
         match self {
-            RegisterError::NameConflict => AppError::Conflict("同名項目已存在".to_string()),
-            RegisterError::FolderInTheWay => {
-                AppError::Conflict("同名的是資料夾，無法用檔案取代".to_string())
+            RegisterError::NameConflict => {
+                AppError::Conflict("An item with this name already exists".to_string())
             }
+            RegisterError::FolderInTheWay => AppError::Conflict(
+                "A folder with this name exists and can't be replaced by a file".to_string(),
+            ),
             RegisterError::ParentNotFound => folder_not_found(),
             RegisterError::Db(e) => AppError::internal(e),
         }

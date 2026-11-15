@@ -40,11 +40,11 @@ impl Forbidden {
     /// 給人看的訊息
     pub fn message(self) -> &'static str {
         match self {
-            Forbidden::CrossOrigin => "請求來源不被允許",
-            Forbidden::AccountDisabled => "帳號已停用，請聯絡管理員",
-            Forbidden::PasswordChangeRequired => "請先修改密碼",
-            Forbidden::WrongCurrentPassword => "目前的密碼不正確",
-            Forbidden::AdminRequired => "需要管理員權限",
+            Forbidden::CrossOrigin => "Requests from other sites are not allowed",
+            Forbidden::AccountDisabled => "This account is disabled. Contact your administrator",
+            Forbidden::PasswordChangeRequired => "Change your password first",
+            Forbidden::WrongCurrentPassword => "The current password is incorrect",
+            Forbidden::AdminRequired => "Administrator rights are required",
         }
     }
 }
@@ -120,7 +120,7 @@ impl IntoResponse for AppError {
             AppError::PayloadTooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m),
             AppError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "伺服器內部錯誤".to_string(),
+                "Internal server error".to_string(),
             ),
             AppError::InsufficientStorage(m) => (StatusCode::INSUFFICIENT_STORAGE, m),
         };
@@ -185,16 +185,16 @@ mod tests {
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["code"], "password_change_required");
-        assert_eq!(body["error"], "請先修改密碼");
+        assert_eq!(body["error"], "Change your password first");
     }
 
     #[tokio::test]
     async fn other_errors_have_generic_codes() {
-        let (status, body) = body_of(AppError::NotFound("找不到資料夾".to_string())).await;
+        let (status, body) = body_of(AppError::NotFound("Folder not found".to_string())).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["code"], "not_found");
-        assert_eq!(body["error"], "找不到資料夾");
+        assert_eq!(body["error"], "Folder not found");
     }
 
     #[tokio::test]

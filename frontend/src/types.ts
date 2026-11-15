@@ -51,6 +51,12 @@ export interface ServerConfig {
   readonly max_upload_bytes: number;
 }
 
+/** GET /api/storage 的回應：檔案所在硬碟的容量（位元組）。對應 Rust 端 web/files.rs 的 StorageResponse */
+export interface StorageInfo {
+  readonly total_bytes: number;
+  readonly available_bytes: number;
+}
+
 /** 使用者管理頁的一列。對應 Rust 端 web/admin.rs 的 UserItem */
 export interface ManagedUser {
   readonly id: number;
