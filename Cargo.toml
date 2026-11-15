@@ -22,12 +22,15 @@ tokio-util = { version = "0.7.20", features = ["io"] }
 unicode-normalization = "0.1.25"
 libc = "0.2"
 futures-util = "0.3.34"
+openidconnect = { version = "4.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 
 [dev-dependencies]
 futures-util = "0.3.34"
 serde_json = "1.0.154"
 tempfile = "3.27.0"
 tower = { version = "0.5", features = ["util"] }  # 測試用：oneshot 直接呼叫 Router
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [profile.release]
 # 移除除錯符號：執行檔小很多。panic 的錯誤訊息仍然會顯示，只是少了函式名稱等細節

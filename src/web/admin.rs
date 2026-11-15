@@ -180,9 +180,10 @@ async fn update_user(
         .await
         .map_err(|e| match e {
             AdminUpdateError::NotFound => user_not_found(),
-            AdminUpdateError::LastAdmin => {
-                AppError::Conflict("At least one active administrator is required".to_string())
-            }
+            AdminUpdateError::LastAdmin => AppError::Conflict(
+                "At least one active administrator who can log in with a password is required"
+                    .to_string(),
+            ),
             AdminUpdateError::Db(e) => AppError::internal(e),
         })?;
 

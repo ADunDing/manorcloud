@@ -4,3 +4,5 @@ pub mod session;
 pub use password::{hash_password, verify_password};
 
 pub mod limiter;
+
+pub mod oidc;

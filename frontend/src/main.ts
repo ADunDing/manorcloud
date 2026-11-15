@@ -8,7 +8,9 @@ import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
 import { adminHref, currentRoute, folderHref, settingsHref } from "./router.js";
 import { renderAdministration, renderSettings } from "./settings-view.js";
 import { hideSidebar, renderSidebar } from "./sidebar.js";
+import { takeSsoResult } from "./sso.js";
 import { applyTheme, loadTheme } from "./theme.js";
+import { showToast } from "./toast.js";
 import { leaveTrash, renderTrash } from "./trash-view.js";
 import type { User } from "./types.js";
 
@@ -32,6 +34,12 @@ applyTheme(loadTheme());
 
 mountPanels(panels);
 
+/**
+ * 從 SSO 回來時網址中的結果（失敗的原因，或剛完成連結）。只顯示一次：
+ * 讀取時已經從網址列移除，顯示之後也清空
+ */
+let ssoResult = takeSsoResult();
+
 /** 目前顯示的畫面。登入與強制修改的畫面不受網址影響；home 依網址決定顯示哪一頁 */
 type Screen = "login" | "change" | "home";
 let screen: Screen = "login";
@@ -50,6 +58,13 @@ const sidebarActions = { newFolder, upload: chooseFiles };
 function showScreen(user: User): void {
   currentUser = user;
   panels.hidden = false;
+  // 已登入：SSO 的結果用左下角的通知顯示（例如連結成功、連結失敗的原因）
+  if (ssoResult.error !== null) {
+    showToast(ssoResult.error);
+  } else if (ssoResult.linked) {
+    showToast("Your account is now linked");
+  }
+  ssoResult = { error: null, linked: false };
   if (user.must_change_password) {
     screen = "change";
     leaveBrowser();
@@ -209,7 +224,10 @@ async function refresh(): Promise<void> {
     showScreen(user);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
-      showLoggedOut();
+      // 沒有登入：SSO 失敗的原因顯示在登入畫面上
+      const notice = ssoResult.error ?? undefined;
+      ssoResult = { error: null, linked: false };
+      showLoggedOut(notice);
       return;
     }
     app.replaceChildren(

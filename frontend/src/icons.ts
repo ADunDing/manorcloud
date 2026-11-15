@@ -27,6 +27,7 @@ export type IconName =
   | "sort"
   | "restore"
   | "info"
+  | "lock"
   | "arrowUp"
   | "arrowDown"
   | "check";
@@ -79,6 +80,7 @@ const PATHS: Readonly<Record<IconName, readonly string[]>> = {
   sort: ["M4 7h16", "M7 12h10", "M10 17h4"],
   restore: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5"],
   info: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20", "M12 16v-4", "M12 8h.01"],
+  lock: ["M5 11h14v10H5z", "M8 11V7a4 4 0 0 1 8 0v4"],
   arrowUp: ["M12 19V5", "M6 11l6-6 6 6"],
   arrowDown: ["M12 5v14", "M6 13l6 6 6-6"],
   check: ["M5 12l5 5 9-10"],

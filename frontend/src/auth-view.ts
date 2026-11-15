@@ -2,6 +2,7 @@
 
 import { api, ApiError } from "./api.js";
 import { h } from "./dom.js";
+import { ssoInfo, startSso } from "./sso.js";
 import type { User } from "./types.js";
 
 // 以下規則必須與後端 src/web/auth.rs 的 USERNAME_MIN、USERNAME_MAX、
@@ -88,6 +89,37 @@ export function renderLogin(
 
   container.replaceChildren(form);
   usernameInput.focus();
+  void addSsoButton(form, errorBox);
+}
+
+/**
+ * SSO 啟用時，在登入表單下方加上「Sign in with …」。
+ * 讀不到設定時不顯示：密碼登入不受影響
+ */
+async function addSsoButton(form: HTMLElement, errorBox: HTMLElement): Promise<void> {
+  let info;
+  try {
+    info = await ssoInfo();
+  } catch {
+    return;
+  }
+  if (!info.enabled || !form.isConnected) {
+    return;
+  }
+  const button = h(
+    "button",
+    { type: "button", class: "secondary sso-button" },
+    `Sign in with ${info.display_name ?? "single sign-on"}`,
+  );
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    errorBox.textContent = "";
+    startSso("login").catch((error: unknown) => {
+      button.disabled = false;
+      errorBox.textContent = messageOf(error);
+    });
+  });
+  form.append(h("div", { class: "sso-divider" }, h("span", {}, "or")), button);
 }
 
 // ==================== 修改帳號名稱與密碼 ====================

@@ -1,5 +1,6 @@
 pub mod files;
 pub mod session;
+pub mod sso;
 pub mod uploads;
 pub mod user;
 

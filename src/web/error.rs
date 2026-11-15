@@ -68,6 +68,10 @@ pub enum AppError {
     PayloadTooLarge(String),
     /// 500：伺服器內部錯誤，細節只記在 log，不回給客戶端
     Internal,
+    /// 502：ManorCloud 需要連線的外部服務（SSO 的身分提供者）沒有正常回應
+    BadGateway(String),
+    /// 503：暫時無法處理，稍後再試（例如進行中的 SSO 登入太多）
+    Unavailable(String),
     /// 507：伺服器儲存空間不足
     InsufficientStorage(String),
 }
@@ -90,6 +94,8 @@ impl AppError {
             AppError::Conflict(_) => "conflict",
             AppError::PayloadTooLarge(_) => "payload_too_large",
             AppError::Internal => "internal",
+            AppError::BadGateway(_) => "bad_gateway",
+            AppError::Unavailable(_) => "unavailable",
             AppError::InsufficientStorage(_) => "insufficient_storage",
         }
     }
@@ -122,6 +128,8 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             ),
+            AppError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),
+            AppError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             AppError::InsufficientStorage(m) => (StatusCode::INSUFFICIENT_STORAGE, m),
         };
 
@@ -195,6 +203,16 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["code"], "not_found");
         assert_eq!(body["error"], "Folder not found");
+    }
+
+    #[tokio::test]
+    async fn gateway_errors_use_their_own_status() {
+        let (bad_gateway, body) = body_of(AppError::BadGateway("down".to_string())).await;
+        let (unavailable, _) = body_of(AppError::Unavailable("busy".to_string())).await;
+
+        assert_eq!(bad_gateway, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["code"], "bad_gateway");
+        assert_eq!(unavailable, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

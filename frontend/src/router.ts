@@ -3,14 +3,14 @@
 //   #/                     My files
 //   #/folder/{id}          某個資料夾
 //   #/trash                垃圾桶
-//   #/settings/{section}   個人設定：account、appearance
-//   #/admin/{section}      管理（只有管理員）：users
+//   #/settings/{section}   個人設定：account、sign-in、appearance
+//   #/admin/{section}      管理（只有管理員）：users、sign-in
 //
 // 不認得的網址一律回到 My files；不認得的區塊回到該頁的第一個區塊。
-// 之後加入 Sign-in（SSO）、Storage 等區塊時，只要加進對應的清單。
+// 之後加入 Storage 等區塊時，只要加進對應的清單。
 
-export type SettingsSection = "account" | "appearance";
-export type AdminSection = "users";
+export type SettingsSection = "account" | "sign-in" | "appearance";
+export type AdminSection = "users" | "sign-in";
 
 export type Route =
   | { readonly view: "files"; readonly folderId: number | null }
@@ -18,8 +18,8 @@ export type Route =
   | { readonly view: "settings"; readonly section: SettingsSection }
   | { readonly view: "admin"; readonly section: AdminSection };
 
-export const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "appearance"];
-export const ADMIN_SECTIONS: readonly AdminSection[] = ["users"];
+export const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "sign-in", "appearance"];
+export const ADMIN_SECTIONS: readonly AdminSection[] = ["users", "sign-in"];
 
 export const TRASH_HREF = "#/trash";
 

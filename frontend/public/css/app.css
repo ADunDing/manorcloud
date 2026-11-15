@@ -1646,3 +1646,73 @@ table.files .col-location {
     }
 }
 
+/* ---------- SSO ---------- */
+
+/* 登入畫面：密碼登入與「Sign in with …」之間的分隔 */
+.sso-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+
+.sso-divider::before,
+.sso-divider::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid var(--border);
+}
+
+.sso-button {
+    padding: 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-weight: 600;
+}
+
+.sso-button:hover:not(:disabled) {
+    background: var(--bar);
+}
+
+/* Administration → Sign-in 的表單 */
+.auth-form.settings-form {
+    max-width: 36rem;
+}
+
+.auth-form label.inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.auth-form label.inline input {
+    accent-color: var(--accent);
+}
+
+/* 輸入欄與它旁邊的按鈕（Test connection、Copy） */
+.field-row {
+    display: flex;
+    gap: 8px;
+}
+
+.field-row input {
+    flex: 1;
+    min-width: 0;
+}
+
+.copy-field {
+    color: var(--muted);
+}
+
+.auth-form .settings-group {
+    margin: 0;
+}
+
+.hint.error {
+    color: var(--error);
+}
+

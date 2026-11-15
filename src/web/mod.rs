@@ -10,6 +10,7 @@ mod items;
 mod range;
 mod register;
 mod shutdown;
+mod sso;
 mod state;
 mod trash;
 mod uploads;
@@ -87,6 +88,7 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
         .merge(items::router())
         .merge(uploads::router())
         .merge(trash::router())
+        .merge(sso::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }
 

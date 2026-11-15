@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::FromRef;
 use sqlx::SqlitePool;
@@ -25,6 +25,28 @@ const DEFAULT_PENDING_UPLOAD_LIMIT: u32 = 5;
 /// 同樣用專屬型別：`State<bool>` 看不出是哪一個設定。
 #[derive(Clone, Copy, Debug)]
 pub struct CookieSecure(pub bool);
+
+/// 對外連線用的 HTTP 用戶端（目前只有 SSO：向身分提供者讀取設定、交換 token）。
+///
+/// 整個程式共用一個：它內部有連線池，clone 只是複製一個參照。
+#[derive(Clone, Debug)]
+pub struct HttpClient(pub reqwest::Client);
+
+impl HttpClient {
+    fn new() -> Self {
+        let client = reqwest::Client::builder()
+            // 不跟隨跳轉：身分提供者的網址由管理員設定，跟隨跳轉會讓伺服器被導向任意的網址
+            // （openidconnect 的文件也建議這樣做）
+            .redirect(reqwest::redirect::Policy::none())
+            // 身分提供者沒有回應時，登入要在合理的時間內失敗，而不是讓使用者一直等
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
+            .user_agent(concat!("ManorCloud/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("failed to create the HTTP client");
+        HttpClient(client)
+    }
+}
 
 /// 登入次數限制的計數，所有請求共用同一份。
 ///
@@ -64,7 +86,7 @@ impl LoginLimits {
 ///
 /// axum 每次提取 `State` 都會 clone，所以每個欄位都必須便宜可 clone：
 /// `SqlitePool` 內部本來就是共享的，`data_dir` 用 `Arc<Path>` 避免每次複製路徑字串，
-/// 設定值是 Copy 的小型值，`LoginLimits` 內部是 `Arc`。
+/// 設定值是 Copy 的小型值，`LoginLimits` 與 `HttpClient` 內部是 `Arc`。
 ///
 /// `FromRef` 讓 handler 可以只提取需要的欄位，例如 `State<SqlitePool>` 或
 /// `State<UploadLimit>`，不必拿整個 `AppState`。
@@ -76,6 +98,7 @@ pub struct AppState {
     pub pending_upload_limit: PendingUploadLimit,
     pub cookie_secure: CookieSecure,
     pub login_limits: LoginLimits,
+    pub http: HttpClient,
 }
 
 impl AppState {
@@ -89,6 +112,7 @@ impl AppState {
             pending_upload_limit: PendingUploadLimit(DEFAULT_PENDING_UPLOAD_LIMIT),
             cookie_secure: CookieSecure(false),
             login_limits: LoginLimits::default(),
+            http: HttpClient::new(),
         }
     }
 
