@@ -1,4 +1,4 @@
-//! 對既有項目（檔案或資料夾）的操作：查詢、刪除、重新命名、搬移與複製。
+//! 對既有項目（檔案或資料夾）的操作：查詢、刪除（放進垃圾桶）、重新命名、搬移與複製。
 
 use std::collections::HashMap;
 use std::io;
@@ -83,29 +83,27 @@ async fn get_item(
 
 // ==================== 刪除 ====================
 
-/// DELETE /api/files/{id}：刪除檔案或資料夾（連同底下所有內容）。
+/// DELETE /api/files/{id}：把檔案或資料夾（連同底下所有內容）放進垃圾桶。
 ///
-/// 順序由不變式決定：資料庫先刪並 commit，之後才刪 blob。
-/// 刪 blob 失敗只記 log，留給垃圾回收；不影響回應，因為資料庫中的項目確實已經刪除了。
-///
-/// 取消安全：使用者在 commit 前斷線，交易自動 rollback，什麼都沒刪；
-/// 在 commit 後、刪 blob 的過程中斷線，剩下的 blob 成為孤兒，由垃圾回收處理。
+/// 內容與紀錄都還在，可以從垃圾桶還原；永久刪除在垃圾桶的 API 中（見 trash.rs），
+/// 超過保留期限的由垃圾回收永久刪除。
+/// 不存在、屬於別人、已經在垃圾桶中：都是同一個 404。
 async fn delete_item(
     user: CurrentUser,
     State(pool): State<SqlitePool>,
-    State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, AppError> {
-    let keys = files_db::delete_tree(&pool, user.id, id)
-        .await?
-        .ok_or_else(item_not_found)?;
-
-    remove_blobs(&data_dir, &keys).await;
-    Ok(StatusCode::NO_CONTENT)
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    if files_db::move_to_trash(&pool, user.id, id, now).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(item_not_found())
+    }
 }
 
-/// 逐一刪除 blob，任何一個失敗都不中斷其他的；失敗的留給垃圾回收
-async fn remove_blobs(data_dir: &Path, keys: &[String]) {
+/// 逐一刪除 blob，任何一個失敗都不中斷其他的；失敗的留給垃圾回收。
+/// 呼叫前資料庫的紀錄必須已經刪除並 commit（見 `files_db::delete_tree` 的不變式）
+pub(super) async fn remove_blobs(data_dir: &Path, keys: &[String]) {
     for key in keys {
         match storage::remove_blob(data_dir, key).await {
             Ok(()) => {}
@@ -496,7 +494,7 @@ mod tests {
     // ==================== 刪除 ====================
 
     #[sqlx::test]
-    async fn delete_file_removes_row_and_blob(pool: SqlitePool) {
+    async fn delete_moves_a_file_to_the_trash(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
         let (id, key) = t.store_file(t.user_id, None, "a.txt", b"hello").await;
 
@@ -509,18 +507,21 @@ mod tests {
             .await;
 
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(t.row_count().await, 0);
-        assert!(!t.blob_exists(&key));
+        // 紀錄與內容都還在（可以還原），但一般的 API 已經找不到它
+        assert_eq!(t.row_count().await, 1);
+        assert!(t.blob_exists(&key));
+        let (status, _, _) = t
+            .send(empty_request(Method::GET, &item_uri(id), Some(&t.cookie)))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[sqlx::test]
-    async fn delete_folder_removes_subtree_and_blobs(pool: SqlitePool) {
+    async fn delete_moves_a_folder_and_its_contents_to_the_trash(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
         let docs = t.make_folder(t.user_id, None, "docs").await;
         let sub = t.make_folder(t.user_id, Some(docs), "sub").await;
-        let (_, key_a) = t.store_file(t.user_id, Some(docs), "a.txt", b"a").await;
-        let (_, key_b) = t.store_file(t.user_id, Some(sub), "b.txt", b"b").await;
-        let (_, key_c) = t.store_file(t.user_id, None, "c.txt", b"c").await;
+        let (inner, key) = t.store_file(t.user_id, Some(sub), "b.txt", b"b").await;
 
         let (status, _, _) = t
             .send(empty_request(
@@ -531,12 +532,14 @@ mod tests {
             .await;
 
         assert_eq!(status, StatusCode::NO_CONTENT);
-        // 子樹裡的 blob 都刪了，資料夾外的 c.txt 不受影響
-        assert!(!t.blob_exists(&key_a));
-        assert!(!t.blob_exists(&key_b));
-        assert!(t.blob_exists(&key_c));
-        assert_eq!(t.blob_count(), 1);
-        assert_eq!(t.row_count().await, 1);
+        assert!(t.blob_exists(&key));
+        // 裡面的內容也一起不見了
+        for id in [sub, inner] {
+            let (status, _, _) = t
+                .send(empty_request(Method::GET, &item_uri(id), Some(&t.cookie)))
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+        }
     }
 
     #[sqlx::test]
@@ -592,25 +595,6 @@ mod tests {
 
         assert_eq!(first.0, StatusCode::NO_CONTENT);
         assert_eq!(second.0, StatusCode::NOT_FOUND);
-    }
-
-    #[sqlx::test]
-    async fn already_missing_blob_still_succeeds(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, key) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-        std::fs::remove_file(crate::storage::blob_path(t.dir.path(), &key).unwrap()).unwrap();
-
-        let (status, _, _) = t
-            .send(empty_request(
-                Method::DELETE,
-                &item_uri(id),
-                Some(&t.cookie),
-            ))
-            .await;
-
-        // blob 已經不在，刪除的目標本來就達成了
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(t.row_count().await, 0);
     }
 
     #[sqlx::test]
@@ -798,10 +782,16 @@ mod tests {
         assert!(body.get("storage_key").is_none());
         assert_eq!(t.blob_count(), 2);
 
-        // 刪掉原本的檔案，複本與它的內容仍然存在
+        // 永久刪除原本的檔案（放進垃圾桶、再從垃圾桶刪除），複本與它的內容仍然存在
         t.send(empty_request(
             Method::DELETE,
             &item_uri(id),
+            Some(&t.cookie),
+        ))
+        .await;
+        t.send(empty_request(
+            Method::DELETE,
+            &format!("/api/trash/{id}"),
             Some(&t.cookie),
         ))
         .await;

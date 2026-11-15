@@ -35,3 +35,11 @@ export function folderHref(folderId: number | null): string {
 
 /** 使用者管理頁的連結 */
 export const ADMIN_HREF = "#/admin";
+
+/** 垃圾桶的網址 */
+export const TRASH_HREF = "#/trash";
+
+/** 目前的網址是不是垃圾桶 */
+export function isTrashRoute(): boolean {
+  return window.location.hash === TRASH_HREF;
+}

@@ -118,6 +118,12 @@ button.primary {
     font-weight: 600;
 }
 
+/* 無法復原的動作（永久刪除、清空垃圾桶、停用帳號）：確認按鈕以紅色顯示 */
+button.primary.danger {
+    background: var(--error);
+    color: #fff;
+}
+
 button.secondary {
     padding: 0.4rem 0.8rem;
     border: 1px solid var(--border);
@@ -1408,4 +1414,128 @@ tr.disabled-row td {
     .round-button.toggle svg {
         transition: transform 0.15s ease;
     }
+}
+
+/* ---------- 垃圾桶 ---------- */
+
+/* 垃圾桶的標題列：左邊是標題與 Empty trash，佔用剩下的空間，把其他操作推到右邊 */
+.trash-title {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.trash-title .breadcrumbs {
+    flex: none;
+}
+
+/* 標題旁的文字按鈕。danger：無法復原的動作，以紅色文字顯示 */
+.title-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.title-action:hover {
+    background: var(--accent-soft);
+}
+
+.title-action.danger {
+    color: var(--error);
+}
+
+.title-action.danger:hover {
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+/* 30 天的說明 */
+.trash-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 12px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: var(--bar);
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+
+.trash-banner svg {
+    flex: none;
+}
+
+/* 垃圾桶的 Original location：太長時以「…」截斷，完整路徑在滑鼠停留時顯示 */
+table.files .col-location {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
+}
+
+.icon-button.danger:hover:not(:disabled) {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+/* ---------- 左下角的通知 ---------- */
+
+.toast {
+    position: fixed;
+    left: 16px;
+    bottom: 16px;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(480px, calc(100vw - 32px));
+    padding: 10px 10px 10px 16px;
+    border-radius: 8px;
+    background: var(--fg);
+    color: var(--bg);
+    box-shadow: var(--shadow);
+    font-size: 0.875rem;
+}
+
+.toast-message {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.toast-action {
+    padding: 4px 8px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--accent-soft);
+    font: inherit;
+    font-weight: 600;
+}
+
+.toast-action:hover {
+    background: rgba(127, 127, 127, 0.25);
+}
+
+.toast-close {
+    display: inline-flex;
+    padding: 4px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+}
+
+.toast-close:hover {
+    background: rgba(127, 127, 127, 0.25);
 }

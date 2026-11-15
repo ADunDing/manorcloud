@@ -67,9 +67,13 @@ export function directionLabel(key: SortKey, direction: SortDirection): string {
   return direction === "asc" ? ascending : descending;
 }
 
-export function loadSort(): SortOptions {
+/**
+ * 讀取記住的排序。My files 與 Trash 各自記住（storageKey 不同），
+ * 垃圾桶預設以刪除時間由新到舊排列
+ */
+export function loadSort(storageKey = STORAGE_KEY, fallback = DEFAULT_SORT): SortOptions {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (raw !== null) {
       const value: unknown = JSON.parse(raw);
       if (
@@ -88,12 +92,12 @@ export function loadSort(): SortOptions {
   } catch {
     // 無法使用 localStorage 或格式不對：用預設值
   }
-  return DEFAULT_SORT;
+  return fallback;
 }
 
-export function saveSort(options: SortOptions): void {
+export function saveSort(options: SortOptions, storageKey = STORAGE_KEY): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(options));
+    localStorage.setItem(storageKey, JSON.stringify(options));
   } catch {
     // 無法儲存只代表下次回到預設
   }

@@ -1,4 +1,5 @@
-//! 垃圾回收：清除磁碟上沒有資料庫參照的檔案、放棄的分段上傳，以及過期的 session。
+//! 垃圾回收：清除磁碟上沒有資料庫參照的檔案、放棄的分段上傳、過期的 session，
+//! 以及放進垃圾桶超過保留期限的項目。
 //!
 //! 核心不變式：資料庫裡的每一個 storage_key，磁碟上一定有對應的 blob；反過來不保證。
 //! 「磁碟有、資料庫沒有」的孤兒由這裡清除，來源包括：
@@ -50,6 +51,8 @@ pub struct GcPolicy {
     /// 分段上傳的紀錄多久沒有進度就視為放棄。
     /// 從最後一次進度算起：晚上傳到一半闔上筆電，隔天早上還能續傳
     pub upload_grace: Duration,
+    /// 放進垃圾桶的項目保留多久，之後永久刪除。與 Google Drive 相同的 30 天
+    pub trash_retention: Duration,
 }
 
 impl Default for GcPolicy {
@@ -58,6 +61,7 @@ impl Default for GcPolicy {
             blob_grace: Duration::from_secs(60 * 60),
             tmp_grace: Duration::from_secs(24 * 60 * 60),
             upload_grace: Duration::from_secs(24 * 60 * 60),
+            trash_retention: Duration::from_secs(30 * 24 * 60 * 60),
         }
     }
 }
@@ -72,6 +76,8 @@ pub struct GcReport {
     /// 放棄的分段上傳紀錄
     pub expired_uploads: u64,
     pub expired_sessions: u64,
+    /// 超過保留期限、從垃圾桶永久刪除的項目（資料夾算一個）
+    pub purged_trash: u64,
     /// 是孤兒但還在寬限期內，這次保留
     pub kept_recent: u64,
     /// 不認得的項目（名稱不符、位置不符、目錄、符號連結），一律不處理
@@ -85,13 +91,14 @@ impl fmt::Display for GcReport {
         write!(
             f,
             "deleted {} blobs, {} temp files, {} upload part files; \
-             expired {} uploads, {} sessions; \
+             expired {} uploads, {} sessions; purged {} trash items; \
              kept {} recent; skipped {} unknown; {} errors",
             self.deleted_blobs,
             self.deleted_tmp,
             self.deleted_parts,
             self.expired_uploads,
             self.expired_sessions,
+            self.purged_trash,
             self.kept_recent,
             self.skipped_unknown,
             self.errors
@@ -273,6 +280,7 @@ async fn delete_in_background(paths: Vec<PathBuf>) -> (u64, u64) {
 /// 執行一次完整的垃圾回收。「現在」與寬限期由參數傳入，測試可以控制時間。
 ///
 /// 個別步驟的錯誤只記 log 並計入報告，不會中斷其他步驟。
+/// 垃圾桶最先處理：它刪除 blob 時若有失敗，留下的孤兒在同一次的 blobs 掃描中就會被清除。
 pub async fn run_once(
     pool: &SqlitePool,
     data_dir: &Path,
@@ -280,11 +288,52 @@ pub async fn run_once(
     policy: &GcPolicy,
 ) -> GcReport {
     let mut report = GcReport::default();
+    collect_trash(pool, data_dir, now, policy.trash_retention, &mut report).await;
     collect_blobs(pool, data_dir, now, policy.blob_grace, &mut report).await;
     collect_tmp(data_dir, now, policy.tmp_grace, &mut report).await;
     collect_uploads(pool, data_dir, now, policy, &mut report).await;
     collect_sessions(pool, now, &mut report).await;
     report
+}
+
+/// 永久刪除放進垃圾桶超過保留期限的項目。
+///
+/// 與使用者永久刪除相同的順序：資料庫先刪並 commit，之後才刪 blob。
+/// 時鐘異常時跳過；trashed_at 在未來的項目自然不會被選中
+async fn collect_trash(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    now: SystemTime,
+    retention: Duration,
+    report: &mut GcReport,
+) {
+    let Some(now_secs) = unix_secs(now) else {
+        return;
+    };
+    let retention = i64::try_from(retention.as_secs()).unwrap_or(i64::MAX);
+
+    let keys = match files_db::purge_trash(pool, now_secs.saturating_sub(retention)).await {
+        Ok((purged, keys)) => {
+            report.purged_trash += purged;
+            keys
+        }
+        Err(e) => {
+            eprintln!("gc: cannot purge the trash: {e}");
+            report.errors += 1;
+            return;
+        }
+    };
+
+    for key in keys {
+        match storage::remove_blob(data_dir, &key).await {
+            Ok(()) => report.deleted_blobs += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                eprintln!("gc: cannot delete blob {key} of a purged trash item: {e}");
+                report.errors += 1;
+            }
+        }
+    }
 }
 
 /// 清除 blobs/ 中的孤兒：依分層逐一比對，記憶體用量不隨檔案總數成長
@@ -729,6 +778,42 @@ mod tests {
         assert_eq!(report.deleted_tmp, 1);
         assert_eq!(report.kept_recent, 1);
         assert_eq!(report.skipped_unknown, 1);
+    }
+
+    // ==================== run_once：垃圾桶 ====================
+
+    #[sqlx::test]
+    async fn purges_trash_past_the_retention_only(pool: SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = user::create_user(&pool, "carol", "x").await.unwrap();
+        let now = SystemTime::now();
+        let now_secs = unix_secs(now).unwrap();
+
+        let old_key = key("00", 1);
+        let recent_key = key("00", 2);
+        let old = files_db::create_file(&pool, owner, None, "old.txt", 1, None, &old_key)
+            .await
+            .unwrap();
+        let recent = files_db::create_file(&pool, owner, None, "recent.txt", 1, None, &recent_key)
+            .await
+            .unwrap();
+        // blob 的 mtime 很舊：確認保住 recent.txt 的是資料庫紀錄，而不是寬限期
+        put(&blob(&dir, &old_key), now - 40 * DAY);
+        put(&blob(&dir, &recent_key), now - 40 * DAY);
+        files_db::move_to_trash(&pool, owner, old.id, now_secs - 31 * 24 * 60 * 60)
+            .await
+            .unwrap();
+        files_db::move_to_trash(&pool, owner, recent.id, now_secs - 24 * 60 * 60)
+            .await
+            .unwrap();
+
+        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
+
+        assert_eq!(report.purged_trash, 1);
+        assert!(!blob(&dir, &old_key).exists(), "超過 30 天的要永久刪除");
+        assert!(blob(&dir, &recent_key).exists(), "30 天內的要保留");
+        assert_eq!(files_db::list_trash(&pool, owner).await.unwrap().len(), 1);
+        assert_eq!(report.errors, 0);
     }
 
     // ==================== run_once：分段上傳 ====================

@@ -52,6 +52,19 @@ export interface ServerConfig {
 }
 
 /** GET /api/storage 的回應：檔案所在硬碟的容量（位元組）。對應 Rust 端 web/files.rs 的 StorageResponse */
+/** 垃圾桶中的一個項目（GET /api/trash） */
+export interface TrashItem {
+  readonly id: number;
+  readonly name: string;
+  readonly kind: "file" | "folder";
+  /** 檔案的大小；資料夾是裡面所有檔案的總和 */
+  readonly size: number;
+  /** 放進垃圾桶的時間（Unix 秒數） */
+  readonly trashed_at: number;
+  /** 原本的位置，由上往下的資料夾名稱；空的代表 My files */
+  readonly location: readonly string[];
+}
+
 export interface StorageInfo {
   readonly total_bytes: number;
   readonly available_bytes: number;

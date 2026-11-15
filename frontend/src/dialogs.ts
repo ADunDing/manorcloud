@@ -1,10 +1,57 @@
-// 對話框：輸入名稱（New folder）、選擇下載方式。
+// 對話框：確認、輸入名稱（New folder）、選擇下載方式。
+// 整個程式都用這裡的對話框，不用瀏覽器內建的 confirm：外觀一致，也跟著深色模式。
 //
 // 用瀏覽器內建的 <dialog>：showModal() 讓背景不能操作，Esc 自動關閉，焦點留在對話框裡。
 
 import { ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
+
+export interface ConfirmOptions {
+  readonly title: string;
+  readonly message: string;
+  readonly confirmLabel: string;
+  /** 刪除等無法復原的動作：確認按鈕以紅色顯示，預設的焦點放在 Cancel */
+  readonly danger?: boolean;
+}
+
+/** 確認一個動作。按下確認回傳 true；Cancel、Esc 回傳 false */
+export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    let confirmed = false;
+    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const confirm = h(
+      "button",
+      { type: "submit", class: options.danger === true ? "primary danger" : "primary" },
+      options.confirmLabel,
+    );
+    const form = h(
+      "form",
+      { method: "dialog", class: "dialog-form" },
+      h("h2", { class: "dialog-title" }, options.title),
+      // 文字是純文字（textContent），檔名或帳號名稱不會被當成 HTML 解析
+      h("p", { class: "dialog-message" }, options.message),
+      h("div", { class: "dialog-actions" }, cancel, confirm),
+    );
+    const dialog = h("dialog", { class: "dialog", "aria-label": options.title }, form);
+
+    cancel.addEventListener("click", () => dialog.close());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      confirmed = true;
+      dialog.close();
+    });
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      resolve(confirmed);
+    });
+
+    document.body.append(dialog);
+    dialog.showModal();
+    // 無法復原的動作：按 Enter 不會不小心確認
+    (options.danger === true ? cancel : confirm).focus();
+  });
+}
 
 export interface NameDialogOptions {
   readonly title: string;

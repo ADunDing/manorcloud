@@ -6,8 +6,9 @@ import { renderChangeCredentials, renderLogin } from "./auth-view.js";
 import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
 import { h } from "./dom.js";
 import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
-import { ADMIN_HREF, currentRoute, folderHref } from "./router.js";
+import { ADMIN_HREF, currentRoute, folderHref, isTrashRoute } from "./router.js";
 import { hideSidebar, renderSidebar } from "./sidebar.js";
+import { leaveTrash, renderTrash } from "./trash-view.js";
 import type { User } from "./types.js";
 
 /** 取得 index.html 中一定存在的元素；不存在代表 HTML 與程式碼不同步，直接報錯 */
@@ -56,18 +57,26 @@ function showScreen(user: User): void {
   }
 }
 
-/** 依網址顯示「My files」或「Users」 */
+/** 依網址顯示「My files」「Trash」或「Users」 */
 function showHome(user: User): void {
   currentUser = user;
   screen = "home";
   closeMenus();
   showAccount(user, { navigation: true });
+  leaveTrash();
+
+  if (isTrashRoute()) {
+    leaveBrowser();
+    renderSidebar(sidebar, sidebarActions, "trash");
+    renderTrash(app);
+    return;
+  }
 
   const route = currentRoute();
   if (route.view === "admin") {
     if (user.role === "admin") {
       leaveBrowser();
-      renderSidebar(sidebar, sidebarActions, false);
+      renderSidebar(sidebar, sidebarActions, null);
       // 降級自己之後重新讀取使用者，交給 showScreen 決定畫面
       renderAdmin(app, user, () => void refresh());
       return;
@@ -75,14 +84,15 @@ function showHome(user: User): void {
     // 不是管理員：回到 My files。replaceState 不會觸發 hashchange，也不會留下歷史紀錄
     history.replaceState(null, "", folderHref(null));
   }
-  renderSidebar(sidebar, sidebarActions, true);
+  renderSidebar(sidebar, sidebarActions, "files");
   renderBrowser(app, route.view === "files" ? route.folderId : null);
 }
 
 function showSettings(user: User): void {
   screen = "settings";
   leaveBrowser();
-  renderSidebar(sidebar, sidebarActions, false);
+  leaveTrash();
+  renderSidebar(sidebar, sidebarActions, null);
   renderChangeCredentials(app, user, showScreen, {
     forced: false,
     onCancel: () => showHome(user),
@@ -93,6 +103,7 @@ function showLoggedOut(notice?: string): void {
   screen = "login";
   currentUser = null;
   leaveBrowser();
+  leaveTrash();
   closeMenus();
   account.replaceChildren();
   hideSidebar(sidebar);
@@ -225,17 +236,19 @@ brand.addEventListener("click", (event) => {
   }
 });
 
-// 側欄的 My files：同樣處理網址沒有改變的情況（例如從帳號設定頁回來）
+// 側欄的連結（My files、Trash）：前往連結本身的網址。
+// 自己處理而不交給瀏覽器，是為了網址沒有改變時也能重新顯示（例如從帳號設定頁回到 My files）
 sidebar.addEventListener("click", (event) => {
   const target = event.target;
-  if (
-    currentUser !== null &&
-    target instanceof Element &&
-    target.closest(".nav-link") !== null
-  ) {
-    event.preventDefault();
-    go(currentUser, folderHref(null));
+  if (currentUser === null || !(target instanceof Element)) {
+    return;
   }
+  const link = target.closest<HTMLAnchorElement>("a.nav-link");
+  if (link === null) {
+    return;
+  }
+  event.preventDefault();
+  go(currentUser, link.getAttribute("href") ?? folderHref(null));
 });
 
 // 檔案被拖放到上傳區域以外的地方時，瀏覽器預設會直接開啟那個檔案、離開 ManorCloud。

@@ -11,6 +11,7 @@ mod range;
 mod register;
 mod shutdown;
 mod state;
+mod trash;
 mod uploads;
 
 #[cfg(test)]
@@ -85,6 +86,7 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
         .merge(download::router())
         .merge(items::router())
         .merge(uploads::router())
+        .merge(trash::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }
 

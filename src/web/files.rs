@@ -188,6 +188,9 @@ async fn create_folder(
 ) -> Result<(StatusCode, Json<FileResponse>), AppError> {
     let name = validate_file_name(&req.name).map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    // 垃圾桶中的資料夾不能再放東西進去。資料庫的約束只檢查「父項目是資料夾」
+    ensure_owned_folder(&pool, &user, req.parent_id).await?;
+
     let entry = files_db::create_folder(&pool, user.id, req.parent_id, &name)
         .await
         .map_err(create_error)?;

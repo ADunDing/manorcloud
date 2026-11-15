@@ -8,6 +8,7 @@
 //   資料夾帶有 data-drop-folder，可以接受放下；放下後的處理在檔案瀏覽畫面
 //
 // 這個模組只負責畫面與選取；開啟、改名、右鍵選單要做的事，由建構時傳入的函式決定。
+// My files 與 Trash 共用：垃圾桶不能拖曳、多一欄原本的位置、時間那一欄是刪除時間。
 // Ctrl／⌘＋A、Esc、F2 是整個頁面的快捷鍵，由檔案瀏覽畫面處理，再呼叫這裡的方法。
 
 import { h } from "./dom.js";
@@ -17,6 +18,25 @@ import type { SortKey, SortOptions } from "./sort.js";
 import type { FileItem } from "./types.js";
 
 export type ViewMode = "list" | "grid";
+
+const VIEW_KEY = "manorcloud.view";
+
+/** 記住的檢視方式（List 或 Grid）：My files 與 Trash 共用同一個設定 */
+export function loadView(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "grid" ? "grid" : "list";
+  } catch {
+    return "list";
+  }
+}
+
+export function saveView(view: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_KEY, view);
+  } catch {
+    // 無法儲存只代表下次回到 List
+  }
+}
 
 /**
  * 拖曳項目時放在 dataTransfer 中的類型。用自訂的類型區分「站內的項目」與「從電腦拖進來的檔案」：
@@ -40,6 +60,14 @@ export interface FileListOptions {
   readonly onSort: (key: SortKey) => void;
   /** 排序按鈕與選單：List 時放在 Modified 的右邊，Grid 時放在方塊上方 */
   readonly sortControl: HTMLElement;
+  /** 可以拖曳搬移、資料夾可以接受放下。垃圾桶中為 false */
+  readonly draggable?: boolean;
+  /** 有的話，在 Name 右邊多一欄「Original location」，顯示這個函式回傳的文字（垃圾桶） */
+  readonly location?: (item: FileItem) => string;
+  /** 時間那一欄的名稱，預設 Modified；垃圾桶是 Deleted */
+  readonly timeLabel?: string;
+  /** 沒有任何項目時顯示的文字 */
+  readonly emptyMessage?: string;
   /**
    * 框選的範圍：選取框畫在這個元素裡，座標也以它為準。
    * 是整個內容區而不只是列表，所以從路徑旁、列表下方等任何空白處都能開始框選
@@ -71,6 +99,8 @@ const MIN_MODIFIED = 150;
 const CHECK_COLUMN = 44;
 /** 排序按鈕那一欄的寬度：與 CSS 的 .col-sort 相同 */
 const SORT_COLUMN = 120;
+/** 垃圾桶的 Original location 自動佔用空間，但至少保留這麼寬 */
+const MIN_LOCATION = 120;
 /** 滑鼠移動超過這個距離才算拖曳，否則是點擊 */
 const DRAG_THRESHOLD = 4;
 /** 用鍵盤調整欄寬時，每按一次的寬度 */
@@ -109,7 +139,7 @@ export class FileList {
         h(
           "p",
           { class: "empty-state" },
-          "This folder is empty. Drop files here or use Upload to add some.",
+          options.emptyMessage ?? "This folder is empty. Drop files here or use Upload to add some.",
         ),
       );
     } else if (options.view === "grid") {
@@ -260,11 +290,14 @@ export class FileList {
           {},
           h("th", { scope: "col", class: "col-check" }, box),
           name,
+          this.options.location === undefined
+            ? null
+            : h("th", { scope: "col", class: "col-location" }, "Original location"),
           size,
           h(
             "th",
             { scope: "col", class: "num", "aria-sort": this.ariaSort("modified") },
-            this.sortButton("modified", "Modified"),
+            this.sortButton("modified", this.options.timeLabel ?? "Modified"),
           ),
           h(
             "th",
@@ -310,25 +343,30 @@ export class FileList {
   private row(item: FileItem): HTMLElement {
     const box = this.checkbox(item);
     const name = h("span", { class: "item-name", title: item.name }, item.name);
+    const drop = this.dropTarget(item);
     // 只有圖示與檔名可以拖曳搬移；列的其他地方留給框選
     const handle = h(
       "span",
-      { class: "name-cell", draggable: "true" },
+      { class: "name-cell", draggable: this.canDrag() ? "true" : null },
       icon(item.kind === "folder" ? "folder" : "file"),
       name,
     );
+    const location = this.options.location?.(item);
     const row = h(
       "tr",
       {
         class: item.kind === "folder" ? "is-folder" : null,
         "data-id": item.id,
-        "data-drop-folder": item.kind === "folder" ? item.id : null,
-        "data-drop-name": item.kind === "folder" ? item.name : null,
+        "data-drop-folder": drop?.id ?? null,
+        "data-drop-name": drop?.name ?? null,
         "aria-selected": "false",
         tabindex: "-1",
       },
       h("td", { class: "col-check" }, box),
       h("td", {}, handle),
+      location === undefined
+        ? null
+        : h("td", { class: "col-location", title: location }, location),
       h("td", { class: "num" }, formatSize(item.size)),
       h("td", { class: "num" }, formatTime(item.updated_at)),
       h("td", { class: "col-sort" }),
@@ -355,16 +393,17 @@ export class FileList {
     const box = this.checkbox(item);
     const name = h("span", { class: "item-name", title: item.name }, item.name);
     const isFolder = item.kind === "folder";
+    const drop = this.dropTarget(item);
     const tile = h(
       "li",
       {
         class: isFolder ? "tile is-folder" : "tile",
         role: "option",
         "data-id": item.id,
-        "data-drop-folder": isFolder ? item.id : null,
-        "data-drop-name": isFolder ? item.name : null,
+        "data-drop-folder": drop?.id ?? null,
+        "data-drop-name": drop?.name ?? null,
         "aria-selected": "false",
-        draggable: "true",
+        draggable: this.canDrag() ? "true" : null,
         tabindex: "-1",
       },
       box,
@@ -374,6 +413,15 @@ export class FileList {
     );
     this.bind(item, tile, box, name, tile);
     return tile;
+  }
+
+  private canDrag(): boolean {
+    return this.options.draggable ?? true;
+  }
+
+  /** 可以接受放下的資料夾才有：拖曳啟用時的資料夾 */
+  private dropTarget(item: FileItem): { id: number; name: string } | null {
+    return this.canDrag() && item.kind === "folder" ? { id: item.id, name: item.name } : null;
   }
 
   private checkbox(item: FileItem): HTMLInputElement {
@@ -768,7 +816,12 @@ export class FileList {
     const other = column === "name" ? this.columns.size : this.columns.name;
     const max = Math.max(
       MIN_WIDTH[column],
-      this.element.clientWidth - CHECK_COLUMN - other - MIN_MODIFIED - SORT_COLUMN,
+      this.element.clientWidth -
+        CHECK_COLUMN -
+        other -
+        MIN_MODIFIED -
+        SORT_COLUMN -
+        (this.options.location === undefined ? 0 : MIN_LOCATION),
     );
     const value = Math.round(Math.max(MIN_WIDTH[column], Math.min(max, width)));
     this.columns = { ...this.columns, [column]: value };

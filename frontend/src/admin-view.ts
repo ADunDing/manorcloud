@@ -4,6 +4,7 @@
 // 關閉面板時先清空值再移除元素，不會殘留在 DOM 中。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
+import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
 import { formatUtcText } from "./format.js";
 import type { CreatedUser, ManagedUser, ResetPasswordResponse, User } from "./types.js";
@@ -113,7 +114,7 @@ class AdminView {
         { class: "actions-cell" },
         h(
           "button",
-          { type: "button", class: "link", onClick: () => this.toggleRole(user, isSelf) },
+          { type: "button", class: "link", onClick: () => void this.toggleRole(user, isSelf) },
           user.role === "admin" ? "Remove admin" : "Make admin",
         ),
         // 後端不允許停用自己、重設自己的密碼：自己那一列不顯示這兩個按鈕
@@ -121,14 +122,14 @@ class AdminView {
           ? null
           : h(
               "button",
-              { type: "button", class: "link", onClick: () => this.toggleDisabled(user) },
+              { type: "button", class: "link", onClick: () => void this.toggleDisabled(user) },
               user.disabled ? "Enable" : "Disable",
             ),
         isSelf
           ? null
           : h(
               "button",
-              { type: "button", class: "link", onClick: () => this.resetPassword(user) },
+              { type: "button", class: "link", onClick: () => void this.resetPassword(user) },
               "Reset password",
             ),
       ),
@@ -175,15 +176,25 @@ class AdminView {
 
   // ---------- 修改 ----------
 
-  private toggleRole(user: ManagedUser, isSelf: boolean): void {
+  private async toggleRole(user: ManagedUser, isSelf: boolean): Promise<void> {
     const promote = user.role !== "admin";
-    // confirm 的文字是純文字，帳號名稱不會被當成 HTML 解析
-    const message = promote
-      ? `Make ${user.username} an administrator? Administrators can create and disable accounts and reset anyone's password.`
-      : isSelf
-        ? "Remove your own administrator rights? You won't be able to open this page afterwards."
-        : `Remove administrator rights from ${user.username}?`;
-    if (!window.confirm(message)) {
+    const confirmed = await confirmDialog(
+      promote
+        ? {
+            title: "Make administrator?",
+            message: `${user.username} will be able to create and disable accounts and reset anyone's password.`,
+            confirmLabel: "Make administrator",
+          }
+        : {
+            title: "Remove administrator rights?",
+            message: isSelf
+              ? "You won't be able to open this page afterwards."
+              : `${user.username} will become a regular member.`,
+            confirmLabel: "Remove rights",
+            danger: isSelf,
+          },
+    );
+    if (!confirmed) {
       return;
     }
 
@@ -198,23 +209,29 @@ class AdminView {
     });
   }
 
-  private toggleDisabled(user: ManagedUser): void {
+  private async toggleDisabled(user: ManagedUser): Promise<void> {
     if (
       !user.disabled &&
-      !window.confirm(
-        `Disable ${user.username}? They'll be logged out on every device and won't be able to log in.`,
-      )
+      !(await confirmDialog({
+        title: `Disable ${user.username}?`,
+        message: "They'll be logged out on every device and won't be able to log in.",
+        confirmLabel: "Disable",
+        danger: true,
+      }))
     ) {
       return;
     }
     this.perform(() => api.patch(`/api/admin/users/${user.id}`, { disabled: !user.disabled }));
   }
 
-  private resetPassword(user: ManagedUser): void {
+  private async resetPassword(user: ManagedUser): Promise<void> {
     if (
-      !window.confirm(
-        `Reset the password of ${user.username}? They'll be logged out on every device and need a new temporary password to log in.`,
-      )
+      !(await confirmDialog({
+        title: `Reset the password of ${user.username}?`,
+        message: "They'll be logged out on every device and need a new temporary password to log in.",
+        confirmLabel: "Reset password",
+        danger: true,
+      }))
     ) {
       return;
     }

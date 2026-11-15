@@ -36,11 +36,11 @@ const MIB: u64 = 1024 * 1024;
 /// 深度上限 256：與伺服器端的祖先鏈查詢相同，資料被改壞形成循環時也會停止。
 const TREE_QUERY: &str = "
 WITH RECURSIVE tree(id, path, depth) AS (
-    SELECT id, name, 0 FROM files WHERE parent_id IS NULL
+    SELECT id, name, 0 FROM files WHERE parent_id IS NULL AND trashed_at IS NULL
     UNION ALL
     SELECT f.id, tree.path || '/' || f.name, tree.depth + 1
     FROM files f JOIN tree ON f.parent_id = tree.id
-    WHERE tree.depth < 256
+    WHERE tree.depth < 256 AND f.trashed_at IS NULL
 )
 SELECT users.username, tree.path, files.kind, files.storage_key, files.updated_at
 FROM tree
@@ -164,11 +164,12 @@ async fn export_tree(pool: &SqlitePool, data_dir: &Path, out: &Path) -> Result<S
         .fetch_all(pool)
         .await
         .map_err(|e| format!("cannot read the database: {e}"))?;
-    let total: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(size), 0) FROM files WHERE kind = 'file'")
-            .fetch_one(pool)
-            .await
-            .map_err(|e| format!("cannot read the database: {e}"))?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(size), 0) FROM files WHERE kind = 'file' AND trashed_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("cannot read the database: {e}"))?;
 
     // 這是複製而不是搬移：輸出目錄所在的磁碟需要與所有檔案相同的空間
     let needed = u64::try_from(total).unwrap_or(0);

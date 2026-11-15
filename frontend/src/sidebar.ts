@@ -1,12 +1,15 @@
-// 左側欄：New 選單、My files，以及檔案所在硬碟的容量。
+// 左側欄：New 選單、My files、Trash，以及檔案所在硬碟的容量。
 
 import { api } from "./api.js";
 import { h } from "./dom.js";
 import { formatSize } from "./format.js";
 import { icon } from "./icons.js";
 import { dropdown, menuItem, menuSeparator } from "./menu.js";
-import { folderHref } from "./router.js";
+import { folderHref, TRASH_HREF } from "./router.js";
 import type { StorageInfo } from "./types.js";
+
+/** 目前所在的區塊：側欄中對應的項目會反白。帳號設定、使用者管理等頁面不屬於任何一個 */
+export type Section = "files" | "trash" | null;
 
 export interface SidebarActions {
   readonly newFolder: () => void;
@@ -24,13 +27,14 @@ let loading = 0;
 /**
  * 顯示側欄。
  *
- * @param onFiles 目前是否在檔案頁面：New 只在檔案頁面可以使用（新增的東西要放進目前的資料夾）
+ * @param section 目前所在的區塊。New 只在 My files 可以使用（新增的東西要放進目前的資料夾）
  */
 export function renderSidebar(
   container: HTMLElement,
   actions: SidebarActions,
-  onFiles: boolean,
+  section: Section,
 ): void {
+  const onFiles = section === "files";
   const newButton = h(
     "button",
     {
@@ -87,6 +91,20 @@ export function renderSidebar(
             },
             icon("folder", 20),
             "My files",
+          ),
+        ),
+        h(
+          "li",
+          {},
+          h(
+            "a",
+            {
+              href: TRASH_HREF,
+              class: "nav-link",
+              "aria-current": section === "trash" ? "page" : null,
+            },
+            icon("trash", 20),
+            "Trash",
           ),
         ),
       ),

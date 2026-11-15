@@ -2,6 +2,8 @@ use std::fmt;
 
 use sqlx::SqlitePool;
 
+use crate::files::name::{numbered_name, validate_file_name};
+
 /// 與 migration 中 trigger 的 RAISE 訊息完全一致。
 /// 兩邊必須同步修改；`parent_is_a_file` 測試會在不一致時失敗。
 const PARENT_NOT_FOLDER_MSG: &str = "parent must be a folder";
@@ -75,7 +77,7 @@ fn classify(e: sqlx::Error) -> CreateFileError {
     CreateFileError::Db(e)
 }
 
-/// 這個 id 是否為該使用者的資料夾。用於上傳、列表與搬移前的檢查。
+/// 這個 id 是否為該使用者的資料夾（不在垃圾桶中）。用於上傳、列表與搬移前的檢查。
 ///
 /// 三個條件寫在同一個 WHERE 裡：「不存在」「屬於別人」「是檔案而非資料夾」
 /// 都是「找不到符合的列」，天然得到同樣的 false，程式中沒有任何能洩漏差異的分支。
@@ -93,7 +95,7 @@ pub async fn is_owned_folder<'e>(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM files
-            WHERE id = ? AND owner_id = ? AND kind = 'folder'
+            WHERE id = ? AND owner_id = ? AND kind = 'folder' AND trashed_at IS NULL
         ) AS "exists!: bool"
         "#,
         folder_id,
@@ -149,6 +151,7 @@ pub async fn create_file(
 }
 
 /// 資料夾中同名項目（不分大小寫，與唯一索引相同）的種類："file" 或 "folder"；沒有時為 None。
+/// 垃圾桶中的項目不算：它們不佔用名稱。
 ///
 /// `parent_id IS ?` 而不是 `= ?`：根目錄的 parent_id 是 NULL，而 `NULL = NULL` 不成立
 pub async fn existing_kind(
@@ -159,7 +162,8 @@ pub async fn existing_kind(
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kind FROM files
-         WHERE owner_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE",
+         WHERE owner_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE
+           AND trashed_at IS NULL",
     )
     .bind(owner_id)
     .bind(parent_id)
@@ -200,7 +204,8 @@ pub async fn replace_file(
 
     let existing: Option<(i64, String, Option<String>)> = sqlx::query_as(
         "SELECT id, kind, storage_key FROM files
-         WHERE owner_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE",
+         WHERE owner_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE
+           AND trashed_at IS NULL",
     )
     .bind(owner_id)
     .bind(parent_id)
@@ -299,7 +304,7 @@ pub async fn list_children(
             created_at  AS "created_at!",
             updated_at  AS "updated_at!"
         FROM files
-        WHERE owner_id = ? AND parent_id IS ?
+        WHERE owner_id = ? AND parent_id IS ? AND trashed_at IS NULL
         ORDER BY kind = 'folder' DESC, name, id
         "#,
         owner_id,
@@ -309,7 +314,8 @@ pub async fn list_children(
     .await
 }
 
-/// 取得該使用者的一個項目。「不存在」與「屬於別人」都回傳 `None`。
+/// 取得該使用者的一個項目。「不存在」「屬於別人」「在垃圾桶中」都回傳 `None`：
+/// 垃圾桶中的項目不能被下載、改名、搬移，只能從垃圾桶還原或永久刪除。
 ///
 /// 接受連線池或交易（`&pool` 或 `&mut *tx`）。
 pub async fn find_file<'e>(
@@ -332,7 +338,7 @@ pub async fn find_file<'e>(
             created_at  AS "created_at!",
             updated_at  AS "updated_at!"
         FROM files
-        WHERE id = ? AND owner_id = ?
+        WHERE id = ? AND owner_id = ? AND trashed_at IS NULL
         "#,
         id,
         owner_id
@@ -341,7 +347,8 @@ pub async fn find_file<'e>(
     .await
 }
 
-/// 刪除一個項目；若是資料夾，底下所有內容一併刪除（CASCADE）。
+/// 永久刪除一個項目；若是資料夾，底下所有內容一併刪除（CASCADE）。
+/// 使用者的「刪除」是放進垃圾桶（`move_to_trash`）；這個函式用於複製失敗時的復原。
 ///
 /// 回傳：`None` 代表不存在或不屬於該使用者；
 /// `Some(keys)` 代表**已經 commit**，`keys` 是被刪除的檔案的 storage_key，
@@ -637,7 +644,7 @@ pub struct TreeEntry {
 const MAX_TREE_DEPTH: i64 = 256;
 
 /// 一個項目與它底下的所有內容：依深度排列（父項目一定在子項目之前），同一層依路徑排序。
-/// 項目不存在或不屬於該使用者時回傳空的清單。
+/// 項目不存在、不屬於該使用者或在垃圾桶中時回傳空的清單；資料夾中已經被刪除的內容不包含在內。
 ///
 /// 一條 SQL 取得整棵樹：同一個查詢看到的是同一個時間點的資料，
 /// 複製或打包的途中有人新增或刪除檔案，也不會拿到前後不一致的子樹。
@@ -652,12 +659,12 @@ pub async fn subtree(
     sqlx::query_as(
         "WITH RECURSIVE tree(id, parent_id, name, kind, size, mime, storage_key, updated_at, path, depth) AS (
              SELECT id, parent_id, name, kind, size, mime, storage_key, updated_at, name, 0
-             FROM files WHERE id = ? AND owner_id = ?
+             FROM files WHERE id = ? AND owner_id = ? AND trashed_at IS NULL
              UNION ALL
              SELECT f.id, f.parent_id, f.name, f.kind, f.size, f.mime, f.storage_key, f.updated_at,
                     t.path || '/' || f.name, t.depth + 1
              FROM files f JOIN tree t ON f.parent_id = t.id
-             WHERE t.depth < ?
+             WHERE t.depth < ? AND f.trashed_at IS NULL
          )
          SELECT id, parent_id, name, kind, size, mime, storage_key, updated_at, path, depth
          FROM tree
@@ -695,6 +702,291 @@ pub async fn is_inside(
     .bind(folder)
     .fetch_one(pool)
     .await
+}
+
+// ==================== 垃圾桶 ====================
+
+/// 垃圾桶中的一個項目：使用者刪除的「那一個」，不含一起進入垃圾桶的內容
+#[derive(Debug, sqlx::FromRow)]
+pub struct TrashItem {
+    pub id: i64,
+    /// 原本所在的資料夾；None 是 My files
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub kind: String,
+    pub size: Option<i64>,
+    pub trashed_at: i64,
+}
+
+/// 還原的結果
+#[derive(Debug)]
+pub enum RestoreError {
+    /// 不在垃圾桶中，或不屬於該使用者
+    NotFound,
+    /// 原處的名稱與「名稱 (1)」到「名稱 (999)」都被使用了
+    NameConflict,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for RestoreError {
+    fn from(e: sqlx::Error) -> Self {
+        RestoreError::Db(e)
+    }
+}
+
+impl fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RestoreError::NotFound => f.write_str("item not found in the trash"),
+            RestoreError::NameConflict => f.write_str("no free name to restore the item"),
+            RestoreError::Db(e) => write!(f, "database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+/// 「同一次放進垃圾桶的內容」：從垃圾桶中的項目（?1，屬於 ?2）往下，
+/// 只經過同一個時間、而且本身不是另一個垃圾桶項目的子項目。
+/// 資料夾裡先前已經被個別刪除的項目是自己的 trash_root，遞迴不會經過它，它與底下的內容都不包含在內。
+///
+/// 用巨集組合，而不是在執行時 format!：sqlx 只接受編譯時就確定的 SQL，從結構上排除注入
+macro_rules! trash_batch {
+    ($rest:literal) => {
+        concat!(
+            "WITH RECURSIVE batch(id) AS (
+                 SELECT id FROM files WHERE id = ?1 AND owner_id = ?2 AND trash_root = 1
+                 UNION
+                 SELECT f.id FROM files f JOIN batch b ON f.parent_id = b.id
+                 WHERE f.trash_root = 0
+                   AND f.trashed_at = (SELECT trashed_at FROM files WHERE id = ?1)
+             ) ",
+            $rest
+        )
+    };
+}
+
+/// 永久刪除垃圾桶項目時，先收集整棵子樹的 storage_key、再刪除。條件在三處相同，只有篩選不同
+macro_rules! trash_roots {
+    ($filter:literal) => {
+        (
+            concat!(
+                "WITH RECURSIVE subtree(id) AS (
+                     SELECT id FROM files WHERE trash_root = 1 AND ",
+                $filter,
+                "
+                     UNION
+                     SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id
+                 )
+                 SELECT storage_key FROM files
+                 WHERE id IN (SELECT id FROM subtree) AND storage_key IS NOT NULL"
+            ),
+            concat!("DELETE FROM files WHERE trash_root = 1 AND ", $filter),
+        )
+    };
+}
+
+/// 把一個項目（資料夾連同底下的所有內容）放進垃圾桶。回傳 false 代表不存在、不屬於該使用者或已在垃圾桶中。
+///
+/// 一條 SQL 完成：找出整棵子樹與標記同時發生，中間不會有人在資料夾裡新增東西而漏掉。
+/// 子樹中先前已經被個別刪除的項目維持原狀（它們有自己的刪除時間）。
+pub async fn move_to_trash(
+    pool: &SqlitePool,
+    owner_id: i64,
+    id: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "WITH RECURSIVE subtree(id) AS (
+             SELECT id FROM files WHERE id = ?1 AND owner_id = ?2 AND trashed_at IS NULL
+             UNION
+             SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id
+             WHERE f.trashed_at IS NULL
+         )
+         UPDATE files SET trashed_at = ?3, trash_root = (id = ?1)
+         WHERE id IN (SELECT id FROM subtree)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 垃圾桶的內容：最近刪除的在前
+pub async fn list_trash(pool: &SqlitePool, owner_id: i64) -> Result<Vec<TrashItem>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, parent_id, name, kind, size, trashed_at FROM files
+         WHERE owner_id = ? AND trash_root = 1
+         ORDER BY trashed_at DESC, name, id",
+    )
+    .bind(owner_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// 垃圾桶中一個項目的總大小：資料夾是同一次放進去的所有檔案的總和
+pub async fn trash_size(pool: &SqlitePool, owner_id: i64, id: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(trash_batch!(
+        "SELECT COALESCE(SUM(size), 0) FROM files WHERE id IN (SELECT id FROM batch)"
+    ))
+    .bind(id)
+    .bind(owner_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// 一個資料夾由根目錄往下的完整路徑名稱（包含自己），不論是否在垃圾桶中。
+/// 用來顯示垃圾桶中項目原本的位置。起點帶 owner_id，深度上限同 `ancestors`
+pub async fn folder_path(
+    pool: &SqlitePool,
+    owner_id: i64,
+    folder: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE chain(id, parent_id, name, depth) AS (
+             SELECT id, parent_id, name, 0 FROM files WHERE id = ? AND owner_id = ?
+             UNION ALL
+             SELECT f.id, f.parent_id, f.name, c.depth + 1
+             FROM files f JOIN chain c ON f.id = c.parent_id
+             WHERE c.depth < ?
+         )
+         SELECT name FROM chain ORDER BY depth DESC",
+    )
+    .bind(folder)
+    .bind(owner_id)
+    .bind(MAX_ANCESTOR_DEPTH)
+    .fetch_all(pool)
+    .await
+}
+
+/// 從垃圾桶還原一個項目（資料夾連同同一次放進去的內容）。
+///
+/// - 原本的資料夾還在、而且不在垃圾桶中：放回去；否則放回 My files
+/// - 原處已有同名的項目：自動改名為「名稱 (1)」、「名稱 (2)」⋯⋯
+///
+/// 先改名稱與位置、再移出垃圾桶：改名的那一刻它還在垃圾桶中，不受唯一索引限制，
+/// 移出時名稱已經是空著的。整個過程在同一個 IMMEDIATE 交易中，找到的空名稱不會被別人搶走。
+pub async fn restore(pool: &SqlitePool, owner_id: i64, id: i64) -> Result<FileEntry, RestoreError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+
+    let item: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT name, parent_id FROM files WHERE id = ? AND owner_id = ? AND trash_root = 1",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((name, parent_id)) = item else {
+        return Err(RestoreError::NotFound);
+    };
+
+    let target = match parent_id {
+        Some(parent) if is_owned_folder(&mut *tx, owner_id, parent).await? => Some(parent),
+        _ => None,
+    };
+
+    let mut candidate = name.clone();
+    let mut number = 0;
+    loop {
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM files
+                 WHERE owner_id = ? AND parent_id IS ? AND name = ? COLLATE NOCASE
+                   AND trashed_at IS NULL)",
+        )
+        .bind(owner_id)
+        .bind(target)
+        .bind(&candidate)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !taken {
+            break;
+        }
+        number += 1;
+        candidate = numbered_name(&name, number);
+        if number > 999 || validate_file_name(&candidate).is_err() {
+            return Err(RestoreError::NameConflict);
+        }
+    }
+
+    sqlx::query("UPDATE files SET name = ?, parent_id = ? WHERE id = ?")
+        .bind(&candidate)
+        .bind(target)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(trash_batch!(
+        "UPDATE files SET trashed_at = NULL, trash_root = 0 WHERE id IN (SELECT id FROM batch)"
+    ))
+    .bind(id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let restored = find_file(&mut *tx, owner_id, id)
+        .await?
+        .ok_or(RestoreError::NotFound)?;
+    tx.commit().await?;
+    Ok(restored)
+}
+
+/// 永久刪除垃圾桶中的一個項目。None 代表它不在垃圾桶中或不屬於該使用者。
+/// 回傳被刪除的 storage_key：與 `delete_tree` 相同，commit 之後由呼叫端刪除 blob
+pub async fn delete_trashed(
+    pool: &SqlitePool,
+    owner_id: i64,
+    id: i64,
+) -> Result<Option<Vec<String>>, sqlx::Error> {
+    let (deleted, keys) = delete_trash_roots(
+        pool,
+        trash_roots!("id = ? AND owner_id = ?"),
+        &[id, owner_id],
+    )
+    .await?;
+    Ok((deleted > 0).then_some(keys))
+}
+
+/// 清空一個使用者的垃圾桶，回傳被刪除的 storage_key
+pub async fn empty_trash(pool: &SqlitePool, owner_id: i64) -> Result<Vec<String>, sqlx::Error> {
+    let (_, keys) = delete_trash_roots(pool, trash_roots!("owner_id = ?"), &[owner_id]).await?;
+    Ok(keys)
+}
+
+/// 垃圾回收：永久刪除所有使用者在 `before`（Unix 秒數）之前放進垃圾桶的項目。
+/// 回傳（刪除的項目數, storage_key）
+pub async fn purge_trash(
+    pool: &SqlitePool,
+    before: i64,
+) -> Result<(u64, Vec<String>), sqlx::Error> {
+    delete_trash_roots(pool, trash_roots!("trashed_at < ?"), &[before]).await
+}
+
+/// 永久刪除符合條件的垃圾桶項目（連同底下的所有內容），回傳（刪除的項目數, storage_key）。
+///
+/// 與 `delete_tree` 相同的做法與理由：IMMEDIATE 交易中先用遞迴 CTE 收集整棵子樹的 key，
+/// 再刪除（CASCADE 帶走子孫）。`sql` 由 trash_roots! 在編譯時產生
+async fn delete_trash_roots(
+    pool: &SqlitePool,
+    (collect, delete): (&'static str, &'static str),
+    args: &[i64],
+) -> Result<(u64, Vec<String>), sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+
+    let mut query = sqlx::query_scalar::<_, String>(collect);
+    for arg in args {
+        query = query.bind(*arg);
+    }
+    let keys = query.fetch_all(&mut *tx).await?;
+
+    let mut query = sqlx::query(delete);
+    for arg in args {
+        query = query.bind(*arg);
+    }
+    let deleted = query.execute(&mut *tx).await?.rows_affected();
+
+    tx.commit().await?;
+    Ok((deleted, keys))
 }
 
 #[cfg(test)]
@@ -1493,5 +1785,206 @@ mod tests {
         assert!(is_inside(&pool, owner, a, c).await.unwrap());
         assert!(!is_inside(&pool, owner, b, a).await.unwrap());
         assert!(!is_inside(&pool, owner, a, sibling).await.unwrap());
+    }
+
+    // ==================== 垃圾桶 ====================
+
+    fn trash_names(items: &[TrashItem]) -> Vec<&str> {
+        items.iter().map(|i| i.name.as_str()).collect()
+    }
+
+    #[sqlx::test]
+    async fn trashed_items_disappear_from_everything(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let docs = make_folder(&pool, owner, None, "docs").await;
+        let sub = make_folder(&pool, owner, Some(docs), "sub").await;
+        let file = create_file(&pool, owner, Some(sub), "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+
+        assert!(move_to_trash(&pool, owner, docs, 100).await.unwrap());
+
+        assert!(list_children(&pool, owner, None).await.unwrap().is_empty());
+        assert!(find_file(&pool, owner, file.id).await.unwrap().is_none());
+        assert!(!is_owned_folder(&pool, owner, sub).await.unwrap());
+        assert!(subtree(&pool, owner, docs).await.unwrap().is_empty());
+        // 只有被刪除的那一個出現在垃圾桶；一起進去的內容不會
+        assert_eq!(
+            trash_names(&list_trash(&pool, owner).await.unwrap()),
+            ["docs"]
+        );
+        assert_eq!(trash_size(&pool, owner, docs).await.unwrap(), 1);
+        // 已在垃圾桶中：再刪一次什麼都不做
+        assert!(!move_to_trash(&pool, owner, docs, 200).await.unwrap());
+    }
+
+    #[sqlx::test]
+    async fn a_trashed_name_can_be_used_again(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let first = create_file(&pool, owner, None, "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        move_to_trash(&pool, owner, first.id, 100).await.unwrap();
+
+        assert!(
+            existing_kind(&pool, owner, None, "a.txt")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            create_file(&pool, owner, None, "A.TXT", 1, None, &key(2))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[sqlx::test]
+    async fn restore_puts_it_back_and_renames_on_conflict(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let docs = make_folder(&pool, owner, None, "docs").await;
+        let original = create_file(&pool, owner, Some(docs), "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        move_to_trash(&pool, owner, original.id, 100).await.unwrap();
+        create_file(&pool, owner, Some(docs), "a.txt", 1, None, &key(2))
+            .await
+            .unwrap();
+
+        let restored = restore(&pool, owner, original.id).await.unwrap();
+
+        assert_eq!(restored.parent_id, Some(docs));
+        assert_eq!(restored.name, "a (1).txt");
+        assert!(list_trash(&pool, owner).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    async fn restore_goes_to_my_files_when_the_folder_is_gone(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let docs = make_folder(&pool, owner, None, "docs").await;
+        let file = create_file(&pool, owner, Some(docs), "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        // 先刪檔案，再刪它所在的資料夾
+        move_to_trash(&pool, owner, file.id, 100).await.unwrap();
+        move_to_trash(&pool, owner, docs, 200).await.unwrap();
+
+        let restored = restore(&pool, owner, file.id).await.unwrap();
+
+        assert_eq!(restored.parent_id, None);
+        // 資料夾還在垃圾桶中
+        assert_eq!(
+            trash_names(&list_trash(&pool, owner).await.unwrap()),
+            ["docs"]
+        );
+    }
+
+    #[sqlx::test]
+    async fn restore_brings_back_only_the_same_batch(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let docs = make_folder(&pool, owner, None, "docs").await;
+        let early = create_file(&pool, owner, Some(docs), "early.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        let later = create_file(&pool, owner, Some(docs), "later.txt", 1, None, &key(2))
+            .await
+            .unwrap();
+        // early.txt 先被個別刪除；之後整個資料夾被刪除
+        move_to_trash(&pool, owner, early.id, 100).await.unwrap();
+        move_to_trash(&pool, owner, docs, 200).await.unwrap();
+
+        restore(&pool, owner, docs).await.unwrap();
+
+        // 資料夾與一起被刪的 later.txt 回來了；先前個別刪除的 early.txt 仍在垃圾桶
+        assert!(find_file(&pool, owner, later.id).await.unwrap().is_some());
+        assert!(find_file(&pool, owner, early.id).await.unwrap().is_none());
+        assert_eq!(
+            trash_names(&list_trash(&pool, owner).await.unwrap()),
+            ["early.txt"]
+        );
+    }
+
+    #[sqlx::test]
+    async fn trash_operations_only_touch_the_owners_trash(pool: SqlitePool) {
+        let alice = make_user(&pool, "alice").await;
+        let mallory = make_user(&pool, "mallory").await;
+        let file = create_file(&pool, alice, None, "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        let live = create_file(&pool, alice, None, "b.txt", 1, None, &key(2))
+            .await
+            .unwrap();
+
+        assert!(!move_to_trash(&pool, mallory, file.id, 100).await.unwrap());
+        move_to_trash(&pool, alice, file.id, 100).await.unwrap();
+
+        assert!(matches!(
+            restore(&pool, mallory, file.id).await,
+            Err(RestoreError::NotFound)
+        ));
+        assert_eq!(delete_trashed(&pool, mallory, file.id).await.unwrap(), None);
+        // 不在垃圾桶的項目不能被「永久刪除」
+        assert_eq!(delete_trashed(&pool, alice, live.id).await.unwrap(), None);
+        assert!(empty_trash(&pool, mallory).await.unwrap().is_empty());
+        assert_eq!(list_trash(&pool, alice).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test]
+    async fn deleting_from_the_trash_returns_every_key(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let docs = make_folder(&pool, owner, None, "docs").await;
+        create_file(&pool, owner, Some(docs), "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        let other = create_file(&pool, owner, None, "b.txt", 1, None, &key(2))
+            .await
+            .unwrap();
+        move_to_trash(&pool, owner, docs, 100).await.unwrap();
+        move_to_trash(&pool, owner, other.id, 100).await.unwrap();
+
+        assert_eq!(
+            delete_trashed(&pool, owner, docs).await.unwrap(),
+            Some(vec![key(1)])
+        );
+        assert_eq!(empty_trash(&pool, owner).await.unwrap(), vec![key(2)]);
+        assert_eq!(count_rows(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn purge_only_removes_old_trash(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let old = create_file(&pool, owner, None, "old.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        let recent = create_file(&pool, owner, None, "recent.txt", 1, None, &key(2))
+            .await
+            .unwrap();
+        create_file(&pool, owner, None, "live.txt", 1, None, &key(3))
+            .await
+            .unwrap();
+        move_to_trash(&pool, owner, old.id, 100).await.unwrap();
+        move_to_trash(&pool, owner, recent.id, 500).await.unwrap();
+
+        let (purged, keys) = purge_trash(&pool, 300).await.unwrap();
+
+        assert_eq!((purged, keys), (1, vec![key(1)]));
+        assert_eq!(
+            trash_names(&list_trash(&pool, owner).await.unwrap()),
+            ["recent.txt"]
+        );
+        assert_eq!(count_rows(&pool).await, 2);
+    }
+
+    #[sqlx::test]
+    async fn folder_path_includes_trashed_folders(pool: SqlitePool) {
+        let owner = make_user(&pool, "carol").await;
+        let photos = make_folder(&pool, owner, None, "相片").await;
+        let year = make_folder(&pool, owner, Some(photos), "2026").await;
+        move_to_trash(&pool, owner, photos, 100).await.unwrap();
+
+        assert_eq!(
+            folder_path(&pool, owner, year).await.unwrap(),
+            ["相片", "2026"]
+        );
     }
 }

@@ -6,6 +6,7 @@
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { isSameFile, type UploadInfo } from "./chunked-upload.js";
+import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
 import { formatSize } from "./format.js";
 import { icon } from "./icons.js";
@@ -149,11 +150,16 @@ export class PendingUploads {
   }
 
   private cancel(info: UploadInfo, message: HTMLElement): void {
-    // confirm 的文字是純文字，檔名不會被當成 HTML 解析
-    if (!window.confirm(`Cancel the upload of "${info.name}"? The part already uploaded will be deleted.`)) {
-      return;
-    }
     void (async () => {
+      const confirmed = await confirmDialog({
+        title: "Cancel this upload?",
+        message: `The part of "${info.name}" already uploaded will be deleted.`,
+        confirmLabel: "Cancel upload",
+        danger: true,
+      });
+      if (!confirmed) {
+        return;
+      }
       try {
         await api.delete(`/api/uploads/${encodeURIComponent(info.id)}`);
         this.refresh();

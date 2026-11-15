@@ -25,6 +25,8 @@ export type IconName =
   | "logout"
   | "disk"
   | "sort"
+  | "restore"
+  | "info"
   | "arrowUp"
   | "arrowDown"
   | "check";
@@ -75,6 +77,8 @@ const PATHS: Readonly<Record<IconName, readonly string[]>> = {
   ],
   logout: ["M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3", "M10 17l5-5-5-5", "M15 12H4"],
   sort: ["M4 7h16", "M7 12h10", "M10 17h4"],
+  restore: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5"],
+  info: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20", "M12 16v-4", "M12 8h.01"],
   arrowUp: ["M12 19V5", "M6 11l6-6 6 6"],
   arrowDown: ["M12 5v14", "M6 13l6 6 6-6"],
   check: ["M5 12l5 5 9-10"],

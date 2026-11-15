@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT\n            id          AS \"id!\",\n            owner_id    AS \"owner_id!\",\n            parent_id   AS \"parent_id?\",\n            name        AS \"name!\",\n            kind        AS \"kind!\",\n            size        AS \"size?\",\n            mime        AS \"mime?\",\n            storage_key AS \"storage_key?\",\n            created_at  AS \"created_at!\",\n            updated_at  AS \"updated_at!\"\n        FROM files\n        WHERE id = ? AND owner_id = ?\n        ",
+  "query": "\n        SELECT\n            id          AS \"id!\",\n            owner_id    AS \"owner_id!\",\n            parent_id   AS \"parent_id?\",\n            name        AS \"name!\",\n            kind        AS \"kind!\",\n            size        AS \"size?\",\n            mime        AS \"mime?\",\n            storage_key AS \"storage_key?\",\n            created_at  AS \"created_at!\",\n            updated_at  AS \"updated_at!\"\n        FROM files\n        WHERE owner_id = ? AND parent_id IS ? AND trashed_at IS NULL\n        ORDER BY kind = 'folder' DESC, name, id\n        ",
   "describe": {
     "columns": [
       {
@@ -130,5 +130,5 @@
       false
     ]
   },
-  "hash": "5b285a052ed66059449c9af40d800eae931902ae3ab8b59d405b8259ec0ffdd3"
+  "hash": "7d0a93963f7ce42aa5204434ce8ec90deac18dcd815c98630c79f2f177d46aa0"
 }
