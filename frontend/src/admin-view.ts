@@ -1,20 +1,28 @@
-// 使用者管理：建立帳號、指派管理員、停用、重設密碼。
+// 使用者管理：建立帳號、指派管理員、停用、重設密碼、刪除。
+//
+// 每一列的操作收在最右邊的「⋯」選單裡：按鈕再多，表格也不會被撐開或換行。
 //
 // 臨時密碼只存在顯示它的面板元素裡，不放進任何變數或狀態；
 // 關閉面板時先清空值再移除元素，不會殘留在 DOM 中。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
-import { confirmDialog } from "./dialogs.js";
+import { confirmDialog, nameDialog } from "./dialogs.js";
 import { showToast } from "./toast.js";
 import { h } from "./dom.js";
 import { formatUtcText } from "./format.js";
-import type { CreatedUser, ManagedUser, ResetPasswordResponse, User } from "./types.js";
+import { icon } from "./icons.js";
+import { dropdown, menuItem, menuSeparator, type MenuEntry } from "./menu.js";
+import type {
+  CreatedUser,
+  ManagedUser,
+  ResetPasswordResponse,
+  User,
+} from "./types.js";
 
-// 與後端 src/web/auth.rs 的帳號規則一致（同 auth-view.ts）。後端才是唯一的權威
-const USERNAME_MIN = 3;
-const USERNAME_MAX = 32;
-const USERNAME_PATTERN = "[a-z0-9_\\-]+";
-const USERNAME_HINT = `${USERNAME_MIN}–${USERNAME_MAX} characters: lowercase letters, digits, underscores and hyphens`;
+// 與後端 src/web/auth.rs 的帳號規則一致（同 auth-view.ts）。只用來提示，後端才是唯一的權威：
+// 不符合時，後端的錯誤訊息會顯示在對話框裡
+const USERNAME_HINT =
+  "3–32 characters: lowercase letters, digits, underscores and hyphens.";
 
 /**
  * 在 container 中顯示使用者管理頁。
@@ -22,7 +30,11 @@ const USERNAME_HINT = `${USERNAME_MIN}–${USERNAME_MAX} characters: lowercase l
  * @param me            目前登入的管理員
  * @param onSelfChanged 修改了自己的角色之後呼叫（例如降級為成員，已經不能再看這一頁）
  */
-export function renderAdmin(container: HTMLElement, me: User, onSelfChanged: () => void): void {
+export function renderAdmin(
+  container: HTMLElement,
+  me: User,
+  onSelfChanged: () => void,
+): void {
   new AdminView(container, me, onSelfChanged).mount();
 }
 
@@ -44,9 +56,22 @@ class AdminView {
 
   mount(): void {
     this.container.replaceChildren(
-      h("h2", { class: "section-title" }, "Users"),
+      h(
+        "div",
+        { class: "admin-head" },
+        h("h2", { class: "section-title" }, "Users"),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            onClick: () => void this.createUser(),
+          },
+          icon("plus", 16),
+          "Create user",
+        ),
+      ),
       this.noticeSlot,
-      this.createForm(),
       this.errorBox,
       this.tableSlot,
     );
@@ -64,10 +89,14 @@ class AdminView {
         api.get<{ enabled_user_ids: number[] }>("/api/admin/two-factor"),
       ]);
       this.twoFactor = new Set(twoFactor.enabled_user_ids);
-      this.tableSlot.replaceChildren(this.table(users));
+      this.tableSlot.replaceChildren(
+        h("div", { class: "users-wrap" }, this.table(users)),
+      );
     } catch (error) {
       if (!isHandledGlobally(error)) {
-        this.tableSlot.replaceChildren(h("p", { class: "error", role: "alert" }, messageOf(error)));
+        this.tableSlot.replaceChildren(
+          h("p", { class: "error", role: "alert" }, messageOf(error)),
+        );
       }
     }
   }
@@ -87,7 +116,11 @@ class AdminView {
           h("th", { scope: "col" }, "Status"),
           h("th", { scope: "col" }, "2FA"),
           h("th", { scope: "col" }, "Created"),
-          h("th", { scope: "col" }, h("span", { class: "visually-hidden" }, "Actions")),
+          h(
+            "th",
+            { scope: "col" },
+            h("span", { class: "visually-hidden" }, "Actions"),
+          ),
         ),
       ),
       h(
@@ -109,86 +142,122 @@ class AdminView {
     return h(
       "tr",
       { class: user.disabled ? "disabled-row" : null },
-      h("td", {}, user.username, isSelf ? h("span", { class: "muted" }, " (you)") : null),
       h(
         "td",
         {},
-        h("span", { class: `badge ${user.role}` }, user.role === "admin" ? "Administrator" : "Member"),
+        user.username,
+        isSelf ? h("span", { class: "muted" }, " (you)") : null,
       ),
-      h("td", {}, status),
-      h("td", {}, this.twoFactor.has(user.id) ? "On" : h("span", { class: "muted" }, "Off")),
-      h("td", {}, formatUtcText(user.created_at)),
       h(
         "td",
-        { class: "actions-cell" },
+        {},
         h(
-          "button",
-          { type: "button", class: "link", onClick: () => void this.toggleRole(user, isSelf) },
-          user.role === "admin" ? "Remove admin" : "Make admin",
+          "span",
+          { class: `badge ${user.role}` },
+          user.role === "admin" ? "Administrator" : "Member",
         ),
-        // 後端不允許停用自己、重設自己的密碼：自己那一列不顯示這兩個按鈕
-        isSelf
-          ? null
-          : h(
-              "button",
-              { type: "button", class: "link", onClick: () => void this.toggleDisabled(user) },
-              user.disabled ? "Enable" : "Disable",
-            ),
-        isSelf
-          ? null
-          : h(
-              "button",
-              { type: "button", class: "link", onClick: () => void this.resetPassword(user) },
-              "Reset password",
-            ),
-        // 自己的 2FA 要在 Settings 中用密碼與驗證碼關閉
-        isSelf || !this.twoFactor.has(user.id)
-          ? null
-          : h(
-              "button",
-              { type: "button", class: "link", onClick: () => void this.resetTwoFactor(user) },
-              "Turn off 2FA",
-            ),
+      ),
+      h("td", {}, status),
+      h(
+        "td",
+        {},
+        this.twoFactor.has(user.id)
+          ? "On"
+          : h("span", { class: "muted" }, "Off"),
+      ),
+      h("td", {}, formatUtcText(user.created_at)),
+      h("td", { class: "actions-cell" }, this.rowMenu(user, isSelf)),
+    );
+  }
+
+  /** 一列最右邊的「⋯」按鈕與它的選單 */
+  private rowMenu(user: ManagedUser, isSelf: boolean): HTMLElement {
+    const entries: (MenuEntry | "separator")[] = [
+      {
+        label:
+          user.role === "admin" ? "Remove administrator" : "Make administrator",
+        icon: "users",
+        onSelect: () => void this.toggleRole(user, isSelf),
+      },
+    ];
+
+    // 後端不允許停用、重設密碼、刪除自己；自己的 2FA 要在 Settings 中用密碼與驗證碼關閉
+    if (!isSelf) {
+      entries.push(
+        {
+          label: user.disabled ? "Enable" : "Disable",
+          icon: "lock",
+          onSelect: () => void this.toggleDisabled(user),
+        },
+        {
+          label: "Reset password",
+          icon: "key",
+          onSelect: () => void this.resetPassword(user),
+        },
+      );
+      if (this.twoFactor.has(user.id)) {
+        entries.push({
+          label: "Turn off 2FA",
+          icon: "shield",
+          onSelect: () => void this.resetTwoFactor(user),
+        });
+      }
+      entries.push("separator", {
+        label: "Delete user",
+        icon: "trash",
+        danger: true,
+        onSelect: () => void this.deleteUser(user),
+      });
+    }
+
+    const button = h(
+      "button",
+      {
+        type: "button",
+        class: "icon-button row-menu",
+        title: "Actions",
+        "aria-label": `Actions for ${user.username}`,
+      },
+      icon("more", 18),
+    );
+    const menu = h(
+      "div",
+      {
+        class: "menu dropdown-menu",
+        role: "menu",
+        "aria-label": `Actions for ${user.username}`,
+      },
+      entries.map((entry) =>
+        entry === "separator" ? menuSeparator() : menuItem(entry),
       ),
     );
+    // 選單相對於視窗定位：表格在可以左右捲動的區域裡，選單不會被裁切
+    dropdown(button, menu, { fixed: true });
+    return h("div", { class: "row-menu-wrap" }, button, menu);
   }
 
   // ---------- 建立 ----------
 
-  private createForm(): HTMLElement {
-    const input = h("input", {
-      name: "username",
-      type: "text",
-      required: true,
-      // 這是別人的帳號名稱，不要讓密碼管理器把它當成自己的帳號填入
-      autocomplete: "off",
-      autocapitalize: "none",
-      spellcheck: "false",
-      minlength: USERNAME_MIN,
-      maxlength: USERNAME_MAX,
-      pattern: USERNAME_PATTERN,
-      title: USERNAME_HINT,
+  /** 先按 Create user，再在對話框中輸入名稱。名稱有問題時錯誤顯示在對話框裡，不必重新輸入 */
+  private async createUser(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    let created: CreatedUser | null = null;
+    await nameDialog({
+      title: "Create user",
+      message: `The new member gets a temporary password and must change it when they first log in. ${USERNAME_HINT}`,
+      confirmLabel: "Create",
+      submit: async (username) => {
+        created = await api.post<CreatedUser>("/api/admin/users", { username });
+      },
     });
-
-    // method="post"：萬一 JS 沒有載入，表單內容也不會出現在網址裡
-    const form = h(
-      "form",
-      { method: "post", class: "admin-create" },
-      h("label", {}, "New username", input),
-      h("button", { type: "submit" }, "Create user"),
-    );
-
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const username = input.value;
-      this.perform(async () => {
-        const created = await api.post<CreatedUser>("/api/admin/users", { username });
-        input.value = "";
-        this.showPassword(created.user.username, created.temporary_password, "created");
-      });
-    });
-
-    return form;
+    if (created === null) {
+      return;
+    }
+    const { user, temporary_password } = created as CreatedUser;
+    this.showPassword(user.username, temporary_password, "created");
+    await this.loadTable();
   }
 
   // ---------- 修改 ----------
@@ -216,7 +285,9 @@ class AdminView {
     }
 
     this.perform(async () => {
-      await api.patch(`/api/admin/users/${user.id}`, { role: promote ? "admin" : "member" });
+      await api.patch(`/api/admin/users/${user.id}`, {
+        role: promote ? "admin" : "member",
+      });
       if (isSelf) {
         // 已經不是管理員：交給上層重新決定畫面，不重新載入這個列表（只會得到 403）
         this.onSelfChanged();
@@ -231,14 +302,17 @@ class AdminView {
       !user.disabled &&
       !(await confirmDialog({
         title: `Disable ${user.username}?`,
-        message: "They'll be logged out on every device and won't be able to log in.",
+        message:
+          "They'll be logged out on every device and won't be able to log in.",
         confirmLabel: "Disable",
         danger: true,
       }))
     ) {
       return;
     }
-    this.perform(() => api.patch(`/api/admin/users/${user.id}`, { disabled: !user.disabled }));
+    this.perform(() =>
+      api.patch(`/api/admin/users/${user.id}`, { disabled: !user.disabled }),
+    );
   }
 
   /** 手機與備用碼都遺失時：關閉這個人的 2FA，同時登出他所有的裝置 */
@@ -259,11 +333,31 @@ class AdminView {
     });
   }
 
+  /** 刪除使用者與他所有的檔案。必須輸入帳號名稱才能確認 */
+  private async deleteUser(user: ManagedUser): Promise<void> {
+    const confirmed = await confirmDialog({
+      title: `Delete ${user.username}?`,
+      message:
+        "Their account and all of their files, including items in their trash, will be deleted permanently. This can't be undone.",
+      confirmLabel: "Delete user",
+      danger: true,
+      typeToConfirm: user.username,
+    });
+    if (!confirmed) {
+      return;
+    }
+    this.perform(async () => {
+      await api.delete(`/api/admin/users/${user.id}`);
+      showToast(`Deleted ${user.username}`);
+    });
+  }
+
   private async resetPassword(user: ManagedUser): Promise<void> {
     if (
       !(await confirmDialog({
         title: `Reset the password of ${user.username}?`,
-        message: "They'll be logged out on every device and need a new temporary password to log in.",
+        message:
+          "They'll be logged out on every device and need a new temporary password to log in.",
         confirmLabel: "Reset password",
         danger: true,
       }))
@@ -311,7 +405,11 @@ class AdminView {
    * 顯示臨時密碼。同時只顯示一組：新的會取代舊的。
    * 「I've noted it」會先清空值，再把整個面板從 DOM 移除。
    */
-  private showPassword(username: string, password: string, action: "created" | "reset"): void {
+  private showPassword(
+    username: string,
+    password: string,
+    action: "created" | "reset",
+  ): void {
     const field = h("input", {
       type: "text",
       readonly: true,
@@ -326,7 +424,11 @@ class AdminView {
 
     const panel = h(
       "div",
-      { class: "notice temp-panel", role: "region", "aria-label": "Temporary password" },
+      {
+        class: "notice temp-panel",
+        role: "region",
+        "aria-label": "Temporary password",
+      },
       h(
         "p",
         {},
@@ -338,7 +440,14 @@ class AdminView {
         "div",
         { class: "temp-row" },
         field,
-        h("button", { type: "button", onClick: () => void copyPassword(field, copyStatus) }, "Copy"),
+        h(
+          "button",
+          {
+            type: "button",
+            onClick: () => void copyPassword(field, copyStatus),
+          },
+          "Copy",
+        ),
         copyStatus,
       ),
       h(
@@ -367,7 +476,10 @@ class AdminView {
  * 剪貼簿 API 只在安全環境（HTTPS 或 localhost）可用；用 http://192.168.x.x 連線時不存在。
  * 不可用或失敗時，選取文字並請使用者自己按複製鍵。
  */
-async function copyPassword(field: HTMLInputElement, status: HTMLElement): Promise<void> {
+async function copyPassword(
+  field: HTMLInputElement,
+  status: HTMLElement,
+): Promise<void> {
   field.select();
   if (window.isSecureContext && "clipboard" in navigator) {
     try {

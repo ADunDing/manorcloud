@@ -1,7 +1,12 @@
 //! 管理員功能：使用者管理。只有有效的管理員可以使用（`AdminUser`）。
 //!
+//! 刪除使用者會一併刪除他所有的檔案，無法復原；前端要求輸入帳號名稱才能確認。
+//!
 //! 臨時密碼由伺服器產生，只在建立或重設的那一次回應中出現，伺服器不保存明文。
 //! 使用者首次登入時被強制修改，管理員從此不會知道家人的正式密碼。
+
+use std::path::Path;
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -16,6 +21,7 @@ use super::{
     auth::{hash_password, is_unique_violation, validate_username},
     error::AppError,
     extract::AdminUser,
+    items::remove_blobs,
     state::AppState,
 };
 use crate::{
@@ -31,7 +37,10 @@ const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-s
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/users", get(list_users).post(create_user))
-        .route("/api/admin/users/{id}", patch(update_user))
+        .route(
+            "/api/admin/users/{id}",
+            patch(update_user).delete(delete_user),
+        )
         .route("/api/admin/users/{id}/reset-password", post(reset_password))
 }
 
@@ -178,19 +187,43 @@ async fn update_user(
 
     user::update_user(&pool, id, req.role.map(Role::as_str), req.disabled)
         .await
-        .map_err(|e| match e {
-            AdminUpdateError::NotFound => user_not_found(),
-            AdminUpdateError::LastAdmin => AppError::Conflict(
-                "At least one active administrator who can log in with a password is required"
-                    .to_string(),
-            ),
-            AdminUpdateError::Db(e) => AppError::internal(e),
-        })?;
+        .map_err(admin_update_error)?;
 
     let summary = user::find_user_summary(&pool, id)
         .await?
         .ok_or_else(user_not_found)?;
     Ok(Json(summary.into()))
+}
+
+// ==================== 刪除 ====================
+
+/// DELETE /api/admin/users/{id}：刪除使用者與他所有的資料。
+///
+/// 順序與刪除檔案相同：先刪資料庫（commit），再刪 blob；中途失敗只會留下孤兒 blob，
+/// 由垃圾回收清除。不能刪除自己：會立刻失去這個帳號，而且很可能是誤按。
+async fn delete_user(
+    admin: AdminUser,
+    State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
+    UrlPath(id): UrlPath<i64>,
+) -> Result<StatusCode, AppError> {
+    if id == admin.id {
+        return Err(AppError::BadRequest(
+            "You can't delete your own account".to_string(),
+        ));
+    }
+
+    let keys = user::delete_user(&pool, id)
+        .await
+        .map_err(admin_update_error)?;
+    remove_blobs(&data_dir, &keys).await;
+
+    println!(
+        "admin: deleted user {id} and {} files by administrator {}",
+        keys.len(),
+        admin.id
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ==================== 重設密碼 ====================
@@ -240,6 +273,16 @@ async fn reset_password(
 
 fn user_not_found() -> AppError {
     AppError::NotFound(USER_NOT_FOUND.to_string())
+}
+
+fn admin_update_error(e: AdminUpdateError) -> AppError {
+    match e {
+        AdminUpdateError::NotFound => user_not_found(),
+        AdminUpdateError::LastAdmin => {
+            AppError::Conflict("At least one active administrator is required".to_string())
+        }
+        AdminUpdateError::Db(e) => AppError::internal(e),
+    }
 }
 
 #[cfg(test)]
@@ -561,5 +604,65 @@ mod tests {
             .send(empty_request(Method::POST, &missing, Some(&t.cookie)))
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ==================== 刪除 ====================
+
+    #[sqlx::test]
+    async fn deleting_user_removes_files_blobs_and_sessions(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        make_admin(&t).await;
+        let alice = t.other_user("alice").await;
+        let alice_cookie = session_for(&t, alice).await;
+        let folder = t.make_folder(alice, None, "Photos").await;
+        let (_, top) = t.store_file(alice, None, "a.txt", b"a").await;
+        let (_, nested) = t.store_file(alice, Some(folder), "b.txt", b"b").await;
+        let (_, mine) = t.store_file(t.user_id, None, "a.txt", b"c").await;
+
+        let (status, _, _) = t
+            .send(empty_request(
+                Method::DELETE,
+                &user_uri(alice),
+                Some(&t.cookie),
+            ))
+            .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!t.blob_exists(&top));
+        assert!(!t.blob_exists(&nested));
+        // 別人的檔案不受影響
+        assert!(t.blob_exists(&mine));
+        assert_eq!(t.row_count().await, 1);
+        assert_eq!(me_status(&t, &alice_cookie).await, StatusCode::UNAUTHORIZED);
+        // 名稱可以再次使用
+        assert!(user::create_user(&t.pool, "alice", "x").await.is_ok());
+    }
+
+    #[sqlx::test]
+    async fn delete_user_rules(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        make_admin(&t).await;
+        let alice = t.other_user("alice").await;
+        let alice_cookie = session_for(&t, alice).await;
+
+        let cases = [
+            // 不能刪除自己
+            (
+                user_uri(t.user_id),
+                t.cookie.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+            // 不存在的使用者
+            (user_uri(999_999), t.cookie.clone(), StatusCode::NOT_FOUND),
+            // 一般成員不能刪除別人
+            (user_uri(t.user_id), alice_cookie, StatusCode::FORBIDDEN),
+        ];
+
+        for (uri, cookie, expected) in cases {
+            let (status, _, _) = t
+                .send(empty_request(Method::DELETE, &uri, Some(&cookie)))
+                .await;
+            assert_eq!(status, expected, "{uri}");
+        }
     }
 }

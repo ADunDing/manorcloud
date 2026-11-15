@@ -424,15 +424,7 @@ pub async fn update_user(
     )
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        if e.as_database_error()
-            .is_some_and(|db| db.message() == LAST_ADMIN_MSG)
-        {
-            AdminUpdateError::LastAdmin
-        } else {
-            AdminUpdateError::Db(e)
-        }
-    })?
+    .map_err(last_admin_or_db)?
     .rows_affected();
 
     if updated == 0 {
@@ -447,6 +439,55 @@ pub async fn update_user(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// 刪除使用者，以及他的所有資料：檔案與資料夾（含垃圾桶）、密碼、session、
+/// 分段上傳的紀錄、2FA、SSO 連結。全部由外鍵的 ON DELETE CASCADE 一起刪除。
+///
+/// 成功時回傳**已經 commit**、被刪除的檔案的 storage_key，呼叫端必須接著刪除這些 blob
+/// （失敗則交給垃圾回收）。分段上傳的暫存檔沒有紀錄之後，同樣由垃圾回收清除。
+///
+/// 與 `files::delete_tree` 相同：先收集 key 再刪除，兩者在同一個 IMMEDIATE 交易中，
+/// 中間不會有人上傳新的檔案而漏掉它的 key。
+/// 最後一位可以用密碼登入的有效管理員由 trigger 擋下（`LastAdmin`）。
+pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<String>, AdminUpdateError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+
+    let keys = sqlx::query_scalar!(
+        r#"
+        SELECT storage_key AS "storage_key!"
+        FROM files
+        WHERE owner_id = ? AND storage_key IS NOT NULL
+        "#,
+        user_id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let deleted = sqlx::query!("DELETE FROM users WHERE id = ?", user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(last_admin_or_db)?
+        .rows_affected();
+
+    if deleted == 0 {
+        // tx 在這裡被丟棄，自動 rollback
+        return Err(AdminUpdateError::NotFound);
+    }
+
+    tx.commit().await?;
+    Ok(keys)
+}
+
+/// 把「至少一個管理員」trigger 的錯誤轉成 `LastAdmin`，其他錯誤原樣保留
+fn last_admin_or_db(e: sqlx::Error) -> AdminUpdateError {
+    if e.as_database_error()
+        .is_some_and(|db| db.message() == LAST_ADMIN_MSG)
+    {
+        AdminUpdateError::LastAdmin
+    } else {
+        AdminUpdateError::Db(e)
+    }
 }
 
 #[cfg(test)]
@@ -479,7 +520,7 @@ mod tests {
             .map(|_| ())
     }
 
-    async fn delete_user(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    async fn raw_delete(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM users WHERE id = ?")
             .bind(id)
             .execute(pool)
@@ -567,7 +608,7 @@ mod tests {
     async fn deleting_user_removes_password(pool: SqlitePool) {
         let id = create_user(&pool, "carol", "hash").await.unwrap();
 
-        delete_user(&pool, id).await.unwrap();
+        raw_delete(&pool, id).await.unwrap();
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM password_credentials")
             .fetch_one(&pool)
@@ -684,7 +725,7 @@ mod tests {
         let admin = create_user(&pool, "admin", "x").await.unwrap();
         set_role(&pool, admin, "admin").await.unwrap();
 
-        assert!(is_last_admin_error(&delete_user(&pool, admin).await));
+        assert!(is_last_admin_error(&raw_delete(&pool, admin).await));
     }
 
     #[sqlx::test]
@@ -720,7 +761,7 @@ mod tests {
 
         // 一般成員的停用、刪除不受 trigger 影響
         set_disabled(&pool, member, true).await.unwrap();
-        delete_user(&pool, member).await.unwrap();
+        raw_delete(&pool, member).await.unwrap();
     }
 
     #[sqlx::test]
@@ -797,5 +838,77 @@ mod tests {
 
         assert!(matches!(demote, Err(AdminUpdateError::LastAdmin)));
         assert!(matches!(missing, Err(AdminUpdateError::NotFound)));
+    }
+
+    // ==================== 刪除 ====================
+
+    /// 合法的 storage_key（32 個小寫 hex 字元）
+    fn key(n: u32) -> String {
+        format!("{n:032x}")
+    }
+
+    async fn file_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM files")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn password_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM password_credentials")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn deleting_user_returns_keys_and_removes_everything(pool: SqlitePool) {
+        use crate::db::files;
+
+        let carol = create_user(&pool, "carol", "x").await.unwrap();
+        let alice = create_user(&pool, "alice", "x").await.unwrap();
+        let folder = files::create_folder(&pool, carol, None, "Photos")
+            .await
+            .unwrap()
+            .id;
+        files::create_file(&pool, carol, None, "a.txt", 1, None, &key(1))
+            .await
+            .unwrap();
+        files::create_file(&pool, carol, Some(folder), "b.txt", 1, None, &key(2))
+            .await
+            .unwrap();
+        files::create_file(&pool, alice, None, "a.txt", 1, None, &key(3))
+            .await
+            .unwrap();
+        crate::db::session::create_session(&pool, carol, &[1u8; 32], 4_000_000_000)
+            .await
+            .unwrap();
+
+        let mut keys = delete_user(&pool, carol).await.unwrap();
+        keys.sort();
+
+        // 子資料夾裡的檔案也在清單中；別人的檔案不受影響
+        assert_eq!(keys, [key(1), key(2)]);
+        assert_eq!(file_count(&pool).await, 1);
+        assert_eq!(session_count(&pool).await, 0);
+        assert_eq!(password_count(&pool).await, 1);
+        assert!(find_user_summary(&pool, carol).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    async fn delete_reports_last_admin_and_missing_user(pool: SqlitePool) {
+        let admin = create_user(&pool, "admin", "x").await.unwrap();
+        set_role(&pool, admin, "admin").await.unwrap();
+
+        assert!(matches!(
+            delete_user(&pool, admin).await,
+            Err(AdminUpdateError::LastAdmin)
+        ));
+        assert!(matches!(
+            delete_user(&pool, 9999).await,
+            Err(AdminUpdateError::NotFound)
+        ));
+        // 被擋下時什麼都沒有刪
+        assert!(find_user_summary(&pool, admin).await.unwrap().is_some());
     }
 }

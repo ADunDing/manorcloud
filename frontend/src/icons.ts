@@ -30,7 +30,10 @@ export type IconName =
   | "lock"
   | "arrowUp"
   | "arrowDown"
-  | "check";
+  | "check"
+  | "more"
+  | "key"
+  | "shield";
 
 /** 每個圖示的路徑，座標系為 24 × 24 */
 const PATHS: Readonly<Record<IconName, readonly string[]>> = {
@@ -84,6 +87,14 @@ const PATHS: Readonly<Record<IconName, readonly string[]>> = {
   arrowUp: ["M12 19V5", "M6 11l6-6 6 6"],
   arrowDown: ["M12 5v14", "M6 13l6 6 6-6"],
   check: ["M5 12l5 5 9-10"],
+  // 三個點：用半徑 1 的小圓，配上 2 的線寬，看起來是實心的圓點
+  more: [
+    "M5 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z",
+    "M12 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z",
+    "M19 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z",
+  ],
+  key: ["M8 11a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M10.8 12.2L20 3", "M17 6l3 3", "M14.5 8.5l2 2"],
+  shield: ["M12 3l7 3v6c0 4.5-3 7.5-7 9c-4-1.5-7-4.5-7-9V6z"],
   disk: [
     "M5 4h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
     "M5 13h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z",

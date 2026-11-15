@@ -1332,22 +1332,25 @@ table.files tbody tr.drop-hover,
     font-size: 1.5rem;
 }
 
-.admin-create {
+/* Users 標題與 Create user 按鈕在同一行 */
+.admin-head {
     display: flex;
-    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.75rem;
-    align-items: flex-end;
-    margin-bottom: 1rem;
+    margin-bottom: 16px;
 }
 
-.admin-create label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    font-weight: 500;
+.admin-head .section-title {
+    margin: 0;
 }
 
-.admin-create input,
+.admin-head button.primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .temp-password {
     font: inherit;
     padding: 0.45rem 0.65rem;
@@ -1357,7 +1360,6 @@ table.files tbody tr.drop-hover,
     color: var(--fg);
 }
 
-.admin-create button,
 .temp-row button {
     padding: 0.45rem 0.9rem;
     border: none;
@@ -1413,11 +1415,48 @@ table.users th {
     color: var(--muted);
 }
 
+/* 窄螢幕時表格左右捲動，不擠壓欄位 */
+.users-wrap {
+    overflow-x: auto;
+}
+
+table.users td {
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+table.users tbody tr:hover td {
+    background: var(--bar);
+}
+
+/* 操作欄只放一個「⋯」按鈕：寬度剛好容納它，靠右對齊 */
 table.users .actions-cell {
+    width: 1%;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    text-align: right;
+}
+
+.icon-button.row-menu {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: none;
+    color: var(--muted);
+}
+
+.icon-button.row-menu:hover,
+.icon-button.row-menu[aria-expanded="true"] {
+    background: var(--border-soft);
+    color: var(--fg);
+}
+
+/* 刪除使用者：輸入帳號名稱才能確認 */
+.dialog-type-confirm {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    justify-content: flex-end;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 10px;
 }
 
 .badge {
@@ -1772,4 +1811,3 @@ table.files .col-location {
     justify-content: space-between;
     gap: 12px;
 }
-

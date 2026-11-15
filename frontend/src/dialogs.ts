@@ -13,31 +13,77 @@ export interface ConfirmOptions {
   readonly confirmLabel: string;
   /** 刪除等無法復原的動作：確認按鈕以紅色顯示，預設的焦點放在 Cancel */
   readonly danger?: boolean;
+  /**
+   * 後果特別嚴重的動作（例如刪除使用者與他所有的檔案）：
+   * 必須輸入這段文字，確認按鈕才能按下
+   */
+  readonly typeToConfirm?: string;
 }
 
 /** 確認一個動作。按下確認回傳 true；Cancel、Esc 回傳 false */
 export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
     let confirmed = false;
-    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const cancel = h(
+      "button",
+      { type: "button", class: "secondary" },
+      "Cancel",
+    );
     const confirm = h(
       "button",
-      { type: "submit", class: options.danger === true ? "primary danger" : "primary" },
+      {
+        type: "submit",
+        class: options.danger === true ? "primary danger" : "primary",
+      },
       options.confirmLabel,
     );
+
+    const expected = options.typeToConfirm;
+    let typed: HTMLInputElement | null = null;
+    let typedField: HTMLElement | null = null;
+    if (expected !== undefined) {
+      typed = h("input", {
+        type: "text",
+        class: "dialog-input",
+        autocomplete: "off",
+        autocapitalize: "none",
+        spellcheck: "false",
+      });
+      const input = typed;
+      confirm.disabled = true;
+      input.addEventListener("input", () => {
+        confirm.disabled = input.value !== expected;
+      });
+      typedField = h(
+        "label",
+        { class: "dialog-type-confirm" },
+        h("span", {}, "Type ", h("strong", {}, expected), " to confirm"),
+        input,
+      );
+    }
+
     const form = h(
       "form",
       { method: "dialog", class: "dialog-form" },
       h("h2", { class: "dialog-title" }, options.title),
       // 文字是純文字（textContent），檔名或帳號名稱不會被當成 HTML 解析
       h("p", { class: "dialog-message" }, options.message),
+      typedField,
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
-    const dialog = h("dialog", { class: "dialog", "aria-label": options.title }, form);
+    const dialog = h(
+      "dialog",
+      { class: "dialog", "aria-label": options.title },
+      form,
+    );
 
     cancel.addEventListener("click", () => dialog.close());
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      // 輸入欄中按 Enter 也會送出：文字不符時不算確認
+      if (expected !== undefined && typed?.value !== expected) {
+        return;
+      }
       confirmed = true;
       dialog.close();
     });
@@ -49,7 +95,7 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
     document.body.append(dialog);
     dialog.showModal();
     // 無法復原的動作：按 Enter 不會不小心確認
-    (options.danger === true ? cancel : confirm).focus();
+    (typed ?? (options.danger === true ? cancel : confirm)).focus();
   });
 }
 
@@ -57,8 +103,8 @@ export interface NameDialogOptions {
   readonly title: string;
   readonly message: string;
   readonly confirmLabel: string;
-  /** 顯示在輸入欄下方的位置，例如 ["My files", "相片", "2026"] */
-  readonly location: readonly string[];
+  /** 顯示在輸入欄下方的位置，例如 ["My files", "相片", "2026"]。不是檔案時省略 */
+  readonly location?: readonly string[];
   readonly initial?: string;
   /**
    * 按下確認時呼叫。拋出錯誤時，錯誤訊息顯示在對話框裡，對話框不關閉，
@@ -81,19 +127,38 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
       spellcheck: "false",
     });
     const error = h("p", { class: "error", role: "alert" });
-    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
-    const confirm = h("button", { type: "submit", class: "primary" }, options.confirmLabel);
+    const cancel = h(
+      "button",
+      { type: "button", class: "secondary" },
+      "Cancel",
+    );
+    const confirm = h(
+      "button",
+      { type: "submit", class: "primary" },
+      options.confirmLabel,
+    );
     const form = h(
       "form",
       { method: "dialog", class: "dialog-form" },
       h("h2", { class: "dialog-title" }, options.title),
       h("p", { class: "dialog-message" }, options.message),
       input,
-      h("p", { class: "dialog-location" }, icon("folder", 16), options.location.join(" / ")),
+      options.location === undefined
+        ? null
+        : h(
+            "p",
+            { class: "dialog-location" },
+            icon("folder", 16),
+            options.location.join(" / "),
+          ),
       error,
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
-    const dialog = h("dialog", { class: "dialog", "aria-label": options.title }, form);
+    const dialog = h(
+      "dialog",
+      { class: "dialog", "aria-label": options.title },
+      form,
+    );
 
     cancel.addEventListener("click", () => dialog.close());
     dialog.addEventListener("close", () => {
@@ -126,7 +191,9 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
             return;
           }
           error.textContent =
-            failure instanceof ApiError ? failure.message : "Something went wrong";
+            failure instanceof ApiError
+              ? failure.message
+              : "Something went wrong";
           input.disabled = false;
           confirm.disabled = false;
           input.focus();
@@ -155,15 +222,28 @@ export function chooseDownload(
   return new Promise((resolve) => {
     let result: DownloadChoice | undefined;
 
-    const zip = h("input", { type: "radio", name: "download-mode", value: "zip", checked: true });
+    const zip = h("input", {
+      type: "radio",
+      name: "download-mode",
+      value: "zip",
+      checked: true,
+    });
     const separate = h("input", {
       type: "radio",
       name: "download-mode",
       value: "separate",
       disabled: hasFolders,
     });
-    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
-    const confirm = h("button", { type: "submit", class: "primary" }, "Download");
+    const cancel = h(
+      "button",
+      { type: "button", class: "secondary" },
+      "Cancel",
+    );
+    const confirm = h(
+      "button",
+      { type: "submit", class: "primary" },
+      "Download",
+    );
     const title = `Download ${count} items`;
 
     const form = h(
@@ -174,7 +254,11 @@ export function chooseDownload(
         "fieldset",
         { class: "choices" },
         h("legend", { class: "visually-hidden" }, "How to download"),
-        choice(zip, "As one .zip file", "The files are packed together, not compressed"),
+        choice(
+          zip,
+          "As one .zip file",
+          "The files are packed together, not compressed",
+        ),
         choice(
           separate,
           "As separate files",
@@ -204,11 +288,20 @@ export function chooseDownload(
   });
 }
 
-function choice(input: HTMLInputElement, label: string, hint: string): HTMLElement {
+function choice(
+  input: HTMLInputElement,
+  label: string,
+  hint: string,
+): HTMLElement {
   return h(
     "label",
     { class: input.disabled ? "choice disabled" : "choice" },
     input,
-    h("span", { class: "choice-text" }, h("strong", {}, label), h("span", { class: "hint" }, hint)),
+    h(
+      "span",
+      { class: "choice-text" },
+      h("strong", {}, label),
+      h("span", { class: "hint" }, hint),
+    ),
   );
 }
