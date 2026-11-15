@@ -1,6 +1,13 @@
 //! 登入、登出，以及使用者修改自己的帳號名稱與密碼。
 //!
 //! 沒有公開的註冊：帳號由管理員建立，第一個管理員在伺服器啟動時自動建立。
+//!
+//! 開啟了兩步驟驗證（2FA）的帳號，登入分成兩步：
+//! 1. POST /api/login：帳號密碼正確時，不建立 session，而是回傳 `two_factor_required`，
+//!    並在 Cookie 中放入一張短暫、只能用一次的「待驗證」憑證
+//! 2. POST /api/login/two-factor：送出驗證碼（或備用碼），正確時才建立 session
+//!
+//! 只知道密碼的人拿到的只有那張待驗證的憑證，什麼都不能做。
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::LazyLock;
@@ -24,9 +31,9 @@ use super::{
     state::{AppState, CookieSecure, LoginLimits},
 };
 use crate::{
-    auth::{self, limiter::Outcome},
+    auth::{self, limiter::Outcome, totp},
     db::{
-        session,
+        session, two_factor,
         user::{self, UpdateCredentialsError},
     },
 };
@@ -43,8 +50,16 @@ const COOKIE_PATH: &str = "/";
 /// Session 有效天數
 const SESSION_DAYS: i64 = 30;
 
+/// 等待輸入驗證碼的登入：Cookie 只送往 /api/login 底下，最多 5 分鐘
+const TWO_FACTOR_COOKIE: &str = "manorcloud_2fa";
+const TWO_FACTOR_COOKIE_PATH: &str = "/api/login";
+const TWO_FACTOR_MINUTES: i64 = 5;
+
 /// 登入失敗時統一的訊息：不透露是帳號不存在、沒有密碼，還是密碼錯誤
 const LOGIN_FAILED: &str = "Incorrect username or password";
+
+/// 等待輸入驗證碼的登入已經過期、用完，或從來沒有開始
+const TWO_FACTOR_EXPIRED: &str = "Your sign-in expired. Enter your username and password again";
 
 /// 被鎖定時的錯誤代碼，前端依此顯示「請 X 分鐘後再試」
 const TOO_MANY_ATTEMPTS: &str = "too_many_attempts";
@@ -128,6 +143,8 @@ fn retry_after_secs(wait: Duration) -> u64 {
 ///
 /// 沒有標記結果就被丟棄時算一次失敗：否則攻擊者可以送出請求、在回應前斷線，
 /// 讓猜測不被計數。正常使用者登入到一半關掉分頁，多算一次失敗也無傷大雅。
+///
+/// 輸入 2FA 驗證碼也使用同一套名額：猜驗證碼與猜密碼一樣受到限制。
 struct LoginAttempt {
     limits: LoginLimits,
     ip: IpAddr,
@@ -148,7 +165,7 @@ impl LoginAttempt {
         })
     }
 
-    /// 密碼正確：之後不論帳號停用或建立 session 失敗，都不算猜錯
+    /// 密碼（或驗證碼）正確：之後不論帳號停用或建立 session 失敗，都不算猜錯
     fn password_correct(&mut self) {
         self.outcome = Outcome::Neither;
     }
@@ -202,6 +219,7 @@ pub async fn warm_up() {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/login", post(login))
+        .route("/api/login/two-factor", post(login_two_factor))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/credentials", post(update_credentials))
@@ -209,22 +227,32 @@ pub fn router() -> Router<AppState> {
 
 // ==================== 共用回應 ====================
 
-/// 登入、/api/me、修改憑證的回應。前端依 must_change_password 決定是否顯示修改畫面，
-/// 依 role 決定是否顯示管理入口（真正的權限檢查仍在後端）
+/// 登入、/api/me、修改憑證的回應。前端依 must_change_password 與 two_factor_setup_required
+/// 決定是否先顯示修改或設定的畫面，依 role 決定是否顯示管理入口（真正的權限檢查仍在後端）
 #[derive(Serialize)]
 struct UserResponse {
     id: i64,
     username: String,
     role: String,
     must_change_password: bool,
+    /// 管理員要求開啟 2FA，而這個帳號還沒有設定
+    two_factor_setup_required: bool,
+}
+
+/// 登入的回應：已經登入，或還需要驗證碼
+#[derive(Serialize)]
+#[serde(untagged)]
+enum LoginResponse {
+    LoggedIn(UserResponse),
+    TwoFactorRequired { two_factor_required: bool },
 }
 
 // ==================== 建立 session ====================
 
 /// 建立 session 的唯一入口：檢查帳號狀態、建立 session、把 Cookie 加進 jar。
 ///
-/// 呼叫前必須已經驗證過身分（密碼；將來還有 SSO）。停用的檢查放在這裡而不是各個登入方式裡，
-/// 將來新增的登入方式呼叫同一個函式，就不可能漏掉。
+/// 呼叫前必須已經驗證過身分（密碼與 2FA，或 SSO）。停用的檢查放在這裡而不是各個登入方式裡，
+/// 新增的登入方式呼叫同一個函式，就不可能漏掉。
 ///
 /// 檢查與建立之間若帳號剛好被停用，建立出來的 session 也無法使用：
 /// 查詢 session 時會過濾掉停用的使用者。
@@ -234,13 +262,7 @@ pub(super) async fn start_session(
     user_id: i64,
     CookieSecure(secure): CookieSecure,
 ) -> Result<CookieJar, AppError> {
-    match user::is_disabled(pool, user_id).await? {
-        // 驗證身分之後帳號被刪除了
-        None => return Err(AppError::Unauthorized(LOGIN_FAILED.to_string())),
-        // 只有通過身分驗證的人才會看到這個訊息
-        Some(true) => return Err(AppError::Forbidden(Forbidden::AccountDisabled)),
-        Some(false) => {}
-    }
+    ensure_active(pool, user_id).await?;
 
     // 資料庫只存 token 的雜湊，原始 token 只交給瀏覽器
     let token = auth::session::generate_token();
@@ -259,6 +281,17 @@ pub(super) async fn start_session(
     Ok(jar.add(cookie))
 }
 
+/// 帳號仍然存在而且沒有被停用
+async fn ensure_active(pool: &SqlitePool, user_id: i64) -> Result<(), AppError> {
+    match user::is_disabled(pool, user_id).await? {
+        // 驗證身分之後帳號被刪除了
+        None => Err(AppError::Unauthorized(LOGIN_FAILED.to_string())),
+        // 只有通過身分驗證的人才會看到這個訊息
+        Some(true) => Err(AppError::Forbidden(Forbidden::AccountDisabled)),
+        Some(false) => Ok(()),
+    }
+}
+
 // ==================== 登入 ====================
 
 #[derive(Deserialize)]
@@ -267,7 +300,8 @@ struct LoginRequest {
     password: String,
 }
 
-/// POST /api/login：驗證帳密，成功後建立 session 並設定 Cookie。
+/// POST /api/login：驗證帳密。沒有開啟 2FA 時直接建立 session；
+/// 開啟了 2FA 時回傳 `two_factor_required`，等待第二步。
 ///
 /// 同一個 IP 或同一個帳號失敗太多次時暫時鎖定，回傳 429 與 Retry-After（見 auth::limiter）。
 async fn login(
@@ -277,7 +311,7 @@ async fn login(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
-) -> Result<(CookieJar, Json<UserResponse>), LoginError> {
+) -> Result<(CookieJar, Json<LoginResponse>), LoginError> {
     // 0. 佔用名額。被鎖定、或名額已被進行中的嘗試佔滿時直接拒絕：
     //    不查資料庫，也不花 Argon2 的運算。
     //    從這裡起，任何提早 return 都會在 attempt 被丟棄時記為一次失敗
@@ -303,23 +337,181 @@ async fn login(
     };
     attempt.password_correct();
 
-    // 4. 建立 session。停用的檢查在 start_session 裡：
+    // 4. 開啟了 2FA：還不登入。停用的帳號在這裡就告知，不必再輸入驗證碼。
+    //    帳號的失敗計數要等驗證碼也正確時才清除
+    let two_factor = two_factor::status(&pool, login.user_id).await?;
+    if two_factor.enabled {
+        ensure_active(&pool, login.user_id).await?;
+        let jar = start_two_factor(&pool, jar, login.user_id, cookie_secure).await?;
+        return Ok((
+            jar,
+            Json(LoginResponse::TwoFactorRequired {
+                two_factor_required: true,
+            }),
+        ));
+    }
+
+    // 5. 建立 session。停用的檢查在 start_session 裡：
     //    停用帳號的正確密碼不算猜錯，也沒有登入成功，所以不計數、也不清除計數
     let jar = start_session(&pool, jar, login.user_id, cookie_secure).await?;
 
-    // 5. 登入成功：attempt 在函式結束時被丟棄，清除這個帳號的失敗計數。
+    // 6. 登入成功：attempt 在函式結束時被丟棄，清除這個帳號的失敗計數。
     //    IP 的計數刻意不清除，理由見 LoginLimiter::end
     attempt.succeeded();
 
     Ok((
         jar,
-        Json(UserResponse {
+        Json(LoginResponse::LoggedIn(UserResponse {
             id: login.user_id,
             username: login.username,
             role: login.role,
             must_change_password: login.must_change_password,
-        }),
+            two_factor_setup_required: two_factor::require_two_factor(&pool).await?,
+        })),
     ))
+}
+
+/// 記錄一個等待輸入驗證碼的登入，Cookie 中放入它的憑證
+async fn start_two_factor(
+    pool: &SqlitePool,
+    jar: CookieJar,
+    user_id: i64,
+    CookieSecure(secure): CookieSecure,
+) -> Result<CookieJar, AppError> {
+    let token = auth::session::generate_token();
+    let now = unix_now();
+    two_factor::create_challenge(
+        pool,
+        &auth::session::hash_token(&token),
+        user_id,
+        now,
+        now + TWO_FACTOR_MINUTES * 60,
+    )
+    .await?;
+    let cookie = Cookie::build((TWO_FACTOR_COOKIE, token))
+        .http_only(true)
+        // 只在 ManorCloud 自己的頁面中使用，不需要跨網站
+        .same_site(SameSite::Strict)
+        .secure(secure)
+        .path(TWO_FACTOR_COOKIE_PATH)
+        .max_age(time::Duration::minutes(TWO_FACTOR_MINUTES));
+    Ok(jar.add(cookie))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TwoFactorRequest {
+    /// 驗證器 App 的 6 位數，或一組備用碼
+    code: String,
+}
+
+/// POST /api/login/two-factor：登入的第二步。
+///
+/// - 401：等待中的登入不存在、過期，或猜錯太多次被作廢：前端回到帳號密碼
+/// - 400：驗證碼不正確，可以再試（同一個等待中的登入最多猜錯 5 次）
+/// - 429：與密碼相同的登入次數限制
+async fn login_two_factor(
+    State(pool): State<SqlitePool>,
+    State(cookie_secure): State<CookieSecure>,
+    State(limits): State<LoginLimits>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Json(req): Json<TwoFactorRequest>,
+) -> Result<(CookieJar, Json<LoginResponse>), LoginError> {
+    let expired = || LoginError::App(AppError::Unauthorized(TWO_FACTOR_EXPIRED.to_string()));
+    let clear_cookie = |jar: CookieJar| {
+        jar.remove(
+            Cookie::build(TWO_FACTOR_COOKIE)
+                .path(TWO_FACTOR_COOKIE_PATH)
+                .secure(cookie_secure.0),
+        )
+    };
+
+    // 1. 等待中的登入
+    let Some(token) = jar.get(TWO_FACTOR_COOKIE).map(|c| c.value().to_string()) else {
+        return Err(expired());
+    };
+    let token_hash = auth::session::hash_token(&token);
+    let Some(user_id) = two_factor::find_challenge(&pool, &token_hash, unix_now()).await? else {
+        return Err(expired());
+    };
+    let Some(summary) = user::find_user_summary(&pool, user_id).await? else {
+        return Err(expired());
+    };
+
+    // 2. 與密碼相同的名額：猜驗證碼也受登入次數限制
+    let mut attempt = match LoginAttempt::begin(&limits, peer.ip(), &summary.username) {
+        Ok(attempt) => attempt,
+        Err(wait) => return Err(LoginError::Locked(wait)),
+    };
+
+    // 3. 驗證碼或備用碼
+    if !verify_second_factor(&pool, user_id, &summary.username, &req.code).await? {
+        if two_factor::fail_challenge(&pool, &token_hash).await? {
+            // 猜錯太多次：作廢這個登入，要從帳號密碼重新開始
+            return Err(expired());
+        }
+        return Err(AppError::BadRequest("The code isn't correct. Try again".to_string()).into());
+    }
+    // 同一個等待中的登入不能被用兩次（例如同時送出兩個正確的請求）
+    if !two_factor::finish_challenge(&pool, &token_hash).await? {
+        return Err(expired());
+    }
+    attempt.password_correct();
+
+    // 4. 登入
+    let jar = start_session(&pool, clear_cookie(jar), user_id, cookie_secure).await?;
+    attempt.succeeded();
+
+    let must_change_password = user::find_password_login(&pool, &summary.username)
+        .await?
+        .is_some_and(|login| login.must_change_password);
+    Ok((
+        jar,
+        Json(LoginResponse::LoggedIn(UserResponse {
+            id: user_id,
+            username: summary.username,
+            role: summary.role,
+            must_change_password,
+            // 能走到這一步，代表已經開啟了 2FA
+            two_factor_setup_required: false,
+        })),
+    ))
+}
+
+/// 驗證 2FA：6 位數的驗證碼，或一組備用碼。兩者都是用過就失效
+pub(super) async fn verify_second_factor(
+    pool: &SqlitePool,
+    user_id: i64,
+    username: &str,
+    input: &str,
+) -> Result<bool, sqlx::Error> {
+    if totp::looks_like_recovery_code(input) {
+        return two_factor::use_recovery_code(pool, user_id, &totp::hash_recovery_code(input))
+            .await;
+    }
+    let Some(credential) = two_factor::find_totp(pool, user_id)
+        .await?
+        .filter(|credential| credential.enabled)
+    else {
+        return Ok(false);
+    };
+    let now = unix_now();
+    match totp::verify(&credential.secret, input, now, credential.last_used_step) {
+        Some(step) => two_factor::use_step(pool, user_id, step).await,
+        None => {
+            // 驗證碼與相差很多的時間相符：幾乎可以確定是伺服器的時鐘不準
+            // （樹莓派沒有硬體時鐘，開機後要等網路校時）。在日誌中提示管理員
+            if let Some(minutes) = totp::clock_offset_minutes(&credential.secret, input, now) {
+                let name: String = username.chars().take(64).collect();
+                eprintln!(
+                    "2fa: the code for {name:?} matches a time {minutes} minutes away; \
+                     check that the server's clock is synchronized (NTP)"
+                );
+            }
+            Ok(false)
+        }
+    }
 }
 
 // ==================== 登出 ====================
@@ -353,14 +545,15 @@ async fn logout(
 
 /// GET /api/me：回傳目前登入的使用者。
 ///
-/// 使用 SessionUser：必須修改密碼的使用者也要能呼叫，
-/// 前端重新整理頁面時才知道要顯示修改畫面。
+/// 使用 SessionUser：必須修改密碼、或必須設定 2FA 的使用者也要能呼叫，
+/// 前端重新整理頁面時才知道要顯示哪個畫面。
 async fn me(me: SessionUser) -> Json<UserResponse> {
     Json(UserResponse {
         id: me.id,
         username: me.username,
         role: me.role,
         must_change_password: me.must_change_password,
+        two_factor_setup_required: me.two_factor_setup_required,
     })
 }
 
@@ -412,7 +605,7 @@ async fn update_credentials(
         return Err(AppError::Forbidden(Forbidden::WrongCurrentPassword));
     }
 
-    // 2. 驗證目前的密碼。沒有設定密碼的帳號（將來只用 SSO）一律失敗
+    // 2. 驗證目前的密碼。沒有設定密碼的帳號（只用 SSO）一律失敗
     let stored_hash = user::find_password_hash(&pool, me.id).await?;
     if !verify_password(req.current_password, stored_hash).await? {
         // 403 而不是 401：前端不會把它誤判為「登入已過期」
@@ -455,6 +648,7 @@ async fn update_credentials(
             role: me.role,
             // 必須修改時一定有新密碼（步驟 1 已檢查），完成後旗標已清除
             must_change_password: me.must_change_password && new_hash.is_none(),
+            two_factor_setup_required: me.two_factor_setup_required,
         }),
     ))
 }
@@ -463,7 +657,10 @@ async fn update_credentials(
 
 /// 驗證密碼。沒有可比對的雜湊時，以假雜湊「陪跑」一次並回傳 false，讓各種失敗耗時相同。
 /// Argon2 是重 CPU 運算，放到專用執行緒；同時進行的數量受 ARGON2_PERMITS 限制。
-async fn verify_password(password: String, stored_hash: Option<String>) -> Result<bool, AppError> {
+pub(super) async fn verify_password(
+    password: String,
+    stored_hash: Option<String>,
+) -> Result<bool, AppError> {
     let permit = ARGON2_PERMITS.acquire().await.map_err(AppError::internal)?;
     tokio::task::spawn_blocking(move || {
         // 名額跟著運算走：運算結束時才歸還，即使 handler 的 future 已經被丟棄
@@ -493,7 +690,7 @@ pub(super) async fn hash_password(password: String) -> Result<String, AppError> 
 }
 
 /// 目前的 Unix 秒數；系統時間異常時回傳 0（產生的 session 會立即過期，屬安全的失敗）
-fn unix_now() -> i64 {
+pub(super) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -697,6 +894,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json(&body)["must_change_password"], false);
+        assert_eq!(json(&body)["two_factor_setup_required"], false);
         assert_eq!(json(&body)["role"], "member");
     }
 

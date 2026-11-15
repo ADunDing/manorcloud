@@ -18,6 +18,12 @@ import {
 } from "./router.js";
 import { startSso, type AdminSso, type MySso } from "./sso.js";
 import { applyTheme, loadTheme, saveTheme, type Theme } from "./theme.js";
+import {
+  codeInput,
+  renderTwoFactorSetup,
+  showRecoveryCodes,
+  type TwoFactorStatus,
+} from "./two-factor-view.js";
 import { showToast } from "./toast.js";
 import type { User } from "./types.js";
 
@@ -120,8 +126,170 @@ function renderAccount(
   })();
 }
 
-/** 自己的 SSO 連結：連結、取消連結，或說明還沒有設定 */
+/** Sign-in：兩步驟驗證與 SSO 的連結 */
 function renderMySignIn(panel: HTMLElement): void {
+  const twoFactor = h("section", { class: "settings-group" });
+  const sso = h("section", { class: "settings-group" });
+  panel.replaceChildren(h("h2", { class: "section-title" }, "Sign-in"), twoFactor, sso);
+  renderTwoFactorSection(twoFactor);
+  renderSsoLink(sso);
+}
+
+/** 兩步驟驗證：狀態、開啟、換備用碼、關閉 */
+function renderTwoFactorSection(section: HTMLElement): void {
+  const title = h("h3", { class: "group-title" }, "Two-factor authentication");
+  section.replaceChildren(title, h("p", { class: "muted" }, "Loading…"));
+  void (async () => {
+    let status: TwoFactorStatus;
+    try {
+      status = await api.get<TwoFactorStatus>("/api/me/two-factor");
+    } catch (error) {
+      if (!isHandledGlobally(error)) {
+        section.replaceChildren(title, h("p", { class: "error", role: "alert" }, messageOf(error)));
+      }
+      return;
+    }
+
+    const body = h("div", {});
+    const reload = (): void => renderTwoFactorSection(section);
+
+    if (!status.available) {
+      section.replaceChildren(
+        title,
+        h(
+          "p",
+          { class: "hint" },
+          "Your account signs in with single sign-on, so two-factor authentication is handled by your sign-in provider.",
+        ),
+      );
+      return;
+    }
+
+    if (!status.enabled) {
+      const turnOn = h("button", { type: "button", class: "primary" }, "Turn on");
+      turnOn.addEventListener("click", () =>
+        renderTwoFactorSetup(body, {
+          onDone: () => {
+            showToast("Two-factor authentication is on");
+            reload();
+          },
+          onCancel: reload,
+        }),
+      );
+      body.replaceChildren(h("div", { class: "actions" }, turnOn));
+      section.replaceChildren(
+        title,
+        h(
+          "p",
+          {},
+          status.required
+            ? "Your administrator requires two-factor authentication."
+            : "Protect your account with a code from your phone in addition to your password.",
+        ),
+        body,
+      );
+      return;
+    }
+
+    const newCodes = h("button", { type: "button", class: "secondary" }, "New recovery codes");
+    newCodes.addEventListener("click", () => {
+      const password = passwordInput();
+      inlineForm(body, [["Current password", password]], "Create new codes", false, reload, async () => {
+        const result = await api.post<{ recovery_codes: string[] }>(
+          "/api/me/two-factor/recovery-codes",
+          { current_password: password.value },
+        );
+        showRecoveryCodes(body, result.recovery_codes, reload);
+      });
+    });
+
+    const turnOff = h("button", { type: "button", class: "secondary" }, "Turn off");
+    turnOff.addEventListener("click", () => {
+      const password = passwordInput();
+      const code = codeInput();
+      inlineForm(
+        body,
+        [
+          ["Current password", password],
+          ["Code from your app, or a recovery code", code],
+        ],
+        "Turn off",
+        true,
+        reload,
+        async () => {
+          await api.post("/api/me/two-factor/disable", {
+            current_password: password.value,
+            code: code.value,
+          });
+          showToast("Two-factor authentication is off");
+          reload();
+        },
+      );
+    });
+
+    body.replaceChildren(
+      h("div", { class: "actions" }, newCodes, status.required ? null : turnOff),
+    );
+    section.replaceChildren(
+      title,
+      h("p", {}, "On. When you log in, you'll also enter a code from your authenticator app."),
+      h(
+        "p",
+        { class: "hint" },
+        `${status.recovery_codes_left} of 10 recovery codes left.`,
+        status.required
+          ? " Your administrator requires two-factor authentication, so it can't be turned off."
+          : "",
+      ),
+      body,
+    );
+  })();
+}
+
+/** 在 container 中顯示一個小表單（換備用碼、關閉 2FA 前確認身分） */
+function inlineForm(
+  container: HTMLElement,
+  fields: readonly [string, HTMLInputElement][],
+  confirmLabel: string,
+  danger: boolean,
+  onCancel: () => void,
+  onSubmit: () => Promise<void>,
+): void {
+  const errorBox = h("p", { class: "error", role: "alert" });
+  const confirm = h(
+    "button",
+    { type: "submit", class: danger ? "primary danger" : "primary" },
+    confirmLabel,
+  );
+  const cancel = h("button", { type: "button", class: "secondary", onClick: onCancel }, "Cancel");
+  const form = h(
+    "form",
+    { method: "post", class: "auth-form embedded" },
+    fields.map(([label, input]) => h("label", {}, label, input)),
+    errorBox,
+    h("div", { class: "actions" }, confirm, cancel),
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    confirm.disabled = true;
+    errorBox.textContent = "";
+    onSubmit().catch((error: unknown) => {
+      confirm.disabled = false;
+      if (!isHandledGlobally(error)) {
+        errorBox.textContent = messageOf(error);
+      }
+    });
+  });
+  container.replaceChildren(form);
+  fields[0]?.[1].focus();
+}
+
+function passwordInput(): HTMLInputElement {
+  return h("input", { type: "password", required: true, autocomplete: "current-password" });
+}
+
+/** 自己的 SSO 連結：連結、取消連結，或說明還沒有設定 */
+function renderSsoLink(panel: HTMLElement): void {
   panel.replaceChildren(h("p", { class: "muted" }, "Loading…"));
   void (async () => {
     let status: MySso;
@@ -163,7 +331,7 @@ function renderMySignIn(panel: HTMLElement): void {
             try {
               await api.delete("/api/me/sso");
               showToast(`${name} unlinked`);
-              renderMySignIn(panel);
+              renderSsoLink(panel);
             } catch (error) {
               if (!isHandledGlobally(error)) {
                 errorBox.textContent = messageOf(error);
@@ -203,10 +371,7 @@ function renderMySignIn(panel: HTMLElement): void {
       );
     }
 
-    panel.replaceChildren(
-      h("h2", { class: "section-title" }, "Sign-in"),
-      h("div", { class: "settings-group" }, ...content, errorBox),
-    );
+    panel.replaceChildren(h("h3", { class: "group-title" }, "Single sign-on"), ...content, errorBox);
   })();
 }
 
@@ -280,8 +445,12 @@ export function renderAdministration(
   }
 }
 
-/** Administration → Sign-in：SSO（OpenID Connect）的設定 */
-function renderSsoSettings(panel: HTMLElement): void {
+/** Administration → Sign-in：是否強制 2FA，以及 SSO（OpenID Connect）的設定 */
+function renderSsoSettings(page: HTMLElement): void {
+  const requirement = h("section", { class: "settings-group" });
+  const panel = h("div", {});
+  page.replaceChildren(h("h2", { class: "section-title" }, "Sign-in"), requirement, panel);
+  renderRequirement(requirement);
   panel.replaceChildren(h("p", { class: "muted" }, "Loading…"));
   void (async () => {
     let current: AdminSso;
@@ -371,7 +540,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const form = h(
     "form",
     { method: "post", class: "auth-form embedded settings-form" },
-    h("h2", { class: "section-title" }, "Sign-in"),
+    h("h3", { class: "group-title" }, "Single sign-on"),
     h(
       "p",
       { class: "hint" },
@@ -442,6 +611,61 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   });
 
   panel.replaceChildren(form);
+}
+
+/** 是否強制每個用密碼登入的人開啟 2FA */
+function renderRequirement(section: HTMLElement): void {
+  const title = h("h3", { class: "group-title" }, "Two-factor authentication");
+  section.replaceChildren(title, h("p", { class: "muted" }, "Loading…"));
+  void (async () => {
+    let current: { require_two_factor: boolean };
+    try {
+      current = await api.get<{ require_two_factor: boolean }>("/api/admin/two-factor");
+    } catch (error) {
+      if (!isHandledGlobally(error)) {
+        section.replaceChildren(title, h("p", { class: "error", role: "alert" }, messageOf(error)));
+      }
+      return;
+    }
+    const required = h("input", { type: "checkbox", checked: current.require_two_factor });
+    const errorBox = h("p", { class: "error", role: "alert" });
+    const save = h("button", { type: "submit", class: "primary" }, "Save");
+    const form = h(
+      "form",
+      { method: "post", class: "auth-form embedded settings-form" },
+      h("label", { class: "inline" }, required, "Require two-factor authentication"),
+      h(
+        "p",
+        { class: "hint" },
+        "Everyone who logs in with a password must set it up before they can use ManorCloud. ",
+        "If you haven't set it up yourself, you'll be asked to right away. ",
+        "People who use single sign-on aren't affected.",
+      ),
+      errorBox,
+      h("div", { class: "actions" }, save),
+    );
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      save.disabled = true;
+      errorBox.textContent = "";
+      void (async () => {
+        try {
+          await api.put("/api/admin/two-factor", { require_two_factor: required.checked });
+          showToast("Saved");
+          // 打開強制而自己還沒設定：這個請求就會收到 two_factor_setup_required，
+          // 全域處理會切換到設定畫面
+          await api.get("/api/admin/two-factor");
+          save.disabled = false;
+        } catch (error) {
+          if (!isHandledGlobally(error)) {
+            errorBox.textContent = messageOf(error);
+          }
+          save.disabled = false;
+        }
+      })();
+    });
+    section.replaceChildren(title, form);
+  })();
 }
 
 /** 複製文字。http 的網址中瀏覽器不提供剪貼簿 API：改成選取文字，讓使用者自己複製 */

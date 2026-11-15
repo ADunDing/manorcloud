@@ -1,12 +1,14 @@
 //! 身分驗證的 extractor。
 //!
 //! 兩個層級：
-//! - `CurrentUser`（預設）：已登入、未停用、**而且不需要修改密碼**。所有一般 API 都用它。
-//! - `SessionUser`：已登入、未停用，允許「必須修改密碼」的狀態。
-//!   只用於 `/api/me` 與 `/api/me/credentials`，否則使用者會卡在無法修改密碼的狀態。
+//! - `CurrentUser`（預設）：已登入、未停用，**而且不需要先完成任何事**
+//!   （修改臨時密碼、依管理員的要求設定 2FA）。所有一般 API 都用它。
+//! - `SessionUser`：已登入、未停用，允許「必須先完成一件事」的狀態。
+//!   只用於 `/api/me`、`/api/me/credentials` 與 `/api/me/two-factor/*`，
+//!   否則使用者會卡在無法完成那件事的狀態。
 //!
 //! 預設是嚴格的那一個：新增的 API 照慣例寫 `CurrentUser` 就自動受到保護，
-//! 要允許「尚未修改密碼」必須刻意改用 `SessionUser`。
+//! 要允許這些狀態必須刻意改用 `SessionUser`。
 
 use axum::{
     extract::{FromRef, FromRequestParts},
@@ -25,9 +27,10 @@ use crate::{auth, db::session};
 /// 未登入時統一的訊息：不區分是沒帶 Cookie 還是 session 失效
 const NOT_LOGGED_IN: &str = "You're not logged in, or your session has expired";
 
-/// 已登入且未停用的使用者，包含「必須修改密碼」的狀態。
+/// 已登入且未停用的使用者，包含「必須修改密碼」與「必須設定 2FA」的狀態。
 ///
-/// **只用於 `/api/me` 與 `/api/me/credentials`**。其他 API 一律使用 `CurrentUser`。
+/// **只用於 `/api/me`、`/api/me/credentials` 與 `/api/me/two-factor/*`**。
+/// 其他 API 一律使用 `CurrentUser`。
 ///
 /// 每個請求都從資料庫重新讀取。被停用的使用者，其 session 在查詢中即被過濾，
 /// 所以停用會立即生效，不必等 session 過期。
@@ -37,12 +40,14 @@ pub struct SessionUser {
     pub username: String,
     pub role: String,
     pub must_change_password: bool,
+    /// 管理員要求開啟 2FA，而這個帳號還沒有設定
+    pub two_factor_setup_required: bool,
 }
 
-/// 目前登入的使用者：已登入、未停用，而且不需要修改密碼。
+/// 目前登入的使用者：已登入、未停用，而且不需要先完成任何事。
 ///
 /// 作為 extractor 使用：handler 參數寫上 `CurrentUser`，未登入的請求回 401，
-/// 必須修改密碼的請求回 403，都在進入 handler 之前就被擋下。
+/// 必須修改密碼或設定 2FA 的請求回 403，都在進入 handler 之前就被擋下。
 #[derive(Debug, Clone, Serialize)]
 pub struct CurrentUser {
     pub id: i64,
@@ -81,11 +86,12 @@ where
             username: info.username,
             role: info.role,
             must_change_password: info.must_change_password,
+            two_factor_setup_required: info.two_factor_setup_required,
         })
     }
 }
 
-/// 建立在 SessionUser 之上，多一道「不需要修改密碼」的檢查
+/// 建立在 SessionUser 之上，多一道「不需要先完成任何事」的檢查
 impl<S> FromRequestParts<S> for CurrentUser
 where
     SqlitePool: FromRef<S>,
@@ -102,6 +108,12 @@ where
             return Err(AppError::Forbidden(Forbidden::PasswordChangeRequired));
         }
 
+        if user.two_factor_setup_required {
+            // 管理員要求開啟 2FA：先完成設定，前端依代碼 two_factor_setup_required 顯示設定畫面。
+            // 排在修改密碼之後：臨時密碼要先改掉，才能設定 2FA
+            return Err(AppError::Forbidden(Forbidden::TwoFactorSetupRequired));
+        }
+
         Ok(CurrentUser {
             id: user.id,
             username: user.username,
@@ -110,7 +122,7 @@ where
     }
 }
 
-/// 目前登入的管理員：已登入、未停用、不需要修改密碼，而且角色是 admin。
+/// 目前登入的管理員：已登入、未停用、不需要先完成任何事，而且角色是 admin。
 ///
 /// 建立在 CurrentUser 之上，多一道角色檢查，不是管理員就回 403（admin_required）。
 /// 角色每個請求都從資料庫重新讀取，降級後立即生效。
@@ -273,5 +285,29 @@ mod tests {
             .unwrap();
 
         assert!(user.must_change_password);
+    }
+
+    #[sqlx::test]
+    async fn required_two_factor_blocks_current_user_but_not_session_user(pool: SqlitePool) {
+        let token = login_as_carol(&pool).await;
+        crate::db::two_factor::set_require_two_factor(&pool, true)
+            .await
+            .unwrap();
+
+        let mut parts = request_parts(Some(&cookie_for(&token)));
+        let err = CurrentUser::from_request_parts(&mut parts, &pool)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Forbidden(Forbidden::TwoFactorSetupRequired)
+        ));
+
+        // /api/me 與 2FA 的設定仍然可以使用
+        let mut parts = request_parts(Some(&cookie_for(&token)));
+        let user = SessionUser::from_request_parts(&mut parts, &pool)
+            .await
+            .unwrap();
+        assert!(user.two_factor_setup_required);
     }
 }

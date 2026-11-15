@@ -8,8 +8,11 @@ pub struct SessionInfo {
     pub user_id: i64,
     pub username: String,
     pub role: String,
-    /// 密碼是臨時的，必須先修改。沒有密碼的使用者（將來只用 SSO）為 false
+    /// 密碼是臨時的，必須先修改。沒有密碼的使用者（只用 SSO）為 false
     pub must_change_password: bool,
+    /// 管理員要求開啟兩步驟驗證，而這個帳號還沒有設定。
+    /// 只用 SSO 的帳號為 false：它們的兩步驟驗證由身分提供者負責
+    pub two_factor_setup_required: bool,
 }
 
 /// 新增一筆 session
@@ -35,7 +38,10 @@ pub async fn create_session(
 /// session 不存在、已過期，或使用者已被停用，都回傳 None：
 /// 停用帳號的所有既有 session 立即全部失效，不必等到過期。
 ///
-/// 用 LEFT JOIN 讀取密碼表：將來只用 SSO 的使用者沒有密碼紀錄，此時「必須修改」視為 false。
+/// 用 LEFT JOIN 讀取密碼表：只用 SSO 的使用者沒有密碼紀錄，此時「必須修改」視為 false。
+///
+/// 「必須設定 2FA」在同一條查詢中算出：每個請求都重新判斷，
+/// 管理員打開或關閉強制、使用者完成設定，都立即生效。
 pub async fn find_user_by_token_hash(
     pool: &SqlitePool,
     token_hash: &[u8],
@@ -48,7 +54,15 @@ pub async fn find_user_by_token_hash(
             users.username AS "username!",
             users.role     AS "role!",
             COALESCE(password_credentials.must_change_password, 0)
-                           AS "must_change_password!: bool"
+                           AS "must_change_password!: bool",
+            (
+                password_credentials.user_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM totp_credentials
+                    WHERE totp_credentials.user_id = users.id AND totp_credentials.enabled = 1
+                )
+                AND (SELECT require_two_factor FROM security_settings WHERE id = 1) = 1
+            )              AS "two_factor_setup_required!: bool"
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         LEFT JOIN password_credentials ON password_credentials.user_id = users.id
@@ -118,6 +132,7 @@ mod tests {
         assert_eq!(found.username, "alice");
         assert_eq!(found.role, "member");
         assert!(!found.must_change_password);
+        assert!(!found.two_factor_setup_required);
     }
 
     #[sqlx::test]
@@ -142,12 +157,51 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn two_factor_setup_is_required_only_when_enforced_and_missing(pool: SqlitePool) {
+        let user_id = setup_user(&pool).await;
+        let hash = vec![10u8; 32];
+        create_session(&pool, user_id, &hash, now() + 3600)
+            .await
+            .unwrap();
+        let required = || async {
+            find_user_by_token_hash(&pool, &hash)
+                .await
+                .unwrap()
+                .unwrap()
+                .two_factor_setup_required
+        };
+
+        assert!(!required().await);
+
+        crate::db::two_factor::set_require_two_factor(&pool, true)
+            .await
+            .unwrap();
+        assert!(required().await);
+
+        // 完成設定之後就不再要求
+        crate::db::two_factor::begin_setup(&pool, user_id, b"12345678901234567890")
+            .await
+            .unwrap();
+        crate::db::two_factor::enable(&pool, user_id, 1, &[])
+            .await
+            .unwrap();
+        // enable 會登出所有裝置：重新建立 session
+        create_session(&pool, user_id, &hash, now() + 3600)
+            .await
+            .unwrap();
+        assert!(!required().await);
+    }
+
+    #[sqlx::test]
     async fn user_without_password_is_found(pool: SqlitePool) {
-        // 模擬將來只用 SSO 的使用者：LEFT JOIN 讓沒有密碼紀錄的使用者仍然查得到
+        // 模擬只用 SSO 的使用者：LEFT JOIN 讓沒有密碼紀錄的使用者仍然查得到
         let user_id = setup_user(&pool).await;
         sqlx::query("DELETE FROM password_credentials WHERE user_id = ?")
             .bind(user_id)
             .execute(&pool)
+            .await
+            .unwrap();
+        crate::db::two_factor::set_require_two_factor(&pool, true)
             .await
             .unwrap();
         let hash = vec![9u8; 32];
@@ -161,6 +215,8 @@ mod tests {
             .unwrap();
 
         assert!(!found.must_change_password);
+        // 只用 SSO 的帳號不受 2FA 的強制影響
+        assert!(!found.two_factor_setup_required);
     }
 
     #[sqlx::test]

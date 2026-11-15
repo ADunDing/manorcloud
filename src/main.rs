@@ -6,6 +6,7 @@ mod export;
 mod files;
 mod gc;
 mod layout;
+mod rescue;
 mod storage;
 mod systemd;
 mod uninstall;
@@ -32,6 +33,9 @@ Administration (requires sudo):
   manorcloud export <output-dir>    export all files with their original names and folders
   manorcloud uninstall [--purge]    remove the program and service;
                                     --purge also deletes /var/lib/manorcloud and the configuration
+  sudo -u manorcloud manorcloud reset-2fa <username>
+                                    turn off two-factor authentication for an account
+                                    (when its phone and recovery codes are lost)
 
 Other:
   manorcloud --version              show the version
@@ -52,6 +56,7 @@ enum Command {
     Run,
     Export(Vec<OsString>),
     Uninstall(Vec<OsString>),
+    ResetTwoFactor(Vec<OsString>),
     /// 不認得的指令或參數，附上原因
     Invalid(String),
 }
@@ -75,6 +80,7 @@ fn parse_command(args: &[OsString]) -> Command {
         // 子指令自己解析剩下的參數
         "export" => Command::Export(rest.to_vec()),
         "uninstall" => Command::Uninstall(rest.to_vec()),
+        "reset-2fa" => Command::ResetTwoFactor(rest.to_vec()),
         "-h" | "--help" | "help" => Command::Help,
         "-V" | "--version" => Command::Version,
         other => Command::Invalid(format!("unknown command: {other}")),
@@ -153,6 +159,7 @@ fn main() -> ExitCode {
         Command::Export(rest) => report(runtime().block_on(export::run(&rest))),
         // uninstall 不需要非同步，也就不建立執行環境
         Command::Uninstall(rest) => report(uninstall::run(&rest)),
+        Command::ResetTwoFactor(rest) => report(runtime().block_on(rescue::run(&rest))),
         Command::Invalid(reason) => {
             eprintln!("{reason}\n\n{HELP}");
             ExitCode::from(2)
@@ -281,6 +288,15 @@ mod tests {
             Command::Uninstall(vec![OsString::from("--purge")])
         );
         assert!(HELP.contains("manorcloud uninstall"));
+    }
+
+    #[test]
+    fn reset_two_factor_receives_its_arguments() {
+        assert_eq!(
+            parse(&["reset-2fa", "alston"]),
+            Command::ResetTwoFactor(vec![OsString::from("alston")])
+        );
+        assert!(HELP.contains("manorcloud reset-2fa"));
     }
 
     #[test]

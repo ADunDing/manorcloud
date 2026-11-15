@@ -1716,3 +1716,60 @@ table.files .col-location {
     color: var(--error);
 }
 
+/* ---------- 兩步驟驗證 ---------- */
+
+.group-title {
+    margin: 0 0 8px;
+    font-size: 1rem;
+}
+
+/* QR code：一律白底黑點（有些 App 讀不了反色的），深色主題中也一樣 */
+.qr-box {
+    align-self: flex-start;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.qr {
+    display: block;
+    width: 200px;
+    height: 200px;
+}
+
+.manual-secret summary {
+    cursor: pointer;
+    color: var(--accent);
+}
+
+.manual-secret code {
+    display: block;
+    margin-top: 8px;
+    font-size: 1rem;
+    letter-spacing: 0.05em;
+    overflow-wrap: anywhere;
+}
+
+/* 驗證碼：等寬、大一點、字距開一點，方便對照手機上的數字 */
+.code-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.25rem !important;
+    letter-spacing: 0.15em;
+}
+
+.recovery-codes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, max-content));
+    gap: 6px 32px;
+    margin: 0;
+    padding-left: 1.5em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.auth-links {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+

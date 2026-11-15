@@ -11,6 +11,7 @@ import { hideSidebar, renderSidebar } from "./sidebar.js";
 import { takeSsoResult } from "./sso.js";
 import { applyTheme, loadTheme } from "./theme.js";
 import { showToast } from "./toast.js";
+import { renderTwoFactorSetup } from "./two-factor-view.js";
 import { leaveTrash, renderTrash } from "./trash-view.js";
 import type { User } from "./types.js";
 
@@ -71,6 +72,28 @@ function showScreen(user: User): void {
     hideSidebar(sidebar);
     showAccount(user, { navigation: false });
     renderChangeCredentials(app, user, showScreen, { forced: true });
+  } else if (user.two_factor_setup_required) {
+    // 管理員要求開啟 2FA，而這個帳號還沒有設定：完成之前不能使用其他功能（後端也會擋下）
+    screen = "change";
+    leaveBrowser();
+    leaveTrash();
+    hideSidebar(sidebar);
+    showAccount(user, { navigation: false });
+    const steps = h("div", {});
+    app.replaceChildren(
+      h(
+        "div",
+        { class: "auth-form" },
+        h("h1", {}, "Set up two-factor authentication"),
+        h(
+          "p",
+          { class: "notice", role: "status" },
+          "Your administrator requires two-factor authentication. Set it up to continue.",
+        ),
+        steps,
+      ),
+    );
+    renderTwoFactorSetup(steps, { onDone: () => void refresh() });
   } else {
     showHome(user);
   }

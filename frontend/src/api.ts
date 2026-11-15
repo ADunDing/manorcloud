@@ -40,8 +40,9 @@ export function onUnauthorized(listener: Listener): void {
 }
 
 /**
- * 註冊「必須先修改密碼」的處理函式（例如切換到修改畫面）。
- * 任何 API 回 403 且代碼為 password_change_required 時觸發。
+ * 註冊「帳號必須先完成一件事」的處理函式：重新讀取使用者，切換到對應的畫面。
+ * 任何 API 回 403 且代碼為 password_change_required（修改臨時密碼）
+ * 或 two_factor_setup_required（管理員要求設定 2FA）時觸發。
  */
 export function onPasswordChangeRequired(listener: Listener): void {
   passwordChangeListeners.add(listener);
@@ -60,20 +61,23 @@ export function errorFromResponse(
   if (status === 401 && notifyUnauthorized) {
     unauthorizedListeners.forEach((listener) => listener());
   }
-  if (code === "password_change_required") {
+  if (code === "password_change_required" || code === "two_factor_setup_required") {
     passwordChangeListeners.forEach((listener) => listener());
   }
   return new ApiError(status, message, code);
 }
 
 /**
- * 這個錯誤是否已由全域處理換了畫面（401 → 登入畫面；password_change_required → 修改畫面）。
+ * 這個錯誤是否已由全域處理換了畫面（401 → 登入畫面；
+ * password_change_required、two_factor_setup_required → 對應的設定畫面）。
  * 是的話，呼叫端不該再把錯誤畫上去，否則會覆蓋掉剛出現的畫面。
  */
 export function isHandledGlobally(error: unknown): boolean {
   return (
     error instanceof ApiError &&
-    (error.status === 401 || error.code === "password_change_required")
+    (error.status === 401 ||
+      error.code === "password_change_required" ||
+      error.code === "two_factor_setup_required")
   );
 }
 

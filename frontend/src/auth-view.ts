@@ -3,6 +3,7 @@
 import { api, ApiError } from "./api.js";
 import { h } from "./dom.js";
 import { ssoInfo, startSso } from "./sso.js";
+import { codeInput } from "./two-factor-view.js";
 import type { User } from "./types.js";
 
 // 以下規則必須與後端 src/web/auth.rs 的 USERNAME_MIN、USERNAME_MAX、
@@ -69,7 +70,7 @@ export function renderLogin(
     async () => {
       const data = new FormData(form);
       // 登入 API 的 401 是「帳號或密碼錯誤」，不是「登入已過期」
-      const user = await api.post<User>(
+      const result = await api.post<User | { two_factor_required: true }>(
         "/api/login",
         {
           username: textField(data, "username"),
@@ -77,7 +78,12 @@ export function renderLogin(
         },
         { notifyUnauthorized: false },
       );
-      onLoggedIn(user);
+      if ("two_factor_required" in result) {
+        // 密碼正確，帳號開啟了 2FA：這時才出現驗證碼的輸入框
+        renderTwoFactorStep(container, onLoggedIn);
+        return;
+      }
+      onLoggedIn(result);
     },
     (error) => {
       errorBox.textContent = messageOf(error);
@@ -90,6 +96,70 @@ export function renderLogin(
   container.replaceChildren(form);
   usernameInput.focus();
   void addSsoButton(form, errorBox);
+}
+
+/**
+ * 登入的第二步：輸入驗證器 App 的驗證碼，或一組備用碼。
+ *
+ * - 驗證碼錯誤（400）：留在這裡再試
+ * - 等待中的登入過期或猜錯太多次（401）：回到帳號密碼，並說明原因
+ */
+function renderTwoFactorStep(container: HTMLElement, onLoggedIn: (user: User) => void): void {
+  const code = codeInput();
+  const errorBox = errorContainer();
+  const submitButton = h("button", { type: "submit" }, "Verify");
+  const hint = h("p", {}, "Enter the 6-digit code from your authenticator app.");
+  let recovery = false;
+  const toggle = h("button", { type: "button", class: "link" }, "Use a recovery code instead");
+  toggle.addEventListener("click", () => {
+    recovery = !recovery;
+    hint.textContent = recovery
+      ? "Enter one of your recovery codes, like abcd-efgh. Each code works once."
+      : "Enter the 6-digit code from your authenticator app.";
+    toggle.textContent = recovery ? "Use the authenticator app instead" : "Use a recovery code instead";
+    code.inputMode = recovery ? "text" : "numeric";
+    code.value = "";
+    code.focus();
+  });
+  const back = h("button", { type: "button", class: "link" }, "Back");
+  back.addEventListener("click", () => renderLogin(container, onLoggedIn));
+
+  const form = h(
+    "form",
+    { method: "post", class: "auth-form" },
+    h("h1", {}, "Two-factor authentication"),
+    hint,
+    labeled("Code", code),
+    errorBox,
+    submitButton,
+    h("div", { class: "auth-links" }, toggle, back),
+  );
+
+  bindSubmit(
+    form,
+    submitButton,
+    async () => {
+      const user = await api.post<User>(
+        "/api/login/two-factor",
+        { code: textField(new FormData(form), "code") },
+        { notifyUnauthorized: false },
+      );
+      onLoggedIn(user);
+    },
+    (error) => {
+      if (error instanceof ApiError && error.status === 401) {
+        renderLogin(container, onLoggedIn, messageOf(error));
+        return;
+      }
+      errorBox.textContent = messageOf(error);
+      code.value = "";
+      code.focus();
+    },
+  );
+
+  code.name = "code";
+  container.replaceChildren(form);
+  code.focus();
 }
 
 /**

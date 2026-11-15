@@ -16,6 +16,8 @@ export interface User {
   readonly role: Role;
   /** 密碼是臨時的：必須先顯示修改畫面，其他 API 都會回 403 */
   readonly must_change_password: boolean;
+  /** 管理員要求開啟兩步驟驗證，而這個帳號還沒有設定：必須先完成設定 */
+  readonly two_factor_setup_required: boolean;
 }
 
 /**
@@ -105,6 +107,7 @@ export type ErrorCode =
   | "password_change_required"
   | "wrong_current_password"
   | "admin_required"
+  | "two_factor_setup_required"
   // 其他狀態碼的通用代碼
   | "bad_request"
   | "unauthorized"
@@ -113,6 +116,8 @@ export type ErrorCode =
   | "payload_too_large"
   | "internal"
   | "insufficient_storage"
+  | "bad_gateway"
+  | "unavailable"
   // 登入失敗次數過多，暫時鎖定（429）
   | "too_many_attempts"
   // 分段上傳（409）

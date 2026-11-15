@@ -1,0 +1,64 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            users.id       AS \"user_id!\",\n            users.username AS \"username!\",\n            users.role     AS \"role!\",\n            COALESCE(password_credentials.must_change_password, 0)\n                           AS \"must_change_password!: bool\",\n            (\n                password_credentials.user_id IS NOT NULL\n                AND NOT EXISTS (\n                    SELECT 1 FROM totp_credentials\n                    WHERE totp_credentials.user_id = users.id AND totp_credentials.enabled = 1\n                )\n                AND (SELECT require_two_factor FROM security_settings WHERE id = 1) = 1\n            )              AS \"two_factor_setup_required!: bool\"\n        FROM sessions\n        JOIN users ON users.id = sessions.user_id\n        LEFT JOIN password_credentials ON password_credentials.user_id = users.id\n        WHERE sessions.token_hash = ?\n          AND sessions.expires_at > unixepoch()\n          AND users.disabled = 0\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "username!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "role!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "name": "must_change_password!: bool",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "two_factor_setup_required!: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "29c32605ffd53d7105e1b292224e5ba2efd87d52e8e628c295f009e4e7a18ee8"
+}

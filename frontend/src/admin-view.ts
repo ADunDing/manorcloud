@@ -5,6 +5,7 @@
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { confirmDialog } from "./dialogs.js";
+import { showToast } from "./toast.js";
 import { h } from "./dom.js";
 import { formatUtcText } from "./format.js";
 import type { CreatedUser, ManagedUser, ResetPasswordResponse, User } from "./types.js";
@@ -32,6 +33,8 @@ class AdminView {
   private readonly tableSlot = h("div", {});
   /** 操作進行中，避免重複送出 */
   private busy = false;
+  /** 已經開啟 2FA 的使用者 */
+  private twoFactor = new Set<number>();
 
   constructor(
     private readonly container: HTMLElement,
@@ -56,7 +59,11 @@ class AdminView {
   private async loadTable(): Promise<void> {
     this.tableSlot.replaceChildren(h("p", { class: "muted" }, "Loading…"));
     try {
-      const users = await api.get<ManagedUser[]>("/api/admin/users");
+      const [users, twoFactor] = await Promise.all([
+        api.get<ManagedUser[]>("/api/admin/users"),
+        api.get<{ enabled_user_ids: number[] }>("/api/admin/two-factor"),
+      ]);
+      this.twoFactor = new Set(twoFactor.enabled_user_ids);
       this.tableSlot.replaceChildren(this.table(users));
     } catch (error) {
       if (!isHandledGlobally(error)) {
@@ -78,6 +85,7 @@ class AdminView {
           h("th", { scope: "col" }, "Username"),
           h("th", { scope: "col" }, "Role"),
           h("th", { scope: "col" }, "Status"),
+          h("th", { scope: "col" }, "2FA"),
           h("th", { scope: "col" }, "Created"),
           h("th", { scope: "col" }, h("span", { class: "visually-hidden" }, "Actions")),
         ),
@@ -108,6 +116,7 @@ class AdminView {
         h("span", { class: `badge ${user.role}` }, user.role === "admin" ? "Administrator" : "Member"),
       ),
       h("td", {}, status),
+      h("td", {}, this.twoFactor.has(user.id) ? "On" : h("span", { class: "muted" }, "Off")),
       h("td", {}, formatUtcText(user.created_at)),
       h(
         "td",
@@ -131,6 +140,14 @@ class AdminView {
               "button",
               { type: "button", class: "link", onClick: () => void this.resetPassword(user) },
               "Reset password",
+            ),
+        // 自己的 2FA 要在 Settings 中用密碼與驗證碼關閉
+        isSelf || !this.twoFactor.has(user.id)
+          ? null
+          : h(
+              "button",
+              { type: "button", class: "link", onClick: () => void this.resetTwoFactor(user) },
+              "Turn off 2FA",
             ),
       ),
     );
@@ -222,6 +239,24 @@ class AdminView {
       return;
     }
     this.perform(() => api.patch(`/api/admin/users/${user.id}`, { disabled: !user.disabled }));
+  }
+
+  /** 手機與備用碼都遺失時：關閉這個人的 2FA，同時登出他所有的裝置 */
+  private async resetTwoFactor(user: ManagedUser): Promise<void> {
+    const confirmed = await confirmDialog({
+      title: `Turn off two-factor authentication for ${user.username}?`,
+      message:
+        "They'll be logged out on every device and can log in with just their password. Use this when they've lost their phone and their recovery codes.",
+      confirmLabel: "Turn off 2FA",
+      danger: true,
+    });
+    if (!confirmed) {
+      return;
+    }
+    this.perform(async () => {
+      await api.post(`/api/admin/users/${user.id}/reset-two-factor`);
+      showToast(`Two-factor authentication turned off for ${user.username}`);
+    });
   }
 
   private async resetPassword(user: ManagedUser): Promise<void> {

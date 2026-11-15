@@ -13,6 +13,7 @@ mod shutdown;
 mod sso;
 mod state;
 mod trash;
+mod two_factor;
 mod uploads;
 
 #[cfg(test)]
@@ -89,6 +90,7 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
         .merge(uploads::router())
         .merge(trash::router())
         .merge(sso::router())
+        .merge(two_factor::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }
 
@@ -141,6 +143,17 @@ mod tests {
     async fn cross_site_upload_is_forbidden(pool: SqlitePool) {
         // 上傳路由也在 api_router 內，自動受到 Origin 檢查保護
         let req = request(Method::POST, "/api/files", Some("http://evil.example"));
+        assert_eq!(status_of(pool, req).await, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    async fn cross_site_two_factor_login_is_forbidden(pool: SqlitePool) {
+        // 登入的第二步與 2FA 的設定同樣在 api_router 內，受到 Origin 檢查保護
+        let req = request(
+            Method::POST,
+            "/api/login/two-factor",
+            Some("http://evil.example"),
+        );
         assert_eq!(status_of(pool, req).await, StatusCode::FORBIDDEN);
     }
 

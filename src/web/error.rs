@@ -23,6 +23,8 @@ pub enum Forbidden {
     WrongCurrentPassword,
     /// 需要管理員權限
     AdminRequired,
+    /// 管理員要求開啟兩步驟驗證，而這個帳號還沒有設定
+    TwoFactorSetupRequired,
 }
 
 impl Forbidden {
@@ -34,6 +36,7 @@ impl Forbidden {
             Forbidden::PasswordChangeRequired => "password_change_required",
             Forbidden::WrongCurrentPassword => "wrong_current_password",
             Forbidden::AdminRequired => "admin_required",
+            Forbidden::TwoFactorSetupRequired => "two_factor_setup_required",
         }
     }
 
@@ -45,6 +48,7 @@ impl Forbidden {
             Forbidden::PasswordChangeRequired => "Change your password first",
             Forbidden::WrongCurrentPassword => "The current password is incorrect",
             Forbidden::AdminRequired => "Administrator rights are required",
+            Forbidden::TwoFactorSetupRequired => "Set up two-factor authentication first",
         }
     }
 }
@@ -151,12 +155,13 @@ mod tests {
 
     /// 所有 403 原因。新增原因時，下面的 `position` 會因為 match 缺少分支而編譯失敗，
     /// 強迫回來更新這份清單，測試才不會漏掉新的原因。
-    const ALL_FORBIDDEN: [Forbidden; 5] = [
+    const ALL_FORBIDDEN: [Forbidden; 6] = [
         Forbidden::CrossOrigin,
         Forbidden::AccountDisabled,
         Forbidden::PasswordChangeRequired,
         Forbidden::WrongCurrentPassword,
         Forbidden::AdminRequired,
+        Forbidden::TwoFactorSetupRequired,
     ];
 
     /// 每個原因在 ALL_FORBIDDEN 中的位置。刻意不寫 `_` 萬用分支
@@ -167,6 +172,7 @@ mod tests {
             Forbidden::PasswordChangeRequired => 2,
             Forbidden::WrongCurrentPassword => 3,
             Forbidden::AdminRequired => 4,
+            Forbidden::TwoFactorSetupRequired => 5,
         }
     }
 
