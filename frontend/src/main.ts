@@ -1,13 +1,14 @@
 // 進入點：依登入狀態與網址決定要顯示哪個畫面。
 
 import { api, ApiError, onPasswordChangeRequired, onUnauthorized } from "./api.js";
-import { renderAdmin } from "./admin-view.js";
 import { renderChangeCredentials, renderLogin } from "./auth-view.js";
 import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
 import { h } from "./dom.js";
 import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
-import { ADMIN_HREF, currentRoute, folderHref, isTrashRoute } from "./router.js";
+import { adminHref, currentRoute, folderHref, settingsHref } from "./router.js";
+import { renderAdministration, renderSettings } from "./settings-view.js";
 import { hideSidebar, renderSidebar } from "./sidebar.js";
+import { applyTheme, loadTheme } from "./theme.js";
 import { leaveTrash, renderTrash } from "./trash-view.js";
 import type { User } from "./types.js";
 
@@ -26,10 +27,13 @@ const sidebar = requireElement("sidebar");
 const panels = requireElement("panels");
 const brand = requireElement("brand");
 
+// 最先套用主題：在畫出任何東西之前，避免先閃一下另一個主題的顏色
+applyTheme(loadTheme());
+
 mountPanels(panels);
 
-/** 目前顯示的畫面。登入與強制修改的畫面不受網址影響 */
-type Screen = "login" | "change" | "home" | "settings";
+/** 目前顯示的畫面。登入與強制修改的畫面不受網址影響；home 依網址決定顯示哪一頁 */
+type Screen = "login" | "change" | "home";
 let screen: Screen = "login";
 
 /** 目前登入的使用者；未登入時為 null */
@@ -57,7 +61,7 @@ function showScreen(user: User): void {
   }
 }
 
-/** 依網址顯示「My files」「Trash」或「Users」 */
+/** 依網址顯示 My files、Trash、Settings 或 Administration */
 function showHome(user: User): void {
   currentUser = user;
   screen = "home";
@@ -65,38 +69,40 @@ function showHome(user: User): void {
   showAccount(user, { navigation: true });
   leaveTrash();
 
-  if (isTrashRoute()) {
-    leaveBrowser();
-    renderSidebar(sidebar, sidebarActions, "trash");
-    renderTrash(app);
-    return;
-  }
-
   const route = currentRoute();
-  if (route.view === "admin") {
-    if (user.role === "admin") {
+  switch (route.view) {
+    case "trash":
+      leaveBrowser();
+      renderSidebar(sidebar, sidebarActions, "trash");
+      renderTrash(app);
+      return;
+
+    case "settings":
       leaveBrowser();
       renderSidebar(sidebar, sidebarActions, null);
-      // 降級自己之後重新讀取使用者，交給 showScreen 決定畫面
-      renderAdmin(app, user, () => void refresh());
+      // 修改了帳號名稱或密碼：交給 showScreen 依新的使用者資料重新顯示
+      renderSettings(app, user, route.section, showScreen);
       return;
-    }
-    // 不是管理員：回到 My files。replaceState 不會觸發 hashchange，也不會留下歷史紀錄
-    history.replaceState(null, "", folderHref(null));
+
+    case "admin":
+      if (user.role === "admin") {
+        leaveBrowser();
+        renderSidebar(sidebar, sidebarActions, null);
+        // 降級自己之後重新讀取使用者，交給 showScreen 決定畫面
+        renderAdministration(app, user, route.section, () => void refresh());
+        return;
+      }
+      // 不是管理員：回到 My files。replaceState 不會觸發 hashchange，也不會留下歷史紀錄。
+      // 這只是使用體驗；真正的權限檢查在後端的 AdminUser
+      history.replaceState(null, "", folderHref(null));
+      break;
+
+    case "files":
+      break;
   }
+
   renderSidebar(sidebar, sidebarActions, "files");
   renderBrowser(app, route.view === "files" ? route.folderId : null);
-}
-
-function showSettings(user: User): void {
-  screen = "settings";
-  leaveBrowser();
-  leaveTrash();
-  renderSidebar(sidebar, sidebarActions, null);
-  renderChangeCredentials(app, user, showScreen, {
-    forced: false,
-    onCancel: () => showHome(user),
-  });
 }
 
 function showLoggedOut(notice?: string): void {
@@ -112,10 +118,10 @@ function showLoggedOut(notice?: string): void {
 }
 
 /**
- * 右上角的頭像與帳號選單：名稱與身分、Account settings、Users（只有管理員）、Log out。
+ * 右上角的頭像與帳號選單：名稱與身分、Settings、Administration（只有管理員）、Log out。
  * 必須修改密碼的狀態下只有 Log out。
  *
- * 「Users」只對管理員顯示，但這只是使用體驗；真正的權限檢查在後端的 AdminUser。
+ * 「Administration」只對管理員顯示，但這只是使用體驗；真正的權限檢查在後端的 AdminUser。
  */
 function showAccount(user: User, { navigation }: { navigation: boolean }): void {
   const avatar = h(
@@ -139,9 +145,13 @@ function showAccount(user: User, { navigation }: { navigation: boolean }): void 
     ),
   ];
   if (navigation) {
-    items.push(menuItem({ label: "Account settings", icon: "user", onSelect: () => showSettings(user) }));
+    items.push(
+      menuItem({ label: "Settings", icon: "user", onSelect: () => go(user, settingsHref()) }),
+    );
     if (user.role === "admin") {
-      items.push(menuItem({ label: "Users", icon: "users", onSelect: () => go(user, ADMIN_HREF) }));
+      items.push(
+        menuItem({ label: "Administration", icon: "users", onSelect: () => go(user, adminHref()) }),
+      );
     }
     items.push(menuSeparator());
   }
@@ -223,7 +233,7 @@ onPasswordChangeRequired(() => void refresh());
 // 網址改變（點了資料夾、路徑、上一頁、側欄的連結）：
 // 登入後、且不在強制修改的畫面時，依網址顯示對應的頁面
 window.addEventListener("hashchange", () => {
-  if (currentUser !== null && (screen === "home" || screen === "settings")) {
+  if (currentUser !== null && screen === "home") {
     showHome(currentUser);
   }
 });

@@ -27,8 +27,13 @@
     background: var(--bg);
 }
 
+/* 深色的顏色。兩種情況會用到：
+   1. 主題是「跟隨系統」（<html> 沒有 data-theme），而系統是深色
+   2. 主題是「深色」（data-theme="dark"）
+   主題是「淺色」（data-theme="light"）時一律用上面的淺色。
+   同一組值寫兩次：媒體查詢中的規則無法與外面的選擇器合併；修改顏色時兩處要一起改 */
 @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
         --fg: #e6edf3;
         --muted: #8d96a0;
         --subtle: #6e7681;
@@ -49,6 +54,28 @@
         --shadow: 0 8px 24px rgba(1, 4, 9, 0.6);
         color-scheme: dark;
     }
+}
+
+:root[data-theme="dark"] {
+    --fg: #e6edf3;
+    --muted: #8d96a0;
+    --subtle: #6e7681;
+    --border: #30363d;
+    --border-soft: #21262d;
+    --error: #f85149;
+    --success: #3fb950;
+    --accent: #2f81f7;
+    --accent-strong: #79c0ff;
+    --accent-fg: #ffffff;
+    --accent-soft: rgba(56, 139, 253, 0.15);
+    --bg: #0d1117;
+    --bar: #161b22;
+    --overlay: rgba(47, 129, 247, 0.12);
+    --drop-bg: rgba(13, 17, 23, 0.72);
+    --marquee: rgba(47, 129, 247, 0.18);
+    --backdrop: rgba(1, 4, 9, 0.6);
+    --shadow: 0 8px 24px rgba(1, 4, 9, 0.6);
+    color-scheme: dark;
 }
 
 body {
@@ -1539,3 +1566,83 @@ table.files .col-location {
 .toast-close:hover {
     background: rgba(127, 127, 127, 0.25);
 }
+
+/* ---------- Settings 與 Administration ---------- */
+
+/* 左邊是區塊清單，右邊是內容 */
+.settings-page {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 32px;
+    max-width: 960px;
+}
+
+.settings-nav ul {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.settings-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.settings-link:hover {
+    background: var(--bar);
+}
+
+.settings-link[aria-current="page"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.section-title {
+    margin: 0 0 16px;
+    font-size: 1.25rem;
+}
+
+/* 帳號表單放在 Settings 裡：靠左，不置中 */
+.auth-form.embedded {
+    margin: 0;
+}
+
+.settings-group {
+    max-width: 32rem;
+    margin: 0 0 28px;
+    padding: 0;
+    border: none;
+}
+
+.settings-group legend {
+    margin-bottom: 10px;
+    padding: 0;
+    font-weight: 600;
+}
+
+.settings-group .hint {
+    margin: 8px 0 0;
+}
+
+/* 窄的視窗：區塊清單移到上方，橫向排列 */
+@media (max-width: 720px) {
+    .settings-page {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
+    }
+
+    .settings-nav ul {
+        flex-direction: row;
+        flex-wrap: wrap;
+    }
+}
+

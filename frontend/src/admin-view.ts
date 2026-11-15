@@ -41,7 +41,7 @@ class AdminView {
 
   mount(): void {
     this.container.replaceChildren(
-      h("h1", { class: "page-title" }, "Users"),
+      h("h2", { class: "section-title" }, "Users"),
       this.noticeSlot,
       this.createForm(),
       this.errorBox,

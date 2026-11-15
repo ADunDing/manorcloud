@@ -1,45 +1,74 @@
-// 網址路由：使用 # 之後的部分，不會送到伺服器，後端不需要處理前端路由。
+// 網址（hash）與畫面的對應：
 //
-//   #/            我的檔案（根目錄）
-//   #/folder/12   資料夾 12
-//   #/admin       使用者管理（只有管理員）
+//   #/                     My files
+//   #/folder/{id}          某個資料夾
+//   #/trash                垃圾桶
+//   #/settings/{section}   個人設定：account、appearance
+//   #/admin/{section}      管理（只有管理員）：users
 //
-// 書籤、重新整理、瀏覽器的上一頁都能正常運作。
+// 不認得的網址一律回到 My files；不認得的區塊回到該頁的第一個區塊。
+// 之後加入 Sign-in（SSO）、Storage 等區塊時，只要加進對應的清單。
+
+export type SettingsSection = "account" | "appearance";
+export type AdminSection = "users";
 
 export type Route =
   | { readonly view: "files"; readonly folderId: number | null }
-  | { readonly view: "admin" };
+  | { readonly view: "trash" }
+  | { readonly view: "settings"; readonly section: SettingsSection }
+  | { readonly view: "admin"; readonly section: AdminSection };
 
-/** 解析目前的網址。無法辨識的網址一律視為根目錄 */
+export const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "appearance"];
+export const ADMIN_SECTIONS: readonly AdminSection[] = ["users"];
+
+export const TRASH_HREF = "#/trash";
+
 export function currentRoute(): Route {
-  const hash = window.location.hash;
-
-  if (hash === "#/admin") {
-    return { view: "admin" };
-  }
-
-  const match = /^#\/folder\/(\d+)$/.exec(hash);
-  const digits = match?.[1];
-  if (digits === undefined) {
-    return { view: "files", folderId: null };
-  }
-  const id = Number(digits);
-  // 超出安全整數範圍的數字無法精確表示，視為無效
-  return { view: "files", folderId: Number.isSafeInteger(id) ? id : null };
+  return parseRoute(window.location.hash);
 }
 
-/** 資料夾的連結。null 代表根目錄 */
+export function parseRoute(hash: string): Route {
+  const path = hash.replace(/^#/, "");
+
+  if (path === "/trash") {
+    return { view: "trash" };
+  }
+
+  // 位數上限：比 Number.MAX_SAFE_INTEGER 短，轉換後一定是精確的整數
+  const folder = /^\/folder\/(\d{1,15})$/.exec(path)?.[1];
+  if (folder !== undefined) {
+    const id = Number(folder);
+    if (id > 0) {
+      return { view: "files", folderId: id };
+    }
+  }
+
+  const settings = /^\/settings(?:\/([a-z-]+))?\/?$/.exec(path);
+  if (settings !== null) {
+    return { view: "settings", section: pick(SETTINGS_SECTIONS, settings[1]) ?? "account" };
+  }
+
+  const admin = /^\/admin(?:\/([a-z-]+))?\/?$/.exec(path);
+  if (admin !== null) {
+    return { view: "admin", section: pick(ADMIN_SECTIONS, admin[1]) ?? "users" };
+  }
+
+  return { view: "files", folderId: null };
+}
+
+/** value 是清單中的其中一個時回傳它（型別也跟著確定），否則 undefined */
+function pick<T extends string>(options: readonly T[], value: string | undefined): T | undefined {
+  return options.find((option) => option === value);
+}
+
 export function folderHref(folderId: number | null): string {
   return folderId === null ? "#/" : `#/folder/${folderId}`;
 }
 
-/** 使用者管理頁的連結 */
-export const ADMIN_HREF = "#/admin";
+export function settingsHref(section: SettingsSection = "account"): string {
+  return `#/settings/${section}`;
+}
 
-/** 垃圾桶的網址 */
-export const TRASH_HREF = "#/trash";
-
-/** 目前的網址是不是垃圾桶 */
-export function isTrashRoute(): boolean {
-  return window.location.hash === TRASH_HREF;
+export function adminHref(section: AdminSection = "users"): string {
+  return `#/admin/${section}`;
 }

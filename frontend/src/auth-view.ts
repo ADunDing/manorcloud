@@ -100,6 +100,8 @@ export interface ChangeCredentialsOptions {
   forced: boolean;
   /** 自願模式的「取消」 */
   onCancel?: () => void;
+  /** 放在 Settings 頁面裡：標題是區塊名稱（Account），版面靠左而不是置中 */
+  embedded?: boolean;
 }
 
 /**
@@ -112,7 +114,7 @@ export function renderChangeCredentials(
   container: HTMLElement,
   user: User,
   onChanged: (user: User) => void,
-  { forced, onCancel }: ChangeCredentialsOptions,
+  { forced, onCancel, embedded = false }: ChangeCredentialsOptions,
 ): void {
   const usernameInput = h("input", {
     name: "new_username",
@@ -158,8 +160,10 @@ export function renderChangeCredentials(
 
   const form = h(
     "form",
-    { method: "post", class: "auth-form" },
-    h("h1", {}, forced ? "Set up your account" : "Account settings"),
+    { method: "post", class: embedded ? "auth-form embedded" : "auth-form" },
+    embedded
+      ? h("h2", { class: "section-title" }, "Account")
+      : h("h1", {}, forced ? "Set up your account" : "Account settings"),
     forced
       ? h(
           "p",
