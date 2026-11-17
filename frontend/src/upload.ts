@@ -4,6 +4,7 @@
 // XHR 有 upload.onprogress。XHR 同樣是同源請求，會自動帶上 Cookie 與 Origin，CSRF 防護照常運作。
 
 import { ApiError, errorFromResponse } from "./api.js";
+import type { Space } from "./space.js";
 
 /** 使用者取消了上傳 */
 export class UploadCancelled extends Error {
@@ -32,10 +33,15 @@ export function startUpload(
   file: File,
   folderId: number | null,
   onProgress: (fraction: number) => void,
+  space: Space = null,
 ): UploadHandle {
   const params = new URLSearchParams({ name: file.name });
   if (folderId !== null) {
     params.set("parent_id", String(folderId));
+  }
+  // 管理員在另一顆硬碟上的檔案（見 space.ts）
+  if (space !== null) {
+    params.set("space", space);
   }
 
   const xhr = new XMLHttpRequest();

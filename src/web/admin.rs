@@ -21,12 +21,12 @@ use super::{
     auth::{hash_password, is_unique_violation, validate_username},
     error::AppError,
     extract::AdminUser,
-    items::remove_blobs,
     state::AppState,
 };
 use crate::{
     bootstrap::generate_password,
     db::user::{self, AdminUpdateError, UserSummary},
+    folders,
 };
 
 const USER_NOT_FOUND: &str = "User not found";
@@ -118,6 +118,7 @@ struct CreatedUser {
 async fn create_user(
     _admin: AdminUser,
     State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<
     (
@@ -146,6 +147,8 @@ async fn create_user(
     let summary = user::find_user_summary(&pool, id)
         .await?
         .ok_or_else(|| AppError::internal("the user that was just created does not exist"))?;
+    // 以帳號命名的資料夾現在就建立，在硬碟上看得到。失敗也沒有關係：第一次寫入時會再建立
+    folders::create_user_folder(&pool, &data_dir, id).await;
 
     Ok((
         StatusCode::CREATED,
@@ -213,10 +216,16 @@ async fn delete_user(
         ));
     }
 
+    // 先找出他的資料夾：刪除之後就查不到了。正在搬移時，目的地也有一個
+    let folders = folders::folders_of(&pool, &data_dir, id)
+        .await
+        .map_err(AppError::internal)?;
     let keys = user::delete_user(&pool, id)
         .await
         .map_err(admin_update_error)?;
-    remove_blobs(&data_dir, &keys).await;
+    for folder in &folders {
+        folders::remove_user_folder(folder).await;
+    }
 
     println!(
         "admin: deleted user {id} and {} files by administrator {}",

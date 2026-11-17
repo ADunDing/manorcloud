@@ -5,6 +5,7 @@
 // 比對相符（見 isSameFile）才從中斷處繼續。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
+import { withSpace, type Space } from "./space.js";
 import { isSameFile, type UploadInfo } from "./chunked-upload.js";
 import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
@@ -71,8 +72,17 @@ export class PendingUploads {
     this.applyMinimized();
   }
 
-  /** 重新向伺服器取得清單 */
-  refresh(): void {
+  /** 清單屬於哪一個檔案空間：跟著目前顯示的畫面（管理員在另一顆硬碟上的檔案有自己的清單） */
+  private space: Space = null;
+
+  /** 重新向伺服器取得清單。給了 space 時改看那一個檔案空間的清單 */
+  refresh(space: Space = this.space): void {
+    if (space !== this.space) {
+      this.space = space;
+      // 換了空間：舊的清單不屬於這裡，先清掉
+      this.list.replaceChildren();
+      this.element.hidden = true;
+    }
     void this.load();
   }
 
@@ -80,7 +90,7 @@ export class PendingUploads {
     const token = ++this.loading;
     let uploads: UploadInfo[];
     try {
-      uploads = await api.get<UploadInfo[]>("/api/uploads");
+      uploads = await api.get<UploadInfo[]>(withSpace("/api/uploads", this.space));
     } catch {
       // 這只是輔助的清單：取得失敗就維持原狀；登入失效等由全域處理
       return;
@@ -119,7 +129,7 @@ export class PendingUploads {
         message.textContent = "This isn't the same file: its name, size or modification time differs";
         return;
       }
-      this.queue.resume(file, info);
+      this.queue.resume(file, info, this.space);
       this.refresh();
     });
 
@@ -161,7 +171,7 @@ export class PendingUploads {
         return;
       }
       try {
-        await api.delete(`/api/uploads/${encodeURIComponent(info.id)}`);
+        await api.delete(withSpace(`/api/uploads/${encodeURIComponent(info.id)}`, this.space));
         this.refresh();
       } catch (error) {
         if (isHandledGlobally(error)) {

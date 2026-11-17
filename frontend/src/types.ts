@@ -83,6 +83,47 @@ export interface ManagedUser {
   readonly created_at: string;
 }
 
+/** 一個儲存位置。對應 Rust 端 web/storage.rs 的 VolumeItem */
+export interface StorageVolume {
+  /** null：資料目錄（Default） */
+  readonly id: number | null;
+  readonly name: string;
+  readonly path: string;
+  /** 硬碟沒有掛載、或讀不到容量時為 null */
+  readonly total_bytes: number | null;
+  readonly available_bytes: number | null;
+  /** 有幾個使用者在這裡 */
+  readonly users: number;
+}
+
+/** 更換位置時的搬移進度 */
+export interface StorageMove {
+  readonly user_id: number;
+  readonly target_volume_id: number | null;
+  readonly total_bytes: number;
+  readonly moved_bytes: number;
+  /** 失敗的原因；null 代表進行中 */
+  readonly error: string | null;
+}
+
+/** 每個使用者在哪個位置、哪個資料夾 */
+export interface StorageAssignment {
+  readonly user_id: number;
+  readonly username: string;
+  /** null：資料目錄（Default） */
+  readonly volume_id: number | null;
+  /** 他在這個位置中的資料夾名稱（通常等於帳號名稱） */
+  readonly folder: string;
+}
+
+/** GET /api/admin/storage */
+export interface StorageOverview {
+  /** 第一個是資料目錄 */
+  readonly volumes: readonly StorageVolume[];
+  readonly users: readonly StorageAssignment[];
+  readonly moves: readonly StorageMove[];
+}
+
 /** POST /api/admin/users 的回應 */
 export interface CreatedUser {
   readonly user: ManagedUser;

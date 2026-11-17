@@ -33,6 +33,12 @@ const BLOBS_DIR: &str = "blobs";
 /// 而分段上傳的暫存檔只要還有進度，就必須保留
 const UPLOADS_DIR: &str = "uploads";
 
+/// 儲存位置的標記檔。加入位置時建立，之後每次使用前確認它還在。
+///
+/// 外接硬碟沒有掛載時，掛載點只是系統碟上一個空的資料夾，寫得進去：
+/// 沒有這個檢查的話，檔案會默默寫到系統碟上，硬碟接回來之後就「消失」了
+pub const VOLUME_MARKER: &str = ".manorcloud-storage";
+
 /// 複製 blob 時每次讀取的大小：固定的一小塊，記憶體用量與檔案大小無關
 const COPY_CHUNK_BYTES: usize = 256 * 1024;
 
@@ -106,6 +112,66 @@ pub async fn copy_blob(data_dir: &Path, key: &str) -> Result<(String, u64), Stor
     let new_key = generate_storage_key();
     let size = blob.persist(&new_key).await?;
     Ok((new_key, size))
+}
+
+/// 把一個 blob 複製到另一個儲存位置，**保留同一個 storage_key**，回傳大小。
+/// 用於更換使用者的儲存位置。
+///
+/// 與 `copy_blob` 相同，經過目的地的 TempBlob：落盤之後才原子地出現在 blobs/ 中，
+/// 中途中斷不會在目的地留下不完整的 blob。
+/// 目的地已經有同樣大小的檔案時直接略過：搬移被中斷之後重新開始，不必從頭複製
+pub async fn copy_blob_to(from: &Path, key: &str, to: &Path) -> Result<u64, StorageError> {
+    let source = blob_path(from, key).ok_or(StorageError::InvalidKey)?;
+    let dest = blob_path(to, key).ok_or(StorageError::InvalidKey)?;
+    let mut input = tokio::fs::File::open(&source).await?;
+    let size = input.metadata().await?.len();
+
+    if let Ok(existing) = tokio::fs::metadata(&dest).await
+        && existing.is_file()
+        && existing.len() == size
+    {
+        return Ok(size);
+    }
+
+    let mut blob = TempBlob::create(to, u64::MAX).await?;
+    let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
+    loop {
+        let read = input.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        blob.write_chunk(&buffer[..read]).await?;
+    }
+    blob.persist(key).await
+}
+
+/// 使用者的資料夾：`{位置}/{folder}`。底下的結構與 `init_dirs` 建立的相同。
+///
+/// folder 來自帳號名稱（只有小寫英文、數字、底線與連字號）。這裡再檢查一次：
+/// 它組成的是硬碟上的路徑，不合法的名稱（空的、`.`、`..`、含 `/`）回傳 None
+pub fn user_root(volume_root: &Path, folder: &str) -> Option<PathBuf> {
+    let valid = !folder.is_empty()
+        && folder.len() <= 64
+        && !folder.starts_with('.')
+        && folder
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.');
+    valid.then(|| volume_root.join(folder))
+}
+
+/// 建立儲存位置的標記檔（見 `VOLUME_MARKER`）
+pub fn mark_volume(root: &Path) -> io::Result<()> {
+    let marker = root.join(VOLUME_MARKER);
+    std::fs::write(
+        &marker,
+        b"This folder is a ManorCloud storage location. Don't delete this file.\n",
+    )?;
+    std::fs::File::open(&marker)?.sync_all()
+}
+
+/// 儲存位置是否可以使用：標記檔還在（硬碟有掛載）
+pub fn volume_ready(root: &Path) -> bool {
+    root.join(VOLUME_MARKER).is_file()
 }
 
 /// 完成檔案的根目錄：`{data_dir}/blobs`
@@ -344,6 +410,28 @@ mod tests {
     }
 
     #[test]
+    fn user_root_rejects_names_that_escape_the_location() {
+        let root = Path::new("/mnt/disk2");
+        assert_eq!(
+            user_root(root, "alice"),
+            Some(PathBuf::from("/mnt/disk2/alice"))
+        );
+        for bad in ["", ".", "..", "../etc", "a/b", ".hidden", "a b"] {
+            assert_eq!(user_root(root, bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn volume_marker_tells_whether_the_disk_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!volume_ready(dir.path()));
+
+        mark_volume(dir.path()).unwrap();
+
+        assert!(volume_ready(dir.path()));
+    }
+
+    #[test]
     fn disk_space_reports_a_plausible_size() {
         let dir = tempfile::tempdir().unwrap();
         let space = disk_space(dir.path()).unwrap();
@@ -380,6 +468,37 @@ mod tests {
         assert!(blob_path(dir.path(), &key).unwrap().exists());
         // 暫存檔都已搬走或清掉
         assert_eq!(std::fs::read_dir(tmp_dir(dir.path())).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn copy_blob_to_keeps_the_key_and_skips_finished_copies() {
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+        init_dirs(to.path()).unwrap();
+        let mut blob = TempBlob::create(from.path(), u64::MAX).await.unwrap();
+        blob.write_chunk(b"hello").await.unwrap();
+        blob.persist(VALID).await.unwrap();
+
+        assert_eq!(
+            copy_blob_to(from.path(), VALID, to.path()).await.unwrap(),
+            5
+        );
+        let copied = blob_path(to.path(), VALID).unwrap();
+        assert_eq!(std::fs::read(&copied).unwrap(), b"hello");
+
+        // 再複製一次：已經有同樣大小的檔案，不會重寫（mtime 不變）
+        let before = std::fs::metadata(&copied).unwrap().modified().unwrap();
+        assert_eq!(
+            copy_blob_to(from.path(), VALID, to.path()).await.unwrap(),
+            5
+        );
+        assert_eq!(
+            std::fs::metadata(&copied).unwrap().modified().unwrap(),
+            before
+        );
+        // 來源保持原狀，暫存檔都已經搬走
+        assert!(blob_path(from.path(), VALID).unwrap().exists());
+        assert_eq!(std::fs::read_dir(tmp_dir(to.path())).unwrap().count(), 0);
     }
 
     #[tokio::test]

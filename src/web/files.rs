@@ -15,9 +15,10 @@ use sqlx::SqlitePool;
 
 use super::{
     error::AppError,
-    extract::CurrentUser,
+    extract::FilesUser,
     register::{self, NewFile, OnConflict},
     state::{AppState, UploadLimit},
+    storage::{files_root, writable_root},
 };
 use crate::{
     db::files::{self as files_db, CreateFileError, FileEntry},
@@ -99,7 +100,7 @@ struct ConfigResponse {
 /// GET /api/config：前端需要知道的伺服器設定。
 /// 需要登入：沒有理由對未登入的人公開伺服器的設定。
 async fn config(
-    _user: CurrentUser,
+    _user: FilesUser,
     State(UploadLimit(limit)): State<UploadLimit>,
 ) -> Json<ConfigResponse> {
     Json(ConfigResponse {
@@ -139,7 +140,7 @@ impl From<FileEntry> for FileResponse {
 /// 「不存在」「屬於別人」「是檔案」都得到同一個錯誤。
 async fn ensure_owned_folder(
     pool: &SqlitePool,
-    user: &CurrentUser,
+    user: &FilesUser,
     parent_id: Option<i64>,
 ) -> Result<(), AppError> {
     if let Some(id) = parent_id
@@ -158,7 +159,7 @@ async fn ensure_owned_folder(
 /// 否則「空資料夾」與「不存在的資料夾」看起來一樣，使用者打錯 id 時會誤以為資料夾是空的，
 /// 前端也無法判斷一個收藏起來的連結是否已失效。這也與上傳時的行為一致。
 async fn list_files(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     Query(params): Query<ParentParams>,
 ) -> Result<Json<Vec<FileResponse>>, AppError> {
@@ -182,7 +183,7 @@ struct CreateFolderRequest {
 /// 不做提早檢查：請求只是一小段 JSON，直接交給資料庫約束判斷即可，
 /// 少一次查詢，也沒有「檢查與寫入之間」的時間差。
 async fn create_folder(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<(StatusCode, Json<FileResponse>), AppError> {
@@ -202,10 +203,10 @@ async fn create_folder(
 
 /// POST /api/files?parent_id=...&name=...&on_conflict=...：上傳一個檔案。
 ///
-/// extractor 順序：`CurrentUser`、`State`、`Query` 只讀 header 與網址，
+/// extractor 順序：`FilesUser`、`State`、`Query` 只讀 header 與網址，
 /// `Multipart` 讀取本體，必須放最後。未登入的請求在讀取本體之前就被 401 擋下。
 async fn upload(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     State(UploadLimit(limit)): State<UploadLimit>,
@@ -215,6 +216,8 @@ async fn upload(
     // 1. 提早檢查父資料夾：不讓使用者傳完大檔案才知道失敗。
     //    這只是為了使用體驗，正確性由 create_file 的資料庫約束保證。
     ensure_owned_folder(&pool, &user, params.parent_id).await?;
+    // 這個人的檔案所在的位置。正在搬到另一個位置時拒絕（見 storage::writable_root）
+    let root = writable_root(&pool, &data_dir, user.id).await?;
 
     // 2. 取第一個欄位，並在接收內容之前驗證欄位名稱與檔名
     let mut field = multipart
@@ -249,7 +252,7 @@ async fn upload(
 
     // 5. 串流寫入暫存檔：收到一塊就寫一塊，記憶體用量與檔案大小無關。
     //    任何一步失敗（含使用者斷線或取消），blob 被丟棄時 Drop 會刪除暫存檔。
-    let mut blob = TempBlob::create(&data_dir, limit)
+    let mut blob = TempBlob::create(&root, limit)
         .await
         .map_err(storage_error)?;
     while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
@@ -272,10 +275,10 @@ async fn upload(
         size,
         storage_key: &key,
     };
-    match register::register_file(&pool, &data_dir, &file, params.on_conflict).await {
+    match register::register_file(&pool, &root, &file, params.on_conflict).await {
         Ok(entry) => Ok((StatusCode::CREATED, Json(entry.into()))),
         Err(e) => {
-            if let Err(remove_err) = storage::remove_blob(&data_dir, &key).await {
+            if let Err(remove_err) = storage::remove_blob(&root, &key).await {
                 // 刪除失敗只記錄，不蓋掉原本的錯誤；殘留的 blob 交給垃圾回收
                 eprintln!("failed to remove the unregistered blob {key}: {remove_err}");
             }
@@ -295,13 +298,17 @@ struct StorageResponse {
 
 /// GET /api/storage：檔案所在硬碟的總容量與可用空間，給畫面左側的容量顯示。
 ///
-/// 目前所有檔案都在同一個資料目錄；之後支援多個儲存位置時，改成依資料夾回傳它所在的位置。
+/// 回傳的是這個人的檔案所在的位置（管理員可以為每個人指定不同的硬碟）。
 /// 需要登入：硬碟的容量不是公開資訊。
 async fn storage_info(
-    _user: CurrentUser,
+    user: FilesUser,
+    State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
 ) -> Result<Json<StorageResponse>, AppError> {
-    let space = storage::disk_space(&data_dir).map_err(AppError::internal)?;
+    // 量的是他的資料夾所在的那一顆硬碟。資料夾本身在第一次寫入前可能還不存在，所以量上一層
+    let root = files_root(&pool, &data_dir, user.id).await?;
+    let volume = root.parent().unwrap_or(&root);
+    let space = storage::disk_space(volume).map_err(AppError::internal)?;
     Ok(Json(StorageResponse {
         total_bytes: space.total,
         available_bytes: space.available,
@@ -538,11 +545,11 @@ mod tests {
     }
 
     fn blob_count(t: &TestApp) -> usize {
-        count_files(&t.dir.path().join("blobs"))
+        count_files(&t.dir.path().join("carol").join("blobs"))
     }
 
     fn tmp_count(t: &TestApp) -> usize {
-        count_files(&t.dir.path().join("tmp"))
+        count_files(&t.dir.path().join("carol").join("tmp"))
     }
 
     async fn row_count(t: &TestApp) -> i64 {

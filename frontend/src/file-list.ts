@@ -73,6 +73,19 @@ export interface FileListOptions {
    * 是整個內容區而不只是列表，所以從路徑旁、列表下方等任何空白處都能開始框選
    */
   readonly marqueeHost: HTMLElement;
+  /**
+   * 固定在最前面的資料夾連結（管理員的 users 資料夾）。
+   * 只是一個連結：不能選取、拖曳、改名，也不參與排序
+   */
+  readonly pinned?: readonly PinnedFolder[];
+}
+
+/** 固定在列表最前面的資料夾連結 */
+export interface PinnedFolder {
+  readonly name: string;
+  readonly href: string;
+  /** 顯示在大小那一欄（List）或名稱下方（Grid）的說明，例如人數 */
+  readonly note: string;
 }
 
 /** 一個項目在畫面上的元素 */
@@ -134,7 +147,7 @@ export class FileList {
     this.element = h("div", { class: "file-area" });
     this.element.addEventListener("keydown", (event) => this.handleKey(event));
 
-    if (items.length === 0) {
+    if (items.length === 0 && (options.pinned ?? []).length === 0) {
       this.element.append(
         h(
           "p",
@@ -309,7 +322,46 @@ export class FileList {
       h(
         "tbody",
         {},
+        (this.options.pinned ?? []).map((pinned) => this.pinnedRow(pinned)),
         this.items.map((item) => this.row(item)),
+      ),
+    );
+  }
+
+  /** 固定的資料夾連結（List）。勾選框與時間的位置留空，欄位才會對齊 */
+  private pinnedRow(pinned: PinnedFolder): HTMLElement {
+    return h(
+      "tr",
+      { class: "is-folder pinned" },
+      h("td", { class: "col-check" }),
+      h(
+        "td",
+        {},
+        h(
+          "a",
+          { href: pinned.href, class: "name-cell pinned-link" },
+          icon("folder"),
+          h("span", { class: "item-name", title: pinned.name }, pinned.name),
+        ),
+      ),
+      this.options.location === undefined ? null : h("td", { class: "col-location" }),
+      h("td", { class: "num muted" }, pinned.note),
+      h("td", { class: "num" }),
+      h("td", { class: "col-sort" }),
+    );
+  }
+
+  /** 固定的資料夾連結（Grid） */
+  private pinnedTile(pinned: PinnedFolder): HTMLElement {
+    return h(
+      "li",
+      { class: "tile is-folder pinned", role: "none" },
+      h(
+        "a",
+        { href: pinned.href, class: "pinned-link" },
+        h("span", { class: "tile-icon" }, icon("folder", 48)),
+        h("span", { class: "item-name", title: pinned.name }, pinned.name),
+        h("span", { class: "tile-meta" }, pinned.note),
       ),
     );
   }
@@ -384,6 +436,7 @@ export class FileList {
       h(
         "ul",
         { class: "tiles", role: "listbox", "aria-label": "Files", "aria-multiselectable": "true" },
+        (this.options.pinned ?? []).map((pinned) => this.pinnedTile(pinned)),
         this.items.map((item) => this.tile(item)),
       ),
     );

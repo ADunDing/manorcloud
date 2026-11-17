@@ -16,8 +16,8 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use super::{
-    error::AppError, extract::CurrentUser, files::FileResponse, items::remove_blobs,
-    state::AppState,
+    error::AppError, extract::FilesUser, files::FileResponse, items::remove_blobs, state::AppState,
+    storage::files_root,
 };
 use crate::db::files::{self as files_db, RestoreError};
 
@@ -47,7 +47,7 @@ struct TrashResponse {
 
 /// GET /api/trash：垃圾桶的內容，最近刪除的在前
 async fn list(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<TrashResponse>>, AppError> {
     let items = files_db::list_trash(&pool, user.id).await?;
@@ -77,7 +77,7 @@ async fn list(
 /// POST /api/trash/{id}/restore：放回原本的資料夾（不在了就放回 My files），
 /// 同名時自動改名。回傳還原後的項目
 async fn restore(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<Json<FileResponse>, AppError> {
@@ -96,26 +96,28 @@ async fn restore(
 
 /// DELETE /api/trash/{id}：永久刪除垃圾桶中的一個項目
 async fn delete_forever(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, AppError> {
+    let root = files_root(&pool, &data_dir, user.id).await?;
     let keys = files_db::delete_trashed(&pool, user.id, id)
         .await?
         .ok_or_else(not_in_trash)?;
-    remove_blobs(&data_dir, &keys).await;
+    remove_blobs(&root, &keys).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/trash：清空垃圾桶
 async fn empty(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
 ) -> Result<StatusCode, AppError> {
+    let root = files_root(&pool, &data_dir, user.id).await?;
     let keys = files_db::empty_trash(&pool, user.id).await?;
-    remove_blobs(&data_dir, &keys).await;
+    remove_blobs(&root, &keys).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

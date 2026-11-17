@@ -13,6 +13,8 @@ import { applyTheme, loadTheme } from "./theme.js";
 import { showToast } from "./toast.js";
 import { renderTwoFactorSetup } from "./two-factor-view.js";
 import { leaveTrash, renderTrash } from "./trash-view.js";
+import { leaveBrowse, renderBrowse } from "./browse-view.js";
+import { renderUsers } from "./users-view.js";
 import type { User } from "./types.js";
 
 /** 取得 index.html 中一定存在的元素；不存在代表 HTML 與程式碼不同步，直接報錯 */
@@ -77,6 +79,7 @@ function showScreen(user: User): void {
     screen = "change";
     leaveBrowser();
     leaveTrash();
+    leaveBrowse();
     hideSidebar(sidebar);
     showAccount(user, { navigation: false });
     const steps = h("div", {});
@@ -106,18 +109,29 @@ function showHome(user: User): void {
   closeMenus();
   showAccount(user, { navigation: true });
   leaveTrash();
+  leaveBrowse();
+  const isAdmin = user.role === "admin";
+  const admin = { admin: isAdmin, userId: user.id };
 
   const route = currentRoute();
+  // 另一顆硬碟上的檔案只有管理員有：一般使用者回到自己的檔案。
+  // 這只是使用體驗；真正的權限檢查在後端的 FilesUser
+  if (!isAdmin && "disk" in route && route.disk !== undefined) {
+    history.replaceState(null, "", folderHref(null));
+    showHome(user);
+    return;
+  }
+
   switch (route.view) {
     case "trash":
       leaveBrowser();
-      renderSidebar(sidebar, sidebarActions, "trash");
-      renderTrash(app);
+      renderSidebar(sidebar, sidebarActions, "trash", { ...admin, disk: route.disk });
+      renderTrash(app, { ...admin, disk: route.disk });
       return;
 
     case "settings":
       leaveBrowser();
-      renderSidebar(sidebar, sidebarActions, null);
+      renderSidebar(sidebar, sidebarActions, null, admin);
       // 修改了帳號名稱或密碼：交給 showScreen 依新的使用者資料重新顯示
       renderSettings(app, user, route.section, showScreen);
       return;
@@ -125,7 +139,7 @@ function showHome(user: User): void {
     case "admin":
       if (user.role === "admin") {
         leaveBrowser();
-        renderSidebar(sidebar, sidebarActions, null);
+        renderSidebar(sidebar, sidebarActions, null, admin);
         // 降級自己之後重新讀取使用者，交給 showScreen 決定畫面
         renderAdministration(app, user, route.section, () => void refresh());
         return;
@@ -135,12 +149,33 @@ function showHome(user: User): void {
       history.replaceState(null, "", folderHref(null));
       break;
 
+    case "browse":
+      if (user.role === "admin") {
+        leaveBrowser();
+        renderSidebar(sidebar, sidebarActions, null, { ...admin, browsing: route.userId });
+        renderBrowse(app, route.userId, route.folderId, user.id);
+        return;
+      }
+      history.replaceState(null, "", folderHref(null));
+      break;
+
+    case "users":
+      if (isAdmin) {
+        leaveBrowser();
+        renderSidebar(sidebar, sidebarActions, null, { ...admin, disk: route.disk });
+        renderUsers(app, route.disk, user.id);
+        return;
+      }
+      history.replaceState(null, "", folderHref(null));
+      break;
+
     case "files":
       break;
   }
 
-  renderSidebar(sidebar, sidebarActions, "files");
-  renderBrowser(app, route.view === "files" ? route.folderId : null);
+  const disk = route.view === "files" ? route.disk : undefined;
+  renderSidebar(sidebar, sidebarActions, "files", { ...admin, disk });
+  renderBrowser(app, route.view === "files" ? route.folderId : null, { ...admin, disk });
 }
 
 function showLoggedOut(notice?: string): void {
@@ -148,6 +183,7 @@ function showLoggedOut(notice?: string): void {
   currentUser = null;
   leaveBrowser();
   leaveTrash();
+  leaveBrowse();
   closeMenus();
   account.replaceChildren();
   hideSidebar(sidebar);

@@ -29,9 +29,10 @@ use tokio_util::io::ReaderStream;
 
 use super::{
     error::AppError,
-    extract::CurrentUser,
+    extract::FilesUser,
     range::{self, RangeRequest},
     state::AppState,
+    storage::files_root,
 };
 use crate::{
     db::files::{self as files_db, TreeEntry},
@@ -62,14 +63,25 @@ pub fn router() -> Router<AppState> {
 
 /// GET /api/files/{id}/content：下載檔案內容，支援 Range 與 If-Range。
 async fn download(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<i64>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    // 1. 只查得到自己的項目；資料夾沒有內容可下載。三種情況都是同一個 404。
-    let entry = files_db::find_file(&pool, user.id, id)
+    send_file(&pool, &data_dir, user.id, id, &headers).await
+}
+
+/// 下載 `owner` 的一個檔案。自己的檔案，或管理員瀏覽別人的檔案（見 browse.rs）共用
+pub(super) async fn send_file(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    owner: i64,
+    id: i64,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
+    // 1. 只查得到這個人的項目；資料夾沒有內容可下載。三種情況都是同一個 404。
+    let entry = files_db::find_file(pool, owner, id)
         .await?
         .filter(|e| e.kind == "file")
         .ok_or_else(file_not_found)?;
@@ -81,7 +93,8 @@ async fn download(
         .storage_key
         .as_deref()
         .ok_or_else(|| AppError::internal(format!("file {file_id} has no storage_key")))?;
-    let path = storage::blob_path(&data_dir, key)
+    let root = files_root(pool, data_dir, owner).await?;
+    let path = storage::blob_path(&root, key)
         .ok_or_else(|| AppError::internal(format!("file {file_id} has an invalid storage_key")))?;
 
     // 3. 開檔。資料庫有紀錄、磁碟卻沒有檔案是「資料不一致」：
@@ -212,19 +225,29 @@ struct ArchiveQuery {
 /// 用 GET 而不是 POST：瀏覽器直接把它當成一般的檔案下載，有進度、可以在下載管理員中看到。
 /// 它沒有副作用，和單一檔案的下載一樣不需要 CSRF 防護。
 async fn archive(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     Query(query): Query<ArchiveQuery>,
 ) -> Result<Response, AppError> {
-    let ids = parse_ids(&query.ids)?;
+    send_archive(&pool, &data_dir, user.id, &query.ids).await
+}
+
+/// 打包 `owner` 的項目。自己的檔案，或管理員瀏覽別人的檔案（見 browse.rs）共用
+pub(super) async fn send_archive(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    owner: i64,
+    ids: &str,
+) -> Result<Response, AppError> {
+    let ids = parse_ids(ids)?;
 
     let mut entries = Vec::new();
     let mut parent: Option<Option<i64>> = None;
     let mut roots = Vec::new();
     for id in ids {
         // 每個項目一條 SQL 取得整棵子樹，打包的是這個時間點的狀態
-        let tree = files_db::subtree(&pool, user.id, id).await?;
+        let tree = files_db::subtree(pool, owner, id).await?;
         let Some(root) = tree.first() else {
             return Err(AppError::NotFound(ITEM_NOT_FOUND.to_string()));
         };
@@ -241,8 +264,9 @@ async fn archive(
         entries.extend(tree);
     }
 
+    let root: Arc<Path> = Arc::from(files_root(pool, data_dir, owner).await?);
     let (sender, receiver) = mpsc::channel(ARCHIVE_QUEUE);
-    tokio::spawn(write_archive(data_dir, entries, sender));
+    tokio::spawn(write_archive(root, entries, sender));
     let body = Body::from_stream(stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
     }));
@@ -816,7 +840,8 @@ mod tests {
         let t = TestApp::new(pool, MIB).await;
         let (id, key) = t.store_file(t.user_id, None, "a.txt", b"x").await;
         // 模擬資料損壞：資料庫有紀錄，磁碟上的 blob 卻被刪掉了
-        std::fs::remove_file(storage::blob_path(t.dir.path(), &key).unwrap()).unwrap();
+        std::fs::remove_file(storage::blob_path(&t.dir.path().join("carol"), &key).unwrap())
+            .unwrap();
 
         let (status, _, body) = get(&t, id, Some(&t.cookie), &[]).await;
 

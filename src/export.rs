@@ -185,6 +185,27 @@ async fn export_tree(pool: &SqlitePool, data_dir: &Path, out: &Path) -> Result<S
     }
     println!("output: {} (about {} MB)", out.display(), needed / MIB);
 
+    // 檔案可能在資料目錄，也可能在管理員加入的其他儲存位置。
+    // 每個人的檔案在 {位置}/{他的資料夾}/ 中。storage_key 在所有地方都是唯一的，
+    // 依序在每個資料夾找就好；最後也找舊版的共用目錄（伺服器還沒整理過的資料）。
+    // 舊的資料庫還沒有這些欄位時，查詢失敗，只找資料目錄
+    let folders: Vec<(Option<String>, String)> = sqlx::query_as(
+        "SELECT storage_volumes.path, COALESCE(users.storage_folder, users.username) \
+         FROM users LEFT JOIN storage_volumes ON storage_volumes.id = users.storage_volume_id \
+         ORDER BY users.id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut roots: Vec<PathBuf> = folders
+        .into_iter()
+        .filter_map(|(volume, folder)| {
+            let volume = volume.map_or_else(|| data_dir.to_path_buf(), PathBuf::from);
+            storage::user_root(&volume, &folder)
+        })
+        .collect();
+    roots.push(data_dir.to_path_buf());
+
     let mut summary = Summary::default();
     for (user, path, kind, key, updated_at) in rows {
         // 每一段名稱再檢查一次：資料庫被改壞也不會寫到輸出目錄以外
@@ -204,8 +225,14 @@ async fn export_tree(pool: &SqlitePool, data_dir: &Path, out: &Path) -> Result<S
         }
 
         // blob_path 會驗證 key 的格式，不合法時回傳 None
-        let blob = match key.as_deref().and_then(|k| storage::blob_path(data_dir, k)) {
-            Some(blob) if blob.is_file() => blob,
+        let found = key.as_deref().and_then(|k| {
+            roots
+                .iter()
+                .filter_map(|root| storage::blob_path(root, k))
+                .find(|blob| blob.is_file())
+        });
+        let blob = match found {
+            Some(blob) => blob,
             _ => {
                 eprintln!("warning: content not found for {user}/{path}");
                 summary.problems += 1;

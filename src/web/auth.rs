@@ -10,7 +10,8 @@
 //! 只知道密碼的人拿到的只有那張待驗證的憑證，什麼都不能做。
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::LazyLock;
+use std::path::Path;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -36,6 +37,7 @@ use crate::{
         session, two_factor,
         user::{self, UpdateCredentialsError},
     },
+    folders,
 };
 
 const USERNAME_MIN: usize = 3;
@@ -577,6 +579,7 @@ struct CredentialsRequest {
 async fn update_credentials(
     me: SessionUser,
     State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
     State(cookie_secure): State<CookieSecure>,
     jar: CookieJar,
     Json(req): Json<CredentialsRequest>,
@@ -632,6 +635,11 @@ async fn update_credentials(
         }
         UpdateCredentialsError::Db(e) => AppError::internal(e),
     })?;
+
+    // 改了帳號名稱：硬碟上的資料夾跟著改名。失敗時沿用原本的名稱，不影響改名本身
+    if req.new_username.is_some() {
+        folders::sync_name(&pool, &data_dir, me.id).await;
+    }
 
     // 5. 改了密碼：舊的 session 都已刪除，為目前的裝置建立新的，保持登入
     let jar = if new_hash.is_some() {

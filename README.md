@@ -20,6 +20,8 @@ dependencies, and it runs comfortably on a Raspberry Pi.
   choosing the same file again
 - **Resumable downloads** (HTTP range requests)
 - **Several users**, managed by an administrator; each user sees only their own files
+- **Several disks**: an administrator can keep each user's files on a different disk, and
+  moves existing files there in the background
 - **Same name, no surprises**: uploading a file whose name is taken keeps both
   (`photo.jpg`, `photo (1).jpg`)
 - **Light**: about 3 MB to download, a few MB of memory when idle
@@ -97,6 +99,38 @@ sudo systemctl restart manorcloud
 
 To store files on an external disk, change `MANORCLOUD_DATA_DIR` and allow the service to write
 there; the comments in the configuration file show how.
+
+### Storage locations
+
+To use more than one disk, add each one in **Administration → Storage**, then choose where each
+user's files are kept with **Change storage location** in **Administration → Users**. Existing
+files are moved in the background; until that finishes the user can browse and download, but
+not upload.
+
+A storage location is a folder that already exists and that the service can write to:
+
+```sh
+sudo mkdir -p /mnt/disk2/manorcloud
+sudo chown manorcloud: /mnt/disk2/manorcloud
+sudo systemctl edit manorcloud      # add the two lines below
+```
+
+```ini
+[Service]
+ReadWritePaths=/mnt/disk2/manorcloud
+```
+
+Then run `sudo systemctl restart manorcloud`. The database always stays on the local disk.
+
+Each user's files are kept in a folder named after them, for example
+`/mnt/disk2/manorcloud/alice/`. The file names inside are random: the real names and folders
+are in the database, so use ManorCloud (or `manorcloud export`) to get the files out.
+Administrators also get a space of their own on every other disk, listed in the sidebar under
+**My files**, and work with it just like My files. At the top level of My files and of each
+disk, a read-only **users** folder lists the people whose files are kept on that disk;
+administrators can open and download their files there, but not change them.
+`manorcloud uninstall --purge` doesn't touch these folders; delete them yourself if you no
+longer need them.
 
 ### Security
 

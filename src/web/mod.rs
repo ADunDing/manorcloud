@@ -1,6 +1,7 @@
 mod admin;
 mod assets;
 mod auth;
+mod browse;
 mod csrf;
 mod download;
 mod error;
@@ -12,6 +13,7 @@ mod register;
 mod shutdown;
 mod sso;
 mod state;
+mod storage;
 mod trash;
 mod two_factor;
 mod uploads;
@@ -91,6 +93,8 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
         .merge(trash::router())
         .merge(sso::router())
         .merge(two_factor::router())
+        .merge(storage::router())
+        .merge(browse::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }
 

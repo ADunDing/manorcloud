@@ -34,10 +34,11 @@ use sqlx::SqlitePool;
 
 use super::{
     error::AppError,
-    extract::CurrentUser,
+    extract::FilesUser,
     files::{FileResponse, folder_not_found},
     register::{self, NewFile, OnConflict, RegisterError},
     state::{AppState, PendingUploadLimit, UploadLimit},
+    storage::{files_root, writable_root},
 };
 
 use crate::{
@@ -266,7 +267,7 @@ fn to_i64(n: u64) -> Result<i64, UploadError> {
 }
 
 /// 自己的上傳；不存在或屬於別人時都是 404
-async fn find_own(pool: &SqlitePool, user: &CurrentUser, id: &str) -> Result<Upload, UploadError> {
+async fn find_own(pool: &SqlitePool, user: &FilesUser, id: &str) -> Result<Upload, UploadError> {
     uploads_db::find_upload(pool, user.id, id)
         .await?
         .ok_or_else(|| upload_not_found().into())
@@ -283,7 +284,7 @@ async fn find_own(pool: &SqlitePool, user: &CurrentUser, id: &str) -> Result<Upl
 async fn lock_part(
     pool: &SqlitePool,
     data_dir: &Path,
-    user: &CurrentUser,
+    user: &FilesUser,
     id: &str,
 ) -> Result<PartLock, UploadError> {
     match PartLock::acquire(data_dir, id).await {
@@ -303,7 +304,7 @@ async fn lock_part(
 
 /// POST /api/uploads：宣告一個新的上傳。便宜的檢查先做，最後才建立暫存檔與紀錄
 async fn create(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     State(UploadLimit(limit)): State<UploadLimit>,
@@ -334,12 +335,14 @@ async fn create(
         .await
         .map_err(register_error)?;
 
-    // 4. 空間：其他未完成的上傳還差的部分視為已被預留
-    ensure_space(&pool, &data_dir, size).await?;
+    // 4. 這個人的檔案所在的位置（正在搬移時拒絕），以及那裡的空間：
+    //    其他未完成的上傳還差的部分視為已被預留
+    let root = writable_root(&pool, &data_dir, user.id).await?;
+    ensure_space(&pool, &root, size).await?;
 
     // 5. 先建立暫存檔，再寫入紀錄：有紀錄就一定有檔案
     let id = storage::generate_storage_key();
-    create_part(&data_dir, &id).await.map_err(part_error)?;
+    create_part(&root, &id).await.map_err(part_error)?;
 
     let new = NewUpload {
         id: &id,
@@ -353,7 +356,7 @@ async fn create(
         Ok(upload) => Ok((StatusCode::CREATED, Json(upload.into()))),
         Err(e) => {
             // 沒有寫入紀錄：剛建立的暫存檔沒有用處，盡力刪除（失敗的話垃圾回收會處理）
-            if let Err(remove_err) = remove_part(&data_dir, &id).await {
+            if let Err(remove_err) = remove_part(&root, &id).await {
                 eprintln!("failed to remove the unused part file {id}: {remove_err}");
             }
             Err(match e {
@@ -383,7 +386,7 @@ async fn ensure_space(pool: &SqlitePool, data_dir: &Path, size: u64) -> Result<(
 
 /// GET /api/uploads：列出自己未完成的上傳，最早開始的在前
 async fn list(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<UploadResponse>>, UploadError> {
     let uploads = uploads_db::list_uploads(&pool, user.id).await?;
@@ -392,7 +395,7 @@ async fn list(
 
 /// GET /api/uploads/{id}：查詢已確認的長度
 async fn status(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<UploadResponse>, UploadError> {
@@ -419,7 +422,7 @@ const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 請求內容一塊一塊地寫入；連線中途中斷時，已收到的部分照樣 fsync 並確認，
 /// 續傳時只需要從那裡繼續，而不是重傳整段。
 async fn append(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<String>,
@@ -428,13 +431,12 @@ async fn append(
 ) -> Result<Json<ProgressResponse>, UploadError> {
     // 1. 確認是自己的上傳：別人的上傳在碰到檔案之前就 404
     find_own(&pool, &user, &id).await?;
+    let root = writable_root(&pool, &data_dir, user.id).await?;
 
     // 2. 先拿鎖，再讀已確認的長度：這時讀到的一定是最新的（見 lock_part）
-    let lock = lock_part(&pool, &data_dir, &user, &id)
-        .await
-        .inspect_err(|_| {
-            eprintln!("upload {id}: rejected, another request still holds the lock")
-        })?;
+    let lock = lock_part(&pool, &root, &user, &id).await.inspect_err(|_| {
+        eprintln!("upload {id}: rejected, another request still holds the lock")
+    })?;
     eprintln!("upload {id}: request at offset {} started", query.offset);
     let upload = find_own(&pool, &user, &id).await?;
 
@@ -514,7 +516,7 @@ async fn append(
 
 /// POST /api/uploads/{id}/complete：完成上傳，建立檔案
 async fn complete(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<String>,
@@ -523,7 +525,8 @@ async fn complete(
     // 1. 確認是自己的上傳，先拿鎖，再讀最新的紀錄：
     //    持有鎖的期間沒有別的請求能續寫、完成或截斷它
     find_own(&pool, &user, &id).await?;
-    let lock = lock_part(&pool, &data_dir, &user, &id).await?;
+    let root = writable_root(&pool, &data_dir, user.id).await?;
+    let lock = lock_part(&pool, &root, &user, &id).await?;
     let upload = find_own(&pool, &user, &id).await?;
 
     // 2. 必須已經傳完
@@ -557,7 +560,7 @@ async fn complete(
         size: upload.size,
         storage_key: &key,
     };
-    let created = register::register_file(&pool, &data_dir, &file, req.on_conflict).await;
+    let created = register::register_file(&pool, &root, &file, req.on_conflict).await;
 
     // 6. 不論成功或失敗，上傳紀錄都已經沒有用處：暫存檔已經搬走，無法再續傳
     if let Err(e) = uploads_db::delete_upload(&pool, user.id, &id).await {
@@ -570,7 +573,7 @@ async fn complete(
         Err(e) => {
             // 第 3 步之後的極短時間內有人建立了同名項目，或資料夾被刪除了。
             // 這是檔案鎖擋不住的情況（衝突來自 files 表），blob 沒有紀錄參照，盡力刪除
-            if let Err(remove_err) = storage::remove_blob(&data_dir, &key).await {
+            if let Err(remove_err) = storage::remove_blob(&root, &key).await {
                 eprintln!("failed to remove the unregistered blob {key}: {remove_err}");
             }
             Err(match e {
@@ -591,7 +594,7 @@ async fn complete(
 /// 先刪紀錄、再刪檔案：反過來的話，斷電在兩步之間會留下「有紀錄、沒檔案」。
 /// 正在寫入的請求不受影響：它寫完後更新紀錄時會發現紀錄已經不在。
 async fn cancel(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<String>,
@@ -599,7 +602,8 @@ async fn cancel(
     if !uploads_db::delete_upload(&pool, user.id, &id).await? {
         return Err(upload_not_found().into());
     }
-    if let Err(e) = remove_part(&data_dir, &id).await {
+    let root = files_root(&pool, &data_dir, user.id).await?;
+    if let Err(e) = remove_part(&root, &id).await {
         // 沒有紀錄的暫存檔由垃圾回收刪除
         eprintln!("failed to remove the cancelled part file {id}: {e}");
     }
@@ -674,7 +678,7 @@ mod tests {
     }
 
     fn part_count(t: &TestApp) -> usize {
-        count_files(&t.dir.path().join("uploads"))
+        count_files(&t.dir.path().join("carol").join("uploads"))
     }
 
     /// 已建立的檔案內容
@@ -684,7 +688,7 @@ mod tests {
             .fetch_one(&t.pool)
             .await
             .unwrap();
-        std::fs::read(storage::blob_path(t.dir.path(), &key).unwrap()).unwrap()
+        std::fs::read(storage::blob_path(&t.dir.path().join("carol"), &key).unwrap()).unwrap()
     }
 
     // ==================== 完整流程 ====================
@@ -913,7 +917,7 @@ mod tests {
         let t = TestApp::new(pool, MIB).await;
         let dave = t.other_user("dave").await;
         let id = storage::generate_storage_key();
-        create_part(t.dir.path(), &id).await.unwrap();
+        create_part(&t.user_dir(dave).await, &id).await.unwrap();
         let new = NewUpload {
             id: &id,
             owner_id: dave,
@@ -932,7 +936,8 @@ mod tests {
         let (status, _) = call(&t, empty_request(Method::DELETE, &uri, Some(&t.cookie))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         // dave 的暫存檔沒有被動到
-        assert_eq!(part_count(&t), 1);
+        let part = storage::resumable::part_path(&t.user_dir(dave).await, &id).unwrap();
+        assert!(part.exists());
     }
 
     // ==================== 競爭 ====================
@@ -944,7 +949,7 @@ mod tests {
         put(&t, &id, 0, b"hello").await;
 
         // 請求 C：持有鎖，寫入並確認了後半段，還沒釋放鎖
-        let mut c = PartLock::acquire(t.dir.path(), &id)
+        let mut c = PartLock::acquire(&t.dir.path().join("carol"), &id)
             .await
             .unwrap()
             .resume(5, 10)

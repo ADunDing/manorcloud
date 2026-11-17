@@ -1,4 +1,4 @@
-// 使用者管理：建立帳號、指派管理員、停用、重設密碼、刪除。
+// 使用者管理：建立帳號、指派管理員、停用、重設密碼、刪除、更換儲存位置。
 //
 // 每一列的操作收在最右邊的「⋯」選單裡：按鈕再多，表格也不會被撐開或換行。
 //
@@ -9,15 +9,21 @@ import { api, ApiError, isHandledGlobally } from "./api.js";
 import { confirmDialog, nameDialog } from "./dialogs.js";
 import { showToast } from "./toast.js";
 import { h } from "./dom.js";
-import { formatUtcText } from "./format.js";
+import { formatSize, formatUtcText } from "./format.js";
 import { icon } from "./icons.js";
 import { dropdown, menuItem, menuSeparator, type MenuEntry } from "./menu.js";
 import type {
   CreatedUser,
   ManagedUser,
   ResetPasswordResponse,
+  StorageMove,
+  StorageOverview,
+  StorageVolume,
   User,
 } from "./types.js";
+
+/** 有檔案正在搬移時，多久重新讀取一次進度 */
+const MOVE_POLL_MS = 2000;
 
 // 與後端 src/web/auth.rs 的帳號規則一致（同 auth-view.ts）。只用來提示，後端才是唯一的權威：
 // 不符合時，後端的錯誤訊息會顯示在對話框裡
@@ -47,6 +53,10 @@ class AdminView {
   private busy = false;
   /** 已經開啟 2FA 的使用者 */
   private twoFactor = new Set<number>();
+  /** 儲存位置、每個人在哪裡、搬移的進度 */
+  private storage: StorageOverview = { volumes: [], users: [], moves: [] };
+  /** 定時重新讀取搬移進度 */
+  private pollTimer: number | undefined;
 
   constructor(
     private readonly container: HTMLElement,
@@ -80,18 +90,30 @@ class AdminView {
 
   // ---------- 列表 ----------
 
-  /** 只重新載入列表這一塊，臨時密碼面板保留 */
+  /**
+   * 只重新載入列表這一塊，臨時密碼面板保留。
+   * 有檔案正在搬移時，每隔一段時間自動重新讀取，顯示最新的進度
+   */
   private async loadTable(): Promise<void> {
-    this.tableSlot.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    window.clearTimeout(this.pollTimer);
+    // 第一次載入才顯示 Loading：之後的重新讀取直接換掉，畫面不會閃
+    if (this.tableSlot.childElementCount === 0) {
+      this.tableSlot.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    }
     try {
-      const [users, twoFactor] = await Promise.all([
+      const [users, twoFactor, storage] = await Promise.all([
         api.get<ManagedUser[]>("/api/admin/users"),
         api.get<{ enabled_user_ids: number[] }>("/api/admin/two-factor"),
+        api.get<StorageOverview>("/api/admin/storage"),
       ]);
       this.twoFactor = new Set(twoFactor.enabled_user_ids);
+      this.storage = storage;
       this.tableSlot.replaceChildren(
         h("div", { class: "users-wrap" }, this.table(users)),
       );
+      if (storage.moves.some((move) => move.error === null)) {
+        this.pollTimer = window.setTimeout(() => this.poll(), MOVE_POLL_MS);
+      }
     } catch (error) {
       if (!isHandledGlobally(error)) {
         this.tableSlot.replaceChildren(
@@ -99,6 +121,20 @@ class AdminView {
         );
       }
     }
+  }
+
+  /** 定時重新讀取。已經離開這一頁時停止；選單或對話框開著時稍後再試，不打斷操作 */
+  private poll(): void {
+    if (!this.tableSlot.isConnected) {
+      return;
+    }
+    const interacting =
+      document.querySelector("dialog[open], .menu:not([hidden])") !== null;
+    if (interacting || this.busy) {
+      this.pollTimer = window.setTimeout(() => this.poll(), MOVE_POLL_MS);
+      return;
+    }
+    void this.loadTable();
   }
 
   private table(users: readonly ManagedUser[]): HTMLElement {
@@ -115,6 +151,7 @@ class AdminView {
           h("th", { scope: "col" }, "Role"),
           h("th", { scope: "col" }, "Status"),
           h("th", { scope: "col" }, "2FA"),
+          h("th", { scope: "col" }, "Storage"),
           h("th", { scope: "col" }, "Created"),
           h(
             "th",
@@ -165,8 +202,56 @@ class AdminView {
           ? "On"
           : h("span", { class: "muted" }, "Off"),
       ),
-      h("td", {}, formatUtcText(user.created_at)),
+      h("td", {}, this.storageCell(user)),
+      h("td", { class: "nowrap" }, formatUtcText(user.created_at)),
       h("td", { class: "actions-cell" }, this.rowMenu(user, isSelf)),
+    );
+  }
+
+  /** 這個人的檔案在哪個位置；搬移中顯示進度，失敗時顯示原因 */
+  private storageCell(user: ManagedUser): HTMLElement | string {
+    const move = this.moveOf(user);
+    if (move === undefined) {
+      return this.volumeName(this.volumeOf(user));
+    }
+    const target = this.volumeName(move.target_volume_id);
+    if (move.error !== null) {
+      return h(
+        "span",
+        { class: "error", title: move.error },
+        `Couldn't move to ${target}`,
+      );
+    }
+    const fraction =
+      move.total_bytes > 0 ? move.moved_bytes / move.total_bytes : 0;
+    const fill = h("div", { class: "meter-fill" });
+    fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    return h(
+      "div",
+      {
+        class: "move-progress",
+        title: `${formatSize(move.moved_bytes)} of ${formatSize(move.total_bytes)}`,
+      },
+      h("span", {}, `Moving to ${target}… ${Math.floor(fraction * 100)}%`),
+      h("div", { class: "meter" }, fill),
+    );
+  }
+
+  private moveOf(user: ManagedUser): StorageMove | undefined {
+    return this.storage.moves.find((move) => move.user_id === user.id);
+  }
+
+  private volumeOf(user: ManagedUser): number | null {
+    return (
+      this.storage.users.find((entry) => entry.user_id === user.id)
+        ?.volume_id ?? null
+    );
+  }
+
+  private volumeName(id: number | null): string {
+    return (
+      this.storage.volumes.find((volume) => volume.id === id)?.name ??
+      "Unknown"
     );
   }
 
@@ -202,6 +287,12 @@ class AdminView {
           onSelect: () => void this.resetTwoFactor(user),
         });
       }
+    }
+
+    // 儲存位置：自己的也可以換
+    entries.push(...this.storageEntries(user));
+
+    if (!isSelf) {
       entries.push("separator", {
         label: "Delete user",
         icon: "trash",
@@ -236,6 +327,42 @@ class AdminView {
     return h("div", { class: "row-menu-wrap" }, button, menu);
   }
 
+  /** 選單中與儲存位置有關的項目：依搬移的狀態而不同 */
+  private storageEntries(user: ManagedUser): MenuEntry[] {
+    const move = this.moveOf(user);
+    if (move === undefined) {
+      const onlyOne = this.storage.volumes.length < 2;
+      return [
+        {
+          label: "Change storage location",
+          icon: "disk",
+          disabled: onlyOne,
+          title: onlyOne
+            ? "Add another location in Administration → Storage first"
+            : undefined,
+          onSelect: () => void this.changeStorage(user),
+        },
+      ];
+    }
+    const entries: MenuEntry[] = [];
+    if (move.error !== null) {
+      entries.push({
+        label: "Retry moving files",
+        icon: "restore",
+        onSelect: () =>
+          this.perform(() =>
+            api.post(`/api/admin/users/${user.id}/storage/retry`),
+          ),
+      });
+    }
+    entries.push({
+      label: "Stop moving files",
+      icon: "close",
+      onSelect: () => void this.cancelMove(user),
+    });
+    return entries;
+  }
+
   // ---------- 建立 ----------
 
   /** 先按 Create user，再在對話框中輸入名稱。名稱有問題時錯誤顯示在對話框裡，不必重新輸入 */
@@ -244,10 +371,32 @@ class AdminView {
       return;
     }
     let created: CreatedUser | null = null;
+    // 有其他硬碟時：順便選擇他的檔案放在哪裡。會在那裡建立以帳號命名的資料夾
+    const { volumes } = this.storage;
+    const disk =
+      volumes.length < 2
+        ? null
+        : h(
+            "select",
+            { class: "dialog-input" },
+            volumes.map((volume) =>
+              h("option", { value: volume.id === null ? "" : String(volume.id) }, volume.name),
+            ),
+          );
     await nameDialog({
       title: "Create user",
       message: `The new member gets a temporary password and must change it when they first log in. ${USERNAME_HINT}`,
       confirmLabel: "Create",
+      extra:
+        disk === null
+          ? undefined
+          : h(
+              "label",
+              { class: "dialog-field" },
+              "Keep their files on",
+              disk,
+              h("span", { class: "hint" }, "A folder with their username is created there."),
+            ),
       submit: async (username) => {
         created = await api.post<CreatedUser>("/api/admin/users", { username });
       },
@@ -257,6 +406,16 @@ class AdminView {
     }
     const { user, temporary_password } = created as CreatedUser;
     this.showPassword(user.username, temporary_password, "created");
+    // 新帳號還沒有任何檔案：換位置會立刻完成，不需要搬移
+    if (disk !== null && disk.value !== "") {
+      try {
+        await api.put(`/api/admin/users/${user.id}/storage`, { volume_id: Number(disk.value) });
+      } catch (error) {
+        if (!isHandledGlobally(error)) {
+          this.errorBox.textContent = `${user.username} was created, but their files are kept on Default: ${messageOf(error)}`;
+        }
+      }
+    }
     await this.loadTable();
   }
 
@@ -331,6 +490,45 @@ class AdminView {
       await api.post(`/api/admin/users/${user.id}/reset-two-factor`);
       showToast(`Two-factor authentication turned off for ${user.username}`);
     });
+  }
+
+  // ---------- 儲存位置 ----------
+
+  private async changeStorage(user: ManagedUser): Promise<void> {
+    const current = this.volumeOf(user);
+    const target = await chooseVolume(
+      user.username,
+      this.storage.volumes,
+      current,
+    );
+    if (target === undefined) {
+      return;
+    }
+    this.perform(async () => {
+      const result = await api.put<{ moving: boolean }>(
+        `/api/admin/users/${user.id}/storage`,
+        { volume_id: target },
+      );
+      showToast(
+        result.moving
+          ? `Moving ${user.username}'s files to ${this.volumeName(target)}`
+          : `${user.username}'s files are now kept in ${this.volumeName(target)}`,
+      );
+    });
+  }
+
+  private async cancelMove(user: ManagedUser): Promise<void> {
+    const confirmed = await confirmDialog({
+      title: "Stop moving files?",
+      message: `${user.username}'s files stay where they are now. Anything already copied to the new location is cleaned up later.`,
+      confirmLabel: "Stop moving",
+    });
+    if (!confirmed) {
+      return;
+    }
+    this.perform(() =>
+      api.delete(`/api/admin/users/${user.id}/storage/move`),
+    );
   }
 
   /** 刪除使用者與他所有的檔案。必須輸入帳號名稱才能確認 */
@@ -491,6 +689,75 @@ async function copyPassword(
     }
   }
   status.textContent = "Selected. Press Ctrl+C (⌘C on a Mac) to copy";
+}
+
+/**
+ * 選擇新的儲存位置。回傳位置的編號（null 是資料目錄）；取消時回傳 undefined
+ */
+function chooseVolume(
+  username: string,
+  volumes: readonly StorageVolume[],
+  current: number | null,
+): Promise<number | null | undefined> {
+  return new Promise((resolve) => {
+    let result: number | null | undefined;
+    const options = volumes.map((volume) => {
+      const free =
+        volume.available_bytes === null
+          ? "not available"
+          : `${formatSize(volume.available_bytes)} free`;
+      return h(
+        "option",
+        {
+          value: volume.id === null ? "" : String(volume.id),
+          selected: volume.id === current,
+          disabled: volume.id === current || volume.available_bytes === null,
+        },
+        `${volume.name} (${free})${volume.id === current ? ", current" : ""}`,
+      );
+    });
+    const select = h("select", { class: "dialog-input" }, options);
+    // 預設選第一個可以選的，而不是目前的位置
+    const firstFree = options.find((option) => !option.disabled);
+    if (firstFree !== undefined) {
+      firstFree.selected = true;
+    }
+    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const confirm = h(
+      "button",
+      { type: "submit", class: "primary", disabled: firstFree === undefined },
+      "Move files",
+    );
+    const title = `Change where ${username}'s files are kept`;
+    const form = h(
+      "form",
+      { method: "dialog", class: "dialog-form" },
+      h("h2", { class: "dialog-title" }, title),
+      h(
+        "p",
+        { class: "dialog-message" },
+        "Their files are copied to the new location in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.",
+      ),
+      h("label", { class: "dialog-field" }, "Location", select),
+      h("div", { class: "dialog-actions" }, cancel, confirm),
+    );
+    const dialog = h("dialog", { class: "dialog", "aria-label": title }, form);
+
+    cancel.addEventListener("click", () => dialog.close());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      result = select.value === "" ? null : Number(select.value);
+      dialog.close();
+    });
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      resolve(result);
+    });
+
+    document.body.append(dialog);
+    dialog.showModal();
+    select.focus();
+  });
 }
 
 function messageOf(error: unknown): string {

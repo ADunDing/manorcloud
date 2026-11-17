@@ -412,26 +412,6 @@ pub async fn delete_tree(
     Ok(Some(keys))
 }
 
-/// 取得某個分層（storage_key 的前兩字元）中所有的 storage_key，供垃圾回收比對。
-///
-/// 用範圍查詢 `>= 'ab' AND < 'abg'` 而不是 `substr(storage_key, 1, 2) = 'ab'`：
-/// 後者會讓 storage_key 的唯一索引失效，256 個分層就是 256 次全表掃描。
-/// 上界成立的原因：key 只含 0-9a-f，第三個字元最大是 'f'，而 'g' 排在 'f' 之後。
-pub async fn keys_in_shard(pool: &SqlitePool, shard: &str) -> Result<Vec<String>, sqlx::Error> {
-    let upper = format!("{shard}g");
-    sqlx::query_scalar!(
-        r#"
-        SELECT storage_key AS "storage_key!"
-        FROM files
-        WHERE storage_key >= ? AND storage_key < ?
-        "#,
-        shard,
-        upper
-    )
-    .fetch_all(pool)
-    .await
-}
-
 /// 重新命名或搬移時可能的失敗原因
 #[derive(Debug)]
 pub enum UpdateError {
@@ -1354,28 +1334,6 @@ mod tests {
         let owner = make_user(&pool, "carol").await;
 
         assert_eq!(delete_tree(&pool, owner, 9999).await.unwrap(), None);
-    }
-
-    // ==================== keys_in_shard ====================
-
-    #[sqlx::test]
-    async fn keys_in_shard_returns_only_that_shard(pool: SqlitePool) {
-        let owner = make_user(&pool, "carol").await;
-        let in_00 = key(1); // "000...01"，分層 00
-        let in_01 = format!("01{}", "0".repeat(30));
-        let in_0f = format!("0f{}", "0".repeat(30));
-        for (i, k) in [&in_00, &in_01, &in_0f].into_iter().enumerate() {
-            create_file(&pool, owner, None, &format!("{i}.txt"), 0, None, k)
-                .await
-                .unwrap();
-        }
-        // 資料夾沒有 storage_key，不應出現在任何分層
-        make_folder(&pool, owner, None, "docs").await;
-
-        assert_eq!(keys_in_shard(&pool, "00").await.unwrap(), vec![in_00]);
-        assert_eq!(keys_in_shard(&pool, "01").await.unwrap(), vec![in_01]);
-        assert_eq!(keys_in_shard(&pool, "0f").await.unwrap(), vec![in_0f]);
-        assert!(keys_in_shard(&pool, "ff").await.unwrap().is_empty());
     }
 
     // ==================== update_item ====================

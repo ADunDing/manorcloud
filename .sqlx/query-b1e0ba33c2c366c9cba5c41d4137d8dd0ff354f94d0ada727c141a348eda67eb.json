@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM users WHERE id = ? AND id NOT IN (SELECT user_id FROM storage_spaces)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b1e0ba33c2c366c9cba5c41d4137d8dd0ff354f94d0ada727c141a348eda67eb"
+}

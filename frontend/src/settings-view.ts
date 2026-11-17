@@ -4,6 +4,7 @@
 // 再在這裡的清單與 switch 各加一項。
 
 import { renderAdmin } from "./admin-view.js";
+import { renderStorage } from "./storage-view.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { renderChangeCredentials } from "./auth-view.js";
 import { confirmDialog } from "./dialogs.js";
@@ -412,6 +413,7 @@ function renderAppearance(panel: HTMLElement): void {
 
 const ADMIN: readonly { section: AdminSection; label: string; icon: IconName }[] = [
   { section: "users", label: "Users", icon: "users" },
+  { section: "storage", label: "Storage", icon: "disk" },
   { section: "sign-in", label: "Sign-in", icon: "lock" },
 ];
 
@@ -438,6 +440,9 @@ export function renderAdministration(
   switch (section) {
     case "users":
       renderAdmin(panel, me, onSelfChanged);
+      break;
+    case "storage":
+      renderStorage(panel);
       break;
     case "sign-in":
       renderSsoSettings(panel);

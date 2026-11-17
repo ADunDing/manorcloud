@@ -44,7 +44,6 @@ impl TestApp {
             .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        storage::init_dirs(dir.path()).unwrap();
         let state = AppState::new(pool.clone(), dir.path().to_path_buf(), limit);
 
         TestApp {
@@ -58,6 +57,36 @@ impl TestApp {
             cookie: format!("{SESSION_COOKIE}={token}"),
             user_id,
         }
+    }
+
+    /// 資料目錄（預設的儲存位置）
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.dir.path().to_path_buf()
+    }
+
+    /// 使用者在資料目錄中的資料夾（`{資料目錄}/{帳號名稱}`），不存在時建立
+    pub async fn user_dir(&self, user_id: i64) -> std::path::PathBuf {
+        let folder: String = sqlx::query_scalar("SELECT storage_folder FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+        let dir = self.dir.path().join(folder);
+        storage::init_dirs(&dir).unwrap();
+        dir
+    }
+
+    /// 資料目錄底下每個使用者的資料夾
+    fn user_dirs(&self) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(self.dir.path())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 送出請求，回傳狀態碼、header 與完整內容
@@ -92,7 +121,8 @@ impl TestApp {
         name: &str,
         content: &[u8],
     ) -> (i64, String) {
-        let mut blob = TempBlob::create(self.dir.path(), MIB).await.unwrap();
+        let dir = self.user_dir(owner).await;
+        let mut blob = TempBlob::create(&dir, MIB).await.unwrap();
         blob.write_chunk(content).await.unwrap();
         let key = storage::generate_storage_key();
         blob.persist(&key).await.unwrap();
@@ -104,17 +134,25 @@ impl TestApp {
         (entry.id, key)
     }
 
-    /// blob 是否存在於磁碟上
+    /// blob 是否存在於資料目錄中（任何一個使用者的資料夾）
     pub fn blob_exists(&self, key: &str) -> bool {
-        storage::blob_path(self.dir.path(), key).unwrap().exists()
+        self.user_dirs()
+            .iter()
+            .any(|dir| storage::blob_path(dir, key).unwrap().exists())
     }
 
     pub fn blob_count(&self) -> usize {
-        count_files(&self.dir.path().join("blobs"))
+        self.user_dirs()
+            .iter()
+            .map(|dir| count_files(&dir.join("blobs")))
+            .sum()
     }
 
     pub fn tmp_count(&self) -> usize {
-        count_files(&self.dir.path().join("tmp"))
+        self.user_dirs()
+            .iter()
+            .map(|dir| count_files(&dir.join("tmp")))
+            .sum()
     }
 
     pub async fn row_count(&self) -> i64 {

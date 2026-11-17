@@ -9,6 +9,9 @@
 //!
 //! 預設是嚴格的那一個：新增的 API 照慣例寫 `CurrentUser` 就自動受到保護，
 //! 要允許這些狀態必須刻意改用 `SessionUser`。
+//!
+//! 檔案的 API 用 `FilesUser`：通常就是目前的使用者；管理員可以加上 `?space=` 參數，
+//! 改為操作他在另一顆硬碟上的檔案空間。
 
 use axum::{
     extract::{FromRef, FromRequestParts},
@@ -22,7 +25,10 @@ use super::{
     auth::SESSION_COOKIE,
     error::{AppError, Forbidden},
 };
-use crate::{auth, db::session};
+use crate::{
+    auth,
+    db::{session, storage as storage_db},
+};
 
 /// 未登入時統一的訊息：不區分是沒帶 Cookie 還是 session 失效
 const NOT_LOGGED_IN: &str = "You're not logged in, or your session has expired";
@@ -147,6 +153,65 @@ where
 
         Ok(AdminUser { id: user.id })
     }
+}
+
+/// 檔案的 API 要操作誰的檔案。
+///
+/// 沒有 `space` 參數（或 `space=me`）：目前使用者自己的檔案。
+/// 管理員加上 `space=default` 或 `space={儲存位置的編號}`：
+/// 他在那一顆硬碟上的檔案空間（側邊欄的 Disk2 等，一個隱藏的帳號，見 db::storage::space_account）。
+/// 那顆硬碟正好是管理員自己的檔案所在的位置時，就是他自己的檔案（My files）。
+///
+/// 用網址參數而不是 header：下載是瀏覽器直接開啟的連結，無法加上 header
+#[derive(Debug, Clone)]
+pub struct FilesUser {
+    /// 檔案的主人：所有查詢都以它為準
+    pub id: i64,
+}
+
+impl<S> FromRequestParts<S> for FilesUser
+where
+    SqlitePool: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        let space = parts.uri.query().and_then(|query| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("space="))
+                .map(str::to_string)
+        });
+        let volume = match space.as_deref() {
+            None | Some("me") => return Ok(FilesUser { id: user.id }),
+            Some("default") => None,
+            Some(id) => Some(id.parse::<i64>().map_err(|_| space_not_found())?),
+        };
+
+        if user.role != "admin" {
+            return Err(AppError::Forbidden(Forbidden::AdminRequired));
+        }
+        let pool = SqlitePool::from_ref(state);
+        if let Some(id) = volume
+            && storage_db::find_volume(&pool, id).await?.is_none()
+        {
+            return Err(space_not_found());
+        }
+        let home = storage_db::user_location(&pool, user.id)
+            .await?
+            .ok_or_else(unauthorized)?;
+        if home.volume_id == volume {
+            return Ok(FilesUser { id: user.id });
+        }
+        let id = storage_db::space_account(&pool, volume).await?;
+        Ok(FilesUser { id })
+    }
+}
+
+fn space_not_found() -> AppError {
+    AppError::NotFound("Storage location not found".to_string())
 }
 
 fn unauthorized() -> AppError {

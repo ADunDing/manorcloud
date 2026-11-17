@@ -6,6 +6,9 @@
 // 超過 30 天的項目由伺服器的垃圾回收永久刪除。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
+import { trashHref, type Disk } from "./router.js";
+import { spaceOf, withSpace, type Space } from "./space.js";
+import type { StorageOverview } from "./types.js";
 import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
 import { FileList, loadView, saveView, type ViewMode } from "./file-list.js";
@@ -33,19 +36,54 @@ let loading = 0;
 /** 目前顯示的垃圾桶畫面；不在垃圾桶時為 null */
 let current: TrashView | null = null;
 
-/** 在 container 中顯示垃圾桶。notice：重新載入後要顯示的錯誤 */
-export function renderTrash(container: HTMLElement, notice = ""): void {
+/** 要顯示哪一個檔案空間的垃圾桶，由 main.ts 依網址決定 */
+export interface TrashOptions {
+  /** undefined：自己的檔案；null 或數字：管理員在那一顆硬碟上的檔案 */
+  readonly disk: Disk;
+  /** 管理員：上方多一排分頁，切換每一顆硬碟的垃圾桶 */
+  readonly admin: boolean;
+  readonly userId: number;
+}
+
+/** 目前顯示的垃圾桶屬於哪一個檔案空間 */
+interface TrashPlace {
+  readonly space: Space;
+  /** 原本位置的第一段：My files 或硬碟的名稱 */
+  readonly rootLabel: string;
+  /** 管理員的分頁；一般使用者沒有 */
+  readonly tabs: readonly { readonly label: string; readonly href: string; readonly current: boolean }[];
+}
+
+let place: TrashPlace = { space: null, rootLabel: "My files", tabs: [] };
+/** 上次的選項：畫面內部重新載入時沿用 */
+let lastOptions: TrashOptions = { disk: undefined, admin: false, userId: 0 };
+
+/**
+ * 在 container 中顯示垃圾桶。notice：重新載入後要顯示的錯誤。
+ * 沒有給 options 時沿用上一次的（畫面內部重新載入）
+ */
+export function renderTrash(
+  container: HTMLElement,
+  options: TrashOptions = lastOptions,
+  notice = "",
+): void {
+  lastOptions = options;
   current?.unmount();
   current = null;
   const token = ++loading;
   container.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+  const space = options.disk === undefined ? null : spaceOf(options.disk);
 
   void (async () => {
     try {
-      const items = await api.get<TrashItem[]>("/api/trash");
+      const [items, storage] = await Promise.all([
+        api.get<TrashItem[]>(withSpace("/api/trash", space)),
+        options.admin ? api.get<StorageOverview>("/api/admin/storage") : Promise.resolve(null),
+      ]);
       if (token !== loading) {
         return;
       }
+      place = trashPlace(options, space, storage);
       current = new TrashView(container, items, notice);
       current.mount();
     } catch (error) {
@@ -55,6 +93,38 @@ export function renderTrash(container: HTMLElement, notice = ""): void {
       container.replaceChildren(h("p", { class: "error", role: "alert" }, messageOf(error)));
     }
   })();
+}
+
+/**
+ * 管理員：每一顆硬碟一個分頁。自己的檔案所在的那一顆叫 My files，排在最前面；
+ * 只有一顆硬碟時不顯示分頁
+ */
+function trashPlace(
+  options: TrashOptions,
+  space: Space,
+  storage: StorageOverview | null,
+): TrashPlace {
+  if (storage === null) {
+    return { space, rootLabel: "My files", tabs: [] };
+  }
+  const home = storage.users.find((user) => user.user_id === options.userId)?.volume_id ?? null;
+  const others = storage.volumes.filter((volume) => volume.id !== home);
+  const tabs =
+    others.length === 0
+      ? []
+      : [
+          { label: "My files", href: trashHref(undefined), current: options.disk === undefined },
+          ...others.map((volume) => ({
+            label: volume.name,
+            href: trashHref(volume.id),
+            current: options.disk === volume.id,
+          })),
+        ];
+  const rootLabel =
+    options.disk === undefined
+      ? "My files"
+      : (storage.volumes.find((volume) => volume.id === options.disk)?.name ?? "Unknown");
+  return { space, rootLabel, tabs };
 }
 
 /** 離開垃圾桶時呼叫：移除鍵盤的監聽，還在路上的回應不再更新畫面 */
@@ -90,7 +160,7 @@ class TrashView {
   ) {
     // 轉成列表用的格式：時間那一欄顯示刪除的時間
     this.items = trash.map((item) => {
-      this.locations.set(item.id, ["My files", ...item.location].join(" / "));
+      this.locations.set(item.id, [place.rootLabel, ...item.location].join(" / "));
       return {
         id: item.id,
         parent_id: null,
@@ -130,6 +200,21 @@ class TrashView {
     this.list = this.createList();
   }
 
+  /** 管理員：每一顆硬碟的垃圾桶各一個分頁 */
+  private tabs(): HTMLElement {
+    return h(
+      "nav",
+      { class: "trash-tabs", "aria-label": "Trash of each disk" },
+      place.tabs.map((tab) =>
+        h(
+          "a",
+          { href: tab.href, class: "trash-tab", "aria-current": tab.current ? "page" : null },
+          tab.label,
+        ),
+      ),
+    );
+  }
+
   mount(): void {
     this.container.replaceChildren(
       h(
@@ -160,6 +245,7 @@ class TrashView {
           this.viewButtons.grid,
         ),
       ),
+      ...(place.tabs.length === 0 ? [] : [this.tabs()]),
       h(
         "div",
         { class: "trash-banner" },
@@ -198,7 +284,7 @@ class TrashView {
       onSort: (key) => this.sortBy(key),
       sortControl: this.sorter.element,
       draggable: false,
-      location: (item) => this.locations.get(item.id) ?? "My files",
+      location: (item) => this.locations.get(item.id) ?? place.rootLabel,
       timeLabel: "Deleted",
       emptyMessage: "The trash is empty.",
     });
@@ -268,7 +354,7 @@ class TrashView {
 
   private async restoreSelected(): Promise<void> {
     await this.each(this.list.selectedItems(), "Restored", false, (item) =>
-      api.post(`/api/trash/${item.id}/restore`, {}),
+      api.post(withSpace(`/api/trash/${item.id}/restore`, place.space), {}),
     );
   }
 
@@ -291,7 +377,7 @@ class TrashView {
       danger: true,
     });
     if (confirmed) {
-      await this.each(selected, "Deleted", true, (item) => api.delete(`/api/trash/${item.id}`));
+      await this.each(selected, "Deleted", true, (item) => api.delete(withSpace(`/api/trash/${item.id}`, place.space)));
     }
   }
 
@@ -308,7 +394,7 @@ class TrashView {
     this.busy = true;
     let message = "";
     try {
-      await api.delete("/api/trash");
+      await api.delete(withSpace("/api/trash", place.space));
     } catch (error) {
       if (isHandledGlobally(error)) {
         return;
@@ -316,7 +402,7 @@ class TrashView {
       message = messageOf(error);
     }
     refreshStorage();
-    renderTrash(this.container, message);
+    renderTrash(this.container, undefined, message);
   }
 
   /**
@@ -357,7 +443,7 @@ class TrashView {
     if (changesStorage) {
       refreshStorage();
     }
-    renderTrash(this.container, message);
+    renderTrash(this.container, undefined, message);
   }
 
   // ---------- 鍵盤 ----------

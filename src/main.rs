@@ -4,8 +4,10 @@ mod config;
 mod db;
 mod export;
 mod files;
+mod folders;
 mod gc;
 mod layout;
+mod mover;
 mod rescue;
 mod storage;
 mod systemd;
@@ -195,7 +197,8 @@ async fn serve() {
         std::process::exit(1);
     });
 
-    storage::init_dirs(&config.data_dir).expect("failed to create the data directories");
+    // 每個使用者的資料夾在他第一次寫入時才建立，這裡只需要資料目錄本身
+    std::fs::create_dir_all(&config.data_dir).expect("failed to create the data directory");
     println!("version: {}", env!("CARGO_PKG_VERSION"));
     println!("data directory: {}", config.data_dir.display());
     println!("upload limit: {} bytes", config.max_upload_bytes);
@@ -216,12 +219,24 @@ async fn serve() {
         println!("{}", bootstrap::banner(&admin));
     }
 
+    // 舊版把所有人的檔案放在同一個 blobs/ 中：搬進每個人自己的資料夾。
+    // 必須在垃圾回收與接受請求之前完成；做不完就不啟動，避免檔案看起來不見了
+    if let Err(e) = folders::relayout(&pool, &config.data_dir).await {
+        eprintln!("cannot reorganize the stored files: {e}");
+        std::process::exit(1);
+    }
+    // 帳號改名之後沒能跟著改名的資料夾，再試一次
+    folders::sync_all_names(&pool, &config.data_dir).await;
+
     // 背景垃圾回收：清除孤兒 blob、殘留暫存檔與過期 session
     gc::spawn_periodic(
         pool.clone(),
         Arc::from(config.data_dir.as_path()),
         gc::GcPolicy::default(),
     );
+
+    // 上次停止時還沒做完的儲存位置搬移：接著做完（已經複製好的會被略過）
+    mover::resume_all(&pool, &Arc::from(config.data_dir.as_path())).await;
 
     // 看門狗：定期確認資料庫連線正常後回報 systemd，卡死時由 systemd 重啟
     systemd::spawn_watchdog(pool.clone());

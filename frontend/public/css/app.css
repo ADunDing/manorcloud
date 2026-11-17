@@ -1422,11 +1422,14 @@ table.users th {
 
 table.users td {
     vertical-align: middle;
-    white-space: nowrap;
 }
 
 table.users tbody tr:hover td {
     background: var(--bar);
+}
+
+table.users td.nowrap {
+    white-space: nowrap;
 }
 
 /* 操作欄只放一個「⋯」按鈕：寬度剛好容納它，靠右對齊 */
@@ -1445,10 +1448,15 @@ table.users .actions-cell {
     color: var(--muted);
 }
 
-.icon-button.row-menu:hover,
+.icon-button.row-menu:hover:not(:disabled),
 .icon-button.row-menu[aria-expanded="true"] {
     background: var(--border-soft);
     color: var(--fg);
+}
+
+.icon-button.row-menu:disabled {
+    color: var(--subtle);
+    opacity: 0.5;
 }
 
 /* 刪除使用者：輸入帳號名稱才能確認 */
@@ -1457,6 +1465,57 @@ table.users .actions-cell {
     flex-direction: column;
     gap: 6px;
     margin: 0 0 10px;
+}
+
+/* 對話框中有標題的輸入欄（新增儲存位置、選擇位置） */
+.dialog-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 12px;
+    font-weight: 500;
+}
+
+select.dialog-input {
+    padding-right: 0.4rem;
+}
+
+/* ---------- 儲存位置 ---------- */
+
+.storage-intro {
+    margin: -8px 0 16px;
+}
+
+table.users code.path {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+/* 容量條與「120 GB free of 500 GB」 */
+.space {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 10rem;
+}
+
+.space .meter {
+    flex: none;
+    width: 100%;
+}
+
+/* Users 表格中的搬移進度 */
+.move-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 9rem;
+}
+
+.move-progress .meter {
+    flex: none;
+    width: 100%;
 }
 
 .badge {
@@ -1810,4 +1869,99 @@ table.files .col-location {
     display: flex;
     justify-content: space-between;
     gap: 12px;
+}
+
+/* ---------- 管理員：users 資料夾中每個人的資料夾 ---------- */
+
+.disk-folder-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.disk-folder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 18px 10px 14px;
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.disk-folder:hover {
+    background: var(--bar);
+}
+
+.disk-folder svg {
+    color: var(--accent);
+}
+
+.disk-folder-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dialog-field .hint {
+    font-weight: 400;
+}
+
+/* ---------- 管理員：第一層的 users 資料夾、垃圾桶的分頁 ---------- */
+
+/* 固定在最前面的資料夾連結：整個名稱都可以點 */
+.pinned-link {
+    color: inherit;
+    text-decoration: none;
+}
+
+.pinned-link:hover .item-name {
+    text-decoration: underline;
+}
+
+.tile.pinned .pinned-link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    height: 100%;
+}
+
+.trash-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 12px;
+}
+
+.trash-tab {
+    padding: 6px 14px;
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+    color: var(--fg);
+    font-size: 0.9rem;
+    text-decoration: none;
+}
+
+.trash-tab:hover {
+    background: var(--bar);
+}
+
+.trash-tab[aria-current="page"] {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.empty-state + .disk-folder-grid,
+.trash-banner + .disk-folder-grid {
+    margin-top: 4px;
 }

@@ -16,9 +16,10 @@ use sqlx::SqlitePool;
 
 use super::{
     error::AppError,
-    extract::CurrentUser,
+    extract::FilesUser,
     files::{FileResponse, folder_not_found},
     state::AppState,
+    storage::writable_root,
 };
 use crate::{
     db::files::{self as files_db, CreateFileError, FileEntry, TreeEntry, UpdateError},
@@ -50,7 +51,7 @@ struct Crumb {
 /// 項目資訊加上祖先鏈。`flatten` 讓項目的欄位直接攤平在最外層，
 /// 回應的形狀是 `{"id": ..., "name": ..., ..., "ancestors": [...]}`
 #[derive(Serialize)]
-struct ItemDetail {
+pub(super) struct ItemDetail {
     #[serde(flatten)]
     item: FileResponse,
     ancestors: Vec<Crumb>,
@@ -59,14 +60,23 @@ struct ItemDetail {
 /// GET /api/files/{id}：項目資訊與由根目錄往下的祖先鏈（麵包屑導覽用）。
 /// 不存在與屬於別人回傳相同的 404。
 async fn get_item(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<Json<ItemDetail>, AppError> {
-    let entry = files_db::find_file(&pool, user.id, id)
+    item_detail(&pool, user.id, id).await.map(Json)
+}
+
+/// `owner` 的一個項目與它的祖先鏈。自己的檔案，或管理員瀏覽別人的檔案（見 browse.rs）共用
+pub(super) async fn item_detail(
+    pool: &SqlitePool,
+    owner: i64,
+    id: i64,
+) -> Result<ItemDetail, AppError> {
+    let entry = files_db::find_file(pool, owner, id)
         .await?
         .ok_or_else(item_not_found)?;
-    let ancestors = files_db::ancestors(&pool, user.id, id)
+    let ancestors = files_db::ancestors(pool, owner, id)
         .await?
         .into_iter()
         .map(|a| Crumb {
@@ -75,10 +85,10 @@ async fn get_item(
         })
         .collect();
 
-    Ok(Json(ItemDetail {
+    Ok(ItemDetail {
         item: entry.into(),
         ancestors,
-    }))
+    })
 }
 
 // ==================== 刪除 ====================
@@ -89,7 +99,7 @@ async fn get_item(
 /// 超過保留期限的由垃圾回收永久刪除。
 /// 不存在、屬於別人、已經在垃圾桶中：都是同一個 404。
 async fn delete_item(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, AppError> {
@@ -140,7 +150,7 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<i64>>, D::Er
 
 /// PATCH /api/files/{id}：重新命名及／或搬移。
 async fn patch_item(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<i64>,
     Json(req): Json<UpdateRequest>,
@@ -185,7 +195,7 @@ struct CopyRequest {
 /// 複製在獨立的工作中執行：使用者在途中關掉頁面，複製仍會完成或完整地復原，
 /// 不會因為 handler 被取消而留下複製到一半的資料夾。
 async fn copy_item(
-    user: CurrentUser,
+    user: FilesUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<i64>,
@@ -217,12 +227,14 @@ async fn copy_item(
         .filter_map(|entry| entry.size)
         .map(|size| u64::try_from(size).unwrap_or(0))
         .fold(0u64, u64::saturating_add);
-    let available = storage::available_bytes(&data_dir).map_err(AppError::internal)?;
+    // 複本放在這個人的檔案所在的位置；正在搬到另一個位置時拒絕
+    let root: Arc<Path> = Arc::from(writable_root(&pool, &data_dir, user.id).await?);
+    let available = storage::available_bytes(&root).map_err(AppError::internal)?;
     if needed > available {
         return Err(not_enough_space());
     }
 
-    let task = tokio::spawn(copy_tree(pool, data_dir, user.id, tree, req.parent_id));
+    let task = tokio::spawn(copy_tree(pool, root, user.id, tree, req.parent_id));
     let copy = task.await.map_err(AppError::internal)??;
     Ok((StatusCode::CREATED, Json(copy.into())))
 }
@@ -877,7 +889,10 @@ mod tests {
         t.store_file(t.user_id, Some(docs), "a.txt", b"a").await;
         let (_, broken) = t.store_file(t.user_id, Some(docs), "b.txt", b"b").await;
         // 模擬資料損壞：第二個檔案的 blob 不見了，複製會在途中失敗
-        std::fs::remove_file(crate::storage::blob_path(t.dir.path(), &broken).unwrap()).unwrap();
+        std::fs::remove_file(
+            crate::storage::blob_path(&t.dir.path().join("carol"), &broken).unwrap(),
+        )
+        .unwrap();
 
         let (status, _) = copy(&t, docs, "{}").await;
 

@@ -351,6 +351,8 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<UserSummary>, sqlx::Err
             users.created_at AS "created_at!"
         FROM users
         LEFT JOIN password_credentials ON password_credentials.user_id = users.id
+        -- 管理員在各硬碟上的檔案空間是隱藏的帳號，不是使用者
+        WHERE users.id NOT IN (SELECT user_id FROM storage_spaces)
         ORDER BY users.username
         "#
     )
@@ -377,6 +379,7 @@ pub async fn find_user_summary(
         FROM users
         LEFT JOIN password_credentials ON password_credentials.user_id = users.id
         WHERE users.id = ?
+          AND users.id NOT IN (SELECT user_id FROM storage_spaces)
         "#,
         user_id
     )
@@ -416,7 +419,7 @@ pub async fn update_user(
         r#"
         UPDATE users
         SET role = COALESCE(?, role), disabled = COALESCE(?, disabled)
-        WHERE id = ?
+        WHERE id = ? AND id NOT IN (SELECT user_id FROM storage_spaces)
         "#,
         role,
         disabled,
@@ -464,11 +467,15 @@ pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<String>,
     .fetch_all(&mut *tx)
     .await?;
 
-    let deleted = sqlx::query!("DELETE FROM users WHERE id = ?", user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(last_admin_or_db)?
-        .rows_affected();
+    // 管理員在各硬碟上的檔案空間不是使用者：隨著儲存位置一起刪除，不能在這裡刪
+    let deleted = sqlx::query!(
+        "DELETE FROM users WHERE id = ? AND id NOT IN (SELECT user_id FROM storage_spaces)",
+        user_id
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(last_admin_or_db)?
+    .rows_affected();
 
     if deleted == 0 {
         // tx 在這裡被丟棄，自動 rollback

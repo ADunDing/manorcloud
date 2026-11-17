@@ -5,6 +5,7 @@
 // 對外的介面與單次上傳相同（UploadHandle），佇列不需要知道是哪一種。
 
 import { api, ApiError, errorFromResponse } from "./api.js";
+import { withSpace, type Space } from "./space.js";
 import { readBody, UploadCancelled, type UploadHandle } from "./upload.js";
 
 /** 每段的大小。伺服器接受最多 16 MiB 的一段 */
@@ -34,6 +35,8 @@ export interface UploadInfo {
 }
 
 export interface ChunkedUploadOptions {
+  /** 目標所在的檔案空間（管理員在另一顆硬碟上的檔案）；沒有時是自己的檔案 */
+  space?: Space;
   onProgress: (fraction: number) => void;
   /** 顯示重試等提示，null 代表清除 */
   onNotice: (message: string | null) => void;
@@ -67,7 +70,7 @@ export function startChunkedUpload(
   folderId: number | null,
   options: ChunkedUploadOptions,
 ): UploadHandle {
-  const control = new Control();
+  const control = new Control(options.space ?? null);
   const done = run(file, folderId, options, control);
   return { done, cancel: () => control.cancel() };
 }
@@ -84,6 +87,14 @@ class Control {
   /** 完成請求已送出：檔案可能已經建立，不能再取消 */
   completing = false;
 
+  /** @param space 這次上傳所在的檔案空間：每個請求的網址都要帶上 */
+  constructor(readonly space: Space) {}
+
+  /** 這次上傳的 API 網址 */
+  url(path: string): string {
+    return withSpace(path, this.space);
+  }
+
   cancel(): void {
     if (this.cancelled || this.completing) {
       return;
@@ -92,7 +103,7 @@ class Control {
     this.xhr?.abort();
     this.wake?.();
     if (this.uploadId !== null) {
-      discard(this.uploadId);
+      discard(this.uploadId, this.space);
     }
   }
 
@@ -137,14 +148,14 @@ const discarding = new Map<string, Promise<void>>();
  * 取消的當下，伺服器可能還在處理剛被中斷的那一段（握著檔案鎖），刪除會暫時失敗，
  * 所以隔一下再試。全部失敗也沒關係：24 小時後由垃圾回收刪除。
  */
-function discard(id: string): void {
+function discard(id: string, space: Space): void {
   if (discarding.has(id)) {
     return;
   }
   const done = (async () => {
     for (let attempt = 1; attempt <= DISCARD_ATTEMPTS; attempt += 1) {
       try {
-        const response = await fetch(`/api/uploads/${encodeURIComponent(id)}`, {
+        const response = await fetch(withSpace(`/api/uploads/${encodeURIComponent(id)}`, space), {
           method: "DELETE",
         });
         // 已刪除，或早就不存在
@@ -208,7 +219,7 @@ async function run(
   // 1. 宣告（續傳時沿用伺服器上的上傳）
   const info =
     options.resume ??
-    (await api.post<UploadInfo>("/api/uploads", {
+    (await api.post<UploadInfo>(control.url("/api/uploads"), {
       parent_id: folderId,
       name: file.name,
       size: file.size,
@@ -220,7 +231,7 @@ async function run(
 
   // 宣告期間被取消：Control.cancel 那時還不知道編號，由這裡通知伺服器刪除
   if (control.isCancelled()) {
-    discard(info.id);
+    discard(info.id, control.space);
     throw new UploadCancelled();
   }
 
@@ -244,7 +255,9 @@ async function sendChunks(
     control.check();
     try {
       if (needsSync) {
-        const status = await api.get<UploadInfo>(`/api/uploads/${encodeURIComponent(info.id)}`);
+        const status = await api.get<UploadInfo>(
+          control.url(`/api/uploads/${encodeURIComponent(info.id)}`),
+        );
         offset = status.received;
         needsSync = false;
       }
@@ -300,7 +313,7 @@ async function complete(
   let failures = 0;
   for (;;) {
     try {
-      await api.post(`/api/uploads/${encodeURIComponent(info.id)}/complete`, {});
+      await api.post(control.url(`/api/uploads/${encodeURIComponent(info.id)}/complete`), {});
       onNotice(null);
       return;
     } catch (error) {
@@ -382,7 +395,7 @@ function putChunk(
       reject(new UploadCancelled());
     });
 
-    xhr.open("PUT", `/api/uploads/${encodeURIComponent(id)}?offset=${offset}`);
+    xhr.open("PUT", control.url(`/api/uploads/${encodeURIComponent(id)}?offset=${offset}`));
     xhr.timeout = CHUNK_TIMEOUT_MS;
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.send(chunk);

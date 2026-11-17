@@ -6,13 +6,22 @@
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
+import { withSpace, type Space } from "./space.js";
 import type { Crumb, FileItem, ItemDetail } from "./types.js";
+
+/** 在哪一個檔案空間中選擇：自己的檔案，或管理員在另一顆硬碟上的檔案 */
+export interface FolderPlace {
+  readonly space: Space;
+  /** 路徑最前面的名稱：My files 或硬碟的名稱 */
+  readonly rootLabel: string;
+}
 
 /**
  * 讓使用者選擇一個資料夾。
  *
  * @param start    一開始顯示的資料夾（null 為 My files）
  * @param excluded 不能選的資料夾：要移動的資料夾本身（不能搬進自己裡面）
+ * @param place    在哪一個檔案空間中選擇；只能選同一個空間中的資料夾
  * @returns 選定的資料夾編號（null 為 My files）；取消時為 undefined
  */
 export function chooseFolder(
@@ -20,6 +29,7 @@ export function chooseFolder(
   confirmLabel: string,
   start: number | null,
   excluded: ReadonlySet<number>,
+  place: FolderPlace = { space: null, rootLabel: "My files" },
 ): Promise<number | null | undefined> {
   return new Promise((resolve) => {
     let location: number | null = start;
@@ -63,9 +73,14 @@ export function chooseFolder(
       try {
         const [items, detail] = await Promise.all([
           api.get<FileItem[]>(
-            folderId === null ? "/api/files" : `/api/files?parent_id=${folderId}`,
+            withSpace(
+              folderId === null ? "/api/files" : `/api/files?parent_id=${folderId}`,
+              place.space,
+            ),
           ),
-          folderId === null ? Promise.resolve(null) : api.get<ItemDetail>(`/api/files/${folderId}`),
+          folderId === null
+            ? Promise.resolve(null)
+            : api.get<ItemDetail>(withSpace(`/api/files/${folderId}`, place.space)),
         ]);
         if (token !== loading) {
           return;
@@ -90,7 +105,7 @@ export function chooseFolder(
     /** My files / 相片 / 2026：上層的每一層都可以點回去 */
     function renderPath(detail: ItemDetail | null): void {
       const crumbs: Crumb[] = detail ? [...detail.ancestors, { id: detail.id, name: detail.name }] : [];
-      const parts: Node[] = [pathStep("My files", null, crumbs.length === 0)];
+      const parts: Node[] = [pathStep(place.rootLabel, null, crumbs.length === 0)];
       crumbs.forEach((crumb, index) => {
         parts.push(h("span", { class: "separator", "aria-hidden": "true" }, "/"));
         parts.push(pathStep(crumb.name, crumb.id, index === crumbs.length - 1));

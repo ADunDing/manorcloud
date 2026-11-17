@@ -89,7 +89,7 @@ impl fmt::Display for PartError {
 impl std::error::Error for PartError {}
 
 /// 暫存檔的路徑。上傳編號必須是 32 個小寫 hex 字元，路徑不可能被拼出 ../
-fn part_path(data_dir: &Path, id: &str) -> Option<PathBuf> {
+pub fn part_path(data_dir: &Path, id: &str) -> Option<PathBuf> {
     is_valid_key(id).then(|| data_dir.join(UPLOADS_DIR).join(format!("{id}.part")))
 }
 

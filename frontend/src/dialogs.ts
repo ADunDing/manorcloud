@@ -106,6 +106,8 @@ export interface NameDialogOptions {
   /** 顯示在輸入欄下方的位置，例如 ["My files", "相片", "2026"]。不是檔案時省略 */
   readonly location?: readonly string[];
   readonly initial?: string;
+  /** 放在輸入欄下方的其他欄位（例如建立使用者時選擇硬碟） */
+  readonly extra?: HTMLElement;
   /**
    * 按下確認時呼叫。拋出錯誤時，錯誤訊息顯示在對話框裡，對話框不關閉，
    * 使用者改好名稱再按一次就好（例如同名項目已存在）
@@ -143,6 +145,7 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
       h("h2", { class: "dialog-title" }, options.title),
       h("p", { class: "dialog-message" }, options.message),
       input,
+      options.extra ?? null,
       options.location === undefined
         ? null
         : h(
