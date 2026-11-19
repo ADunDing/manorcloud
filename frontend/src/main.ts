@@ -5,7 +5,7 @@ import { renderChangeCredentials, renderLogin } from "./auth-view.js";
 import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
 import { h } from "./dom.js";
 import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
-import { adminHref, currentRoute, folderHref, settingsHref } from "./router.js";
+import { adminHref, currentRoute, filesHref, MY_FILES, settingsHref } from "./router.js";
 import { renderAdministration, renderSettings } from "./settings-view.js";
 import { hideSidebar, renderSidebar } from "./sidebar.js";
 import { takeSsoResult } from "./sso.js";
@@ -13,8 +13,6 @@ import { applyTheme, loadTheme } from "./theme.js";
 import { showToast } from "./toast.js";
 import { renderTwoFactorSetup } from "./two-factor-view.js";
 import { leaveTrash, renderTrash } from "./trash-view.js";
-import { leaveBrowse, renderBrowse } from "./browse-view.js";
-import { renderUsers } from "./users-view.js";
 import type { User } from "./types.js";
 
 /** 取得 index.html 中一定存在的元素；不存在代表 HTML 與程式碼不同步，直接報錯 */
@@ -79,7 +77,6 @@ function showScreen(user: User): void {
     screen = "change";
     leaveBrowser();
     leaveTrash();
-    leaveBrowse();
     hideSidebar(sidebar);
     showAccount(user, { navigation: false });
     const steps = h("div", {});
@@ -109,15 +106,14 @@ function showHome(user: User): void {
   closeMenus();
   showAccount(user, { navigation: true });
   leaveTrash();
-  leaveBrowse();
   const isAdmin = user.role === "admin";
   const admin = { admin: isAdmin, userId: user.id };
 
   const route = currentRoute();
-  // 另一顆硬碟上的檔案只有管理員有：一般使用者回到自己的檔案。
-  // 這只是使用體驗；真正的權限檢查在後端的 FilesUser
-  if (!isAdmin && "disk" in route && route.disk !== undefined) {
-    history.replaceState(null, "", folderHref(null));
+  // 硬碟的最上層只有管理員能看：一般使用者回到自己的檔案。
+  // 這只是使用體驗；真正的權限檢查在後端
+  if (!isAdmin && (route.view === "files" || route.view === "trash") && route.location.kind === "disk") {
+    history.replaceState(null, "", filesHref(MY_FILES));
     showHome(user);
     return;
   }
@@ -125,8 +121,8 @@ function showHome(user: User): void {
   switch (route.view) {
     case "trash":
       leaveBrowser();
-      renderSidebar(sidebar, sidebarActions, "trash", { ...admin, disk: route.disk });
-      renderTrash(app, { ...admin, disk: route.disk });
+      renderSidebar(sidebar, sidebarActions, "trash", { ...admin, location: route.location });
+      renderTrash(app, { ...admin, location: route.location });
       return;
 
     case "settings":
@@ -146,36 +142,16 @@ function showHome(user: User): void {
       }
       // 不是管理員：回到 My files。replaceState 不會觸發 hashchange，也不會留下歷史紀錄。
       // 這只是使用體驗；真正的權限檢查在後端的 AdminUser
-      history.replaceState(null, "", folderHref(null));
-      break;
-
-    case "browse":
-      if (user.role === "admin") {
-        leaveBrowser();
-        renderSidebar(sidebar, sidebarActions, null, { ...admin, browsing: route.userId });
-        renderBrowse(app, route.userId, route.folderId, user.id);
-        return;
-      }
-      history.replaceState(null, "", folderHref(null));
-      break;
-
-    case "users":
-      if (isAdmin) {
-        leaveBrowser();
-        renderSidebar(sidebar, sidebarActions, null, { ...admin, disk: route.disk });
-        renderUsers(app, route.disk, user.id);
-        return;
-      }
-      history.replaceState(null, "", folderHref(null));
-      break;
+      history.replaceState(null, "", filesHref(MY_FILES));
+      renderSidebar(sidebar, sidebarActions, "files", admin);
+      renderBrowser(app, { ...admin, location: MY_FILES, path: [] });
+      return;
 
     case "files":
-      break;
+      renderSidebar(sidebar, sidebarActions, "files", { ...admin, location: route.location });
+      renderBrowser(app, { ...admin, location: route.location, path: route.path });
+      return;
   }
-
-  const disk = route.view === "files" ? route.disk : undefined;
-  renderSidebar(sidebar, sidebarActions, "files", { ...admin, disk });
-  renderBrowser(app, route.view === "files" ? route.folderId : null, { ...admin, disk });
 }
 
 function showLoggedOut(notice?: string): void {
@@ -183,7 +159,6 @@ function showLoggedOut(notice?: string): void {
   currentUser = null;
   leaveBrowser();
   leaveTrash();
-  leaveBrowse();
   closeMenus();
   account.replaceChildren();
   hideSidebar(sidebar);
@@ -245,7 +220,7 @@ function showAccount(user: User, { navigation }: { navigation: boolean }): void 
  * 而網址本來就是 #/），所以直接重新顯示。
  */
 function go(user: User, href: string): void {
-  if (window.location.hash === href || (href === folderHref(null) && window.location.hash === "")) {
+  if (window.location.hash === href || (href === filesHref(MY_FILES) && window.location.hash === "")) {
     showHome(user);
   } else {
     window.location.hash = href;
@@ -319,7 +294,7 @@ window.addEventListener("hashchange", () => {
 brand.addEventListener("click", (event) => {
   if (currentUser !== null && screen !== "change") {
     event.preventDefault();
-    go(currentUser, folderHref(null));
+    go(currentUser, filesHref(MY_FILES));
   }
 });
 
@@ -335,7 +310,7 @@ sidebar.addEventListener("click", (event) => {
     return;
   }
   event.preventDefault();
-  go(currentUser, link.getAttribute("href") ?? folderHref(null));
+  go(currentUser, link.getAttribute("href") ?? filesHref(MY_FILES));
 });
 
 // 檔案被拖放到上傳區域以外的地方時，瀏覽器預設會直接開啟那個檔案、離開 ManorCloud。

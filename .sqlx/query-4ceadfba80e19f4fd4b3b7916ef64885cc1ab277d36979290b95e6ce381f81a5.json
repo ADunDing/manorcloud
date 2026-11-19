@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT\n            users.id         AS \"id!\",\n            users.username   AS \"username!\",\n            users.role       AS \"role!\",\n            users.disabled   AS \"disabled!: bool\",\n            COALESCE(password_credentials.must_change_password, 0)\n                             AS \"must_change_password!: bool\",\n            users.created_at AS \"created_at!\"\n        FROM users\n        LEFT JOIN password_credentials ON password_credentials.user_id = users.id\n        -- 管理員在各硬碟上的檔案空間是隱藏的帳號，不是使用者\n        WHERE users.id NOT IN (SELECT user_id FROM storage_spaces)\n        ORDER BY users.username\n        ",
+  "query": "\n        SELECT\n            users.id         AS \"id!\",\n            users.username   AS \"username!\",\n            users.role       AS \"role!\",\n            users.disabled   AS \"disabled!: bool\",\n            COALESCE(password_credentials.must_change_password, 0)\n                             AS \"must_change_password!: bool\",\n            users.created_at AS \"created_at!\"\n        FROM users\n        LEFT JOIN password_credentials ON password_credentials.user_id = users.id\n        WHERE users.id = ?\n        ",
   "describe": {
     "columns": [
       {
@@ -66,7 +66,7 @@
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
@@ -77,5 +77,5 @@
       false
     ]
   },
-  "hash": "6ebe5b622e50e4979bc13fd9383e352e8ba03814cbbf7a79d179958d5ab3c757"
+  "hash": "4ceadfba80e19f4fd4b3b7916ef64885cc1ab277d36979290b95e6ce381f81a5"
 }

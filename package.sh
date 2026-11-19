@@ -69,10 +69,10 @@ fi
 echo "requires glibc $required (supported: $MAX_GLIBC and later)"
 
 # 4. Assemble the package
-FILES="manorcloud install.sh export-files.sh"
+FILES="manorcloud install.sh"
 rm -rf "dist/$NAME"
 mkdir -p "dist/$NAME"
-cp "$BINARY" install.sh deploy/export-files.sh "dist/$NAME/"
+cp "$BINARY" install.sh "dist/$NAME/"
 tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
 
 # 5. Check that the package is complete: a missing file is much worse to discover on the

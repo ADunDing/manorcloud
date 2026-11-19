@@ -1871,44 +1871,6 @@ table.files .col-location {
     gap: 12px;
 }
 
-/* ---------- 管理員：users 資料夾中每個人的資料夾 ---------- */
-
-.disk-folder-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 12px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.disk-folder {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 18px 10px 14px;
-    border: 1px solid var(--border-soft);
-    border-radius: 10px;
-    color: var(--fg);
-    text-decoration: none;
-}
-
-.disk-folder:hover {
-    background: var(--bar);
-}
-
-.disk-folder svg {
-    color: var(--accent);
-}
-
-.disk-folder-name {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 .dialog-field .hint {
     font-weight: 400;
 }
@@ -1961,7 +1923,3 @@ table.files .col-location {
     font-weight: 600;
 }
 
-.empty-state + .disk-folder-grid,
-.trash-banner + .disk-folder-grid {
-    margin-top: 4px;
-}

@@ -1,205 +1,124 @@
-//! 儲存層：決定 blob 在磁碟上的位置。
+//! 每顆硬碟（儲存位置）上 ManorCloud 自己用的資料夾，以及磁碟容量。
 //!
-//! 檔案內容以隨機的 storage_key 命名，使用者輸入永遠不會進入這裡的路徑。
+//! ```text
+//! /mnt/disk2/
+//! ├── .manorcloud/
+//! │   ├── volume        ← 標記檔：硬碟有掛載（資料目錄沒有）
+//! │   ├── tmp/          ← 複製、一般上傳的暫存
+//! │   ├── uploads/      ← 分段上傳的暫存檔 {id}.part
+//! │   └── trash/        ← 垃圾桶 {id}
+//! ├── users/
+//! │   └── jerry/        ← 一般使用者的 My files
+//! └── 相片/              ← 管理員的檔案
+//! ```
 //!
-//! 目錄結構：
-//!   {data_dir}/tmp/     上傳中的暫存檔
-//!   {data_dir}/blobs/   完成的檔案，以 key 前兩字元分層
-//! 兩者必須在同一個檔案系統，rename 才是原子操作。
-
-mod temp;
+//! 暫存與垃圾桶都和檔案在同一個檔案系統：放到正式的名稱上、放進垃圾桶都只是改名。
 
 pub mod archive;
 pub mod resumable;
-
-pub use temp::{DEFAULT_MAX_UPLOAD_BYTES, StorageError, TempBlob};
 
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use tokio::io::AsyncReadExt;
+use crate::tree::SYSTEM_DIR;
 
-/// storage_key 的長度：128 位元以小寫 hex 編碼為 32 個字元
+/// 隨機編號的長度：128 位元以小寫 hex 編碼為 32 個字元
 pub const KEY_LEN: usize = 32;
 
-/// 暫存檔目錄名稱
-const TMP_DIR: &str = "tmp";
-/// 完成檔案的目錄名稱
-const BLOBS_DIR: &str = "blobs";
+/// 單一檔案的預設大小上限：10 GiB。
+/// 串流寫入時記憶體用量與檔案大小無關，這個上限保護的是磁碟空間。
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-/// 分段上傳的暫存檔目錄。與 tmp/ 分開：垃圾回收會刪除 tmp/ 中超過 24 小時的檔案，
-/// 而分段上傳的暫存檔只要還有進度，就必須保留
-const UPLOADS_DIR: &str = "uploads";
+/// 一般使用者的資料夾都在這裡：`{硬碟}/users/{名稱}`
+pub const USERS_DIR: &str = "users";
 
 /// 儲存位置的標記檔。加入位置時建立，之後每次使用前確認它還在。
 ///
 /// 外接硬碟沒有掛載時，掛載點只是系統碟上一個空的資料夾，寫得進去：
 /// 沒有這個檢查的話，檔案會默默寫到系統碟上，硬碟接回來之後就「消失」了
-pub const VOLUME_MARKER: &str = ".manorcloud-storage";
+const VOLUME_MARKER: &str = "volume";
 
-/// 複製 blob 時每次讀取的大小：固定的一小塊，記憶體用量與檔案大小無關
-const COPY_CHUNK_BYTES: usize = 256 * 1024;
+/// 舊版的標記檔，放在儲存位置的最上層。轉換時換成新的
+pub const LEGACY_VOLUME_MARKER: &str = ".manorcloud-storage";
 
-/// 啟動時呼叫：建立 `tmp/` 與 `blobs/`，並讓它們在 `data_dir` 中的紀錄落盤。
-///
-/// 在啟動時一次處理好，之後 `persist` 只需要負責分層目錄（blobs/ab/）的落盤，
-/// 不必在每次上傳時都去 sync 最上層的 `data_dir`。
-/// 已存在的目錄不受影響，可以重複呼叫。
-pub fn init_dirs(data_dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(data_dir.join(TMP_DIR))?;
-    std::fs::create_dir_all(data_dir.join(BLOBS_DIR))?;
-    std::fs::create_dir_all(data_dir.join(UPLOADS_DIR))?;
+/// `{硬碟}/.manorcloud`
+pub fn system_dir(root: &Path) -> PathBuf {
+    root.join(SYSTEM_DIR)
+}
 
-    // 讓 tmp/ 與 blobs/ 這兩筆目錄紀錄寫進磁碟
-    #[cfg(unix)]
-    std::fs::File::open(data_dir)?.sync_all()?;
+/// 複製、一般上傳的暫存：`{硬碟}/.manorcloud/tmp`
+pub fn tmp_dir(root: &Path) -> PathBuf {
+    system_dir(root).join("tmp")
+}
 
+/// 分段上傳的暫存檔：`{硬碟}/.manorcloud/uploads`。與 tmp/ 分開：
+/// 垃圾回收會刪除 tmp/ 中超過寬限期的檔案，而分段上傳的暫存檔只要還有進度，就必須保留
+pub fn uploads_dir(root: &Path) -> PathBuf {
+    system_dir(root).join("uploads")
+}
+
+/// 垃圾桶：`{硬碟}/.manorcloud/trash`
+pub fn trash_dir(root: &Path) -> PathBuf {
+    system_dir(root).join("trash")
+}
+
+/// 垃圾桶中的一個項目：`{硬碟}/.manorcloud/trash/{id}`
+pub fn trash_path(root: &Path, id: i64) -> PathBuf {
+    trash_dir(root).join(id.to_string())
+}
+
+/// 建立 `.manorcloud/` 底下的資料夾。已存在的不受影響，可以重複呼叫
+pub fn init_dirs(root: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(tmp_dir(root))?;
+    std::fs::create_dir_all(uploads_dir(root))?;
+    std::fs::create_dir_all(trash_dir(root))?;
     Ok(())
-}
-
-/// 路徑所在檔案系統，一般使用者可用的空間（位元組）。匯出與分段上傳共用。
-///
-/// u64::from：statvfs 的欄位在 64 位元平台是 u64、在 32 位元的 armv7 可能是 u32，兩者都能無損轉換。
-/// clippy 只檢查目前的平台，在 64 位元上會認為轉換多餘；但在 32 位元上它是必要的
-#[allow(clippy::useless_conversion)]
-pub fn available_bytes(path: &Path) -> io::Result<u64> {
-    let c_path = CString::new(path.as_os_str().as_bytes())?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: c_path 是以 NUL 結尾的合法字串；stat 指向足夠大小的記憶體，成功時由 statvfs 填滿
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: rc == 0 代表 statvfs 已經填滿整個結構
-    let stat = unsafe { stat.assume_init() };
-    Ok(u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)))
-}
-
-/// 刪除一個已完成的 blob。
-///
-/// 用於「blob 已 persist、但資料庫寫入失敗」時的清理。
-/// key 一樣經過 `blob_path` 驗證，格式不符時回傳錯誤而不是去刪任意路徑。
-pub async fn remove_blob(data_dir: &Path, key: &str) -> io::Result<()> {
-    let path = blob_path(data_dir, key)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid storage key"))?;
-    tokio::fs::remove_file(path).await
-}
-
-/// 把一個 blob 的內容複製成新的 blob，回傳新的 storage_key 與大小。
-///
-/// 經過 TempBlob：內容先寫進 tmp/ 的暫存檔並落盤，才原子地搬到正式位置，
-/// 與上傳完全相同的保證。中途失敗或被取消時，暫存檔由 TempBlob 的 Drop 清掉。
-///
-/// 真的複製一份，而不是讓兩筆紀錄共用同一個 blob：共用就必須計算引用次數，
-/// 刪除與垃圾回收都要跟著改，任何一處算錯都會刪掉別人還在用的內容。
-pub async fn copy_blob(data_dir: &Path, key: &str) -> Result<(String, u64), StorageError> {
-    let source = blob_path(data_dir, key).ok_or(StorageError::InvalidKey)?;
-    let mut input = tokio::fs::File::open(&source).await?;
-    // 複製的大小由來源決定，上傳上限不適用（來源本身已經通過了上限）
-    let mut blob = TempBlob::create(data_dir, u64::MAX).await?;
-
-    let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
-    loop {
-        let read = input.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        blob.write_chunk(&buffer[..read]).await?;
-    }
-
-    let new_key = generate_storage_key();
-    let size = blob.persist(&new_key).await?;
-    Ok((new_key, size))
-}
-
-/// 把一個 blob 複製到另一個儲存位置，**保留同一個 storage_key**，回傳大小。
-/// 用於更換使用者的儲存位置。
-///
-/// 與 `copy_blob` 相同，經過目的地的 TempBlob：落盤之後才原子地出現在 blobs/ 中，
-/// 中途中斷不會在目的地留下不完整的 blob。
-/// 目的地已經有同樣大小的檔案時直接略過：搬移被中斷之後重新開始，不必從頭複製
-pub async fn copy_blob_to(from: &Path, key: &str, to: &Path) -> Result<u64, StorageError> {
-    let source = blob_path(from, key).ok_or(StorageError::InvalidKey)?;
-    let dest = blob_path(to, key).ok_or(StorageError::InvalidKey)?;
-    let mut input = tokio::fs::File::open(&source).await?;
-    let size = input.metadata().await?.len();
-
-    if let Ok(existing) = tokio::fs::metadata(&dest).await
-        && existing.is_file()
-        && existing.len() == size
-    {
-        return Ok(size);
-    }
-
-    let mut blob = TempBlob::create(to, u64::MAX).await?;
-    let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
-    loop {
-        let read = input.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        blob.write_chunk(&buffer[..read]).await?;
-    }
-    blob.persist(key).await
-}
-
-/// 使用者的資料夾：`{位置}/{folder}`。底下的結構與 `init_dirs` 建立的相同。
-///
-/// folder 來自帳號名稱（只有小寫英文、數字、底線與連字號）。這裡再檢查一次：
-/// 它組成的是硬碟上的路徑，不合法的名稱（空的、`.`、`..`、含 `/`）回傳 None
-pub fn user_root(volume_root: &Path, folder: &str) -> Option<PathBuf> {
-    let valid = !folder.is_empty()
-        && folder.len() <= 64
-        && !folder.starts_with('.')
-        && folder
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.');
-    valid.then(|| volume_root.join(folder))
 }
 
 /// 建立儲存位置的標記檔（見 `VOLUME_MARKER`）
 pub fn mark_volume(root: &Path) -> io::Result<()> {
-    let marker = root.join(VOLUME_MARKER);
+    std::fs::create_dir_all(system_dir(root))?;
+    let marker = system_dir(root).join(VOLUME_MARKER);
     std::fs::write(
         &marker,
-        b"This folder is a ManorCloud storage location. Don't delete this file.\n",
+        b"This disk is a ManorCloud storage location. Don't delete this folder.\n",
     )?;
     std::fs::File::open(&marker)?.sync_all()
 }
 
-/// 儲存位置是否可以使用：標記檔還在（硬碟有掛載）
+/// 儲存位置是否可以使用：標記檔還在（硬碟有掛載）。
+/// 只有舊版的標記檔時（升級之後第一次使用、轉換時沒有掛載的硬碟），換成新的標記檔
 pub fn volume_ready(root: &Path) -> bool {
-    root.join(VOLUME_MARKER).is_file()
+    if system_dir(root).join(VOLUME_MARKER).is_file() {
+        return true;
+    }
+    let legacy = root.join(LEGACY_VOLUME_MARKER);
+    if legacy.is_file() && mark_volume(root).is_ok() {
+        let _ = std::fs::remove_file(legacy);
+        return true;
+    }
+    false
 }
 
-/// 完成檔案的根目錄：`{data_dir}/blobs`
-pub fn blobs_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(BLOBS_DIR)
+/// 使用者資料夾的名稱（來自帳號名稱：只有英文、數字、底線、連字號與點）。
+/// 它組成的是硬碟上的路徑，這裡再檢查一次：不合法的名稱（空的、點開頭、含 `/`）回傳 false
+pub fn is_valid_folder_name(folder: &str) -> bool {
+    !folder.is_empty()
+        && folder.len() <= 64
+        && !folder.starts_with('.')
+        && folder
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
 }
 
-/// 分段上傳暫存檔的目錄
-pub fn uploads_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(UPLOADS_DIR)
+/// 使用者的 My files：`{硬碟}/users/{folder}`；名稱不合法時回傳 None
+pub fn user_dir(root: &Path, folder: &str) -> Option<PathBuf> {
+    is_valid_folder_name(folder).then(|| root.join(USERS_DIR).join(folder))
 }
 
-/// 暫存檔目錄：`{data_dir}/tmp`
-pub fn tmp_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(TMP_DIR)
-}
-
-/// 是否為合法的分層目錄名稱：恰好 2 個小寫 hex 字元
-pub fn is_shard_name(name: &str) -> bool {
-    name.len() == 2 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// 是否為 TempBlob 產生的暫存檔名稱：`<合法 key>.part`
-pub fn is_temp_file_name(name: &str) -> bool {
-    name.strip_suffix(".part").is_some_and(is_valid_key)
-}
-
-/// 產生新的 storage_key：128 位元隨機數，小寫 hex 編碼。
+/// 產生隨機編號：128 位元隨機數，小寫 hex 編碼。
 ///
 /// 不使用 base64：它區分大小寫，而 macOS、Windows 與 exFAT 外接硬碟
 /// 預設不分大小寫，"Ab" 與 "aB" 會指向同一個檔案。
@@ -209,37 +128,25 @@ pub fn generate_storage_key() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 驗證 key 是否恰好為 32 個小寫 hex 字元
+/// 驗證是否恰好為 32 個小寫 hex 字元
 pub fn is_valid_key(key: &str) -> bool {
     key.len() == KEY_LEN && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// 取得 blob 在磁碟上的路徑：`{data_dir}/blobs/{前兩字元}/{key}`。
-///
-/// key 雖由伺服器自行產生，仍必須驗證格式（深度防禦）：
-/// 程式可能有 bug，資料庫裡的值也可能被竄改。格式不符時回傳 None。
-///
-/// 以前兩字元分層，讓檔案分散到 256 個子目錄，
-/// 避免單一資料夾檔案過多導致效能下降或超出檔案系統上限。
-pub fn blob_path(data_dir: &Path, key: &str) -> Option<PathBuf> {
-    if !is_valid_key(key) {
-        return None;
-    }
-
-    // 已驗證全為 ASCII，以位元組切片是安全的
-    let shard = &key[..2];
-    Some(data_dir.join(BLOBS_DIR).join(shard).join(key))
+/// 路徑所在檔案系統，一般使用者可用的空間（位元組）
+pub fn available_bytes(path: &Path) -> io::Result<u64> {
+    disk_space(path).map(|space| space.available)
 }
 
 /// 檔案系統的容量（位元組）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiskSpace {
     pub total: u64,
-    /// 一般使用者可以使用的空間（不含保留給 root 的部分），與 available_bytes 相同
+    /// 一般使用者可以使用的空間（不含保留給 root 的部分）
     pub available: u64,
 }
 
-/// 路徑所在檔案系統的總容量與可用空間，給畫面上的容量顯示
+/// 路徑所在檔案系統的總容量與可用空間
 // statvfs 欄位的型別依平台而不同（u32 或 u64），一律轉成 u64；在 u64 的平台上 clippy 會說轉換多餘
 #[allow(clippy::useless_conversion)]
 pub fn disk_space(path: &Path) -> io::Result<DiskSpace> {
@@ -262,255 +169,33 @@ pub fn disk_space(path: &Path) -> io::Result<DiskSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
-    const VALID: &str = "0123456789abcdef0123456789abcdef";
 
     #[test]
-    fn init_dirs_creates_tmp_and_blobs() {
-        let dir = tempfile::tempdir().unwrap();
-
-        init_dirs(dir.path()).unwrap();
-
-        assert!(dir.path().join(TMP_DIR).is_dir());
-        assert!(dir.path().join(BLOBS_DIR).is_dir());
+    fn keys_are_lowercase_hex() {
+        let key = generate_storage_key();
+        assert!(is_valid_key(&key));
+        assert_ne!(key, generate_storage_key());
+        assert!(!is_valid_key("../../etc/passwd"));
+        assert!(!is_valid_key(&key.to_uppercase()));
     }
 
     #[test]
-    fn init_dirs_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-
-        init_dirs(dir.path()).unwrap();
-        init_dirs(dir.path()).unwrap();
-
-        assert!(dir.path().join(BLOBS_DIR).is_dir());
-    }
-
-    #[test]
-    fn init_dirs_creates_missing_data_dir() {
-        // data_dir 本身不存在時，create_dir_all 會一併建立
-        let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("not").join("yet");
-
-        init_dirs(&nested).unwrap();
-
-        assert!(nested.join(TMP_DIR).is_dir());
-    }
-
-    #[tokio::test]
-    async fn remove_blob_deletes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = blob_path(dir.path(), VALID).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"x").unwrap();
-
-        remove_blob(dir.path(), VALID).await.unwrap();
-
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn remove_blob_rejects_invalid_key() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let err = remove_blob(dir.path(), "../../etc/passwd")
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn generated_keys_are_valid() {
-        for _ in 0..100 {
-            let key = generate_storage_key();
-            assert!(is_valid_key(&key), "{key}");
-        }
-    }
-
-    #[test]
-    fn generated_keys_are_unique() {
-        let keys: HashSet<String> = (0..1000).map(|_| generate_storage_key()).collect();
-        assert_eq!(keys.len(), 1000);
-    }
-
-    #[test]
-    fn valid_key_produces_sharded_path() {
-        let path = blob_path(Path::new("/srv/data"), VALID).unwrap();
-        assert_eq!(
-            path,
-            Path::new("/srv/data/blobs/01/0123456789abcdef0123456789abcdef")
-        );
-    }
-
-    #[test]
-    fn attack_strings_are_rejected() {
-        let data = Path::new("/srv/data");
-        for key in [
-            "",
-            "../x",
-            "../../../../etc/passwd",
-            "/etc/passwd",
-            "0123456789abcdef/123456789abcdef", // 含 /，長度剛好 32
-            "0123456789abcdef\\123456789abcdef", // 含 \，長度剛好 32
-            "..23456789abcdef0123456789abcdef", // 開頭是 ..，長度剛好 32
-            "0123456789abcdef0123456789abcde",  // 31 字元
-            "0123456789abcdef0123456789abcdef0", // 33 字元
-            "0123456789ABCDEF0123456789ABCDEF", // 大寫
-            "0123456789abcdeg0123456789abcdef", // 含非 hex 的 g
-            "0123456789abcdef0123456789abcd\0f", // 含 NUL
-            "é123456789abcdef0123456789abcde",  // 多位元組字元湊成 32 位元組
-        ] {
-            assert_eq!(blob_path(data, key), None, "{key:?}");
-        }
-    }
-
-    /// Rust 的陷阱：join 一個絕對路徑時，會整個「取代」原路徑，而不是接在後面。
-    /// 這就是為什麼不能把未驗證的輸入直接交給 join。
-    #[test]
-    #[cfg(unix)]
-    fn join_with_absolute_path_replaces_base() {
-        // 刻意示範陷阱：clippy 正確地指出這通常是錯誤，而這個測試要證明的正是它的後果
-        #[allow(clippy::join_absolute_paths)]
-        let joined = Path::new("/data").join("/etc/passwd");
-        assert_eq!(joined, Path::new("/etc/passwd"));
-    }
-
-    /// 同樣地，join 不會解析 ..，結果仍然是一條會跳出去的路徑
-    #[test]
-    #[cfg(unix)]
-    fn join_does_not_resolve_parent_components() {
-        let joined = Path::new("/data").join("../etc/passwd");
-        assert_eq!(joined, Path::new("/data/../etc/passwd"));
-        // 字串上看起來在 /data 底下，實際上指向 /etc/passwd
-        assert!(joined.starts_with("/data"));
-    }
-
-    #[test]
-    fn shard_names() {
-        assert!(is_shard_name("00"));
-        assert!(is_shard_name("af"));
-        for name in ["", "a", "abc", "AF", "g0", "..", "./"] {
-            assert!(!is_shard_name(name), "{name:?}");
-        }
-    }
-
-    #[test]
-    fn temp_file_names() {
-        assert!(is_temp_file_name(&format!("{VALID}.part")));
-        for name in [
-            VALID,                        // 沒有 .part
-            "notes.part",                 // 不是合法 key
-            &format!("{VALID}.part.bak"), // 多了尾巴
-            &format!("{VALID}.PART"),     // 大寫副檔名
-            ".part",
-        ] {
-            assert!(!is_temp_file_name(name), "{name:?}");
-        }
-    }
-
-    #[test]
-    fn user_root_rejects_names_that_escape_the_location() {
+    fn user_folders_stay_inside_users() {
         let root = Path::new("/mnt/disk2");
         assert_eq!(
-            user_root(root, "alice"),
-            Some(PathBuf::from("/mnt/disk2/alice"))
+            user_dir(root, "jerry"),
+            Some(PathBuf::from("/mnt/disk2/users/jerry"))
         );
-        for bad in ["", ".", "..", "../etc", "a/b", ".hidden", "a b"] {
-            assert_eq!(user_root(root, bad), None, "{bad:?}");
+        for bad in ["", ".", "..", "a/b", ".hidden", "a b"] {
+            assert_eq!(user_dir(root, bad), None, "{bad:?}");
         }
     }
 
     #[test]
-    fn volume_marker_tells_whether_the_disk_is_there() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!volume_ready(dir.path()));
-
-        mark_volume(dir.path()).unwrap();
-
-        assert!(volume_ready(dir.path()));
-    }
-
-    #[test]
-    fn disk_space_reports_a_plausible_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let space = disk_space(dir.path()).unwrap();
-        assert!(space.total > 0);
-        assert!(space.available <= space.total);
-    }
-
-    #[test]
-    fn disk_space_of_a_missing_path_is_an_error() {
-        assert!(disk_space(Path::new("/definitely/not/here")).is_err());
-    }
-
-    #[tokio::test]
-    async fn copy_blob_creates_an_independent_copy() {
-        let dir = tempfile::tempdir().unwrap();
-        // 比一次讀取的大小還大，確認分段複製的接縫正確
-        let content: Vec<u8> = (0..COPY_CHUNK_BYTES * 2 + 123)
-            .map(|i| u8::try_from(i % 251).unwrap())
-            .collect();
-        let mut blob = TempBlob::create(dir.path(), u64::MAX).await.unwrap();
-        blob.write_chunk(&content).await.unwrap();
-        blob.persist(VALID).await.unwrap();
-
-        let (key, size) = copy_blob(dir.path(), VALID).await.unwrap();
-
-        assert_ne!(key, VALID);
-        assert_eq!(size, content.len() as u64);
-        assert_eq!(
-            std::fs::read(blob_path(dir.path(), &key).unwrap()).unwrap(),
-            content
-        );
-        // 刪掉原本的，複本不受影響
-        remove_blob(dir.path(), VALID).await.unwrap();
-        assert!(blob_path(dir.path(), &key).unwrap().exists());
-        // 暫存檔都已搬走或清掉
-        assert_eq!(std::fs::read_dir(tmp_dir(dir.path())).unwrap().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn copy_blob_to_keeps_the_key_and_skips_finished_copies() {
-        let from = tempfile::tempdir().unwrap();
-        let to = tempfile::tempdir().unwrap();
-        init_dirs(to.path()).unwrap();
-        let mut blob = TempBlob::create(from.path(), u64::MAX).await.unwrap();
-        blob.write_chunk(b"hello").await.unwrap();
-        blob.persist(VALID).await.unwrap();
-
-        assert_eq!(
-            copy_blob_to(from.path(), VALID, to.path()).await.unwrap(),
-            5
-        );
-        let copied = blob_path(to.path(), VALID).unwrap();
-        assert_eq!(std::fs::read(&copied).unwrap(), b"hello");
-
-        // 再複製一次：已經有同樣大小的檔案，不會重寫（mtime 不變）
-        let before = std::fs::metadata(&copied).unwrap().modified().unwrap();
-        assert_eq!(
-            copy_blob_to(from.path(), VALID, to.path()).await.unwrap(),
-            5
-        );
-        assert_eq!(
-            std::fs::metadata(&copied).unwrap().modified().unwrap(),
-            before
-        );
-        // 來源保持原狀，暫存檔都已經搬走
-        assert!(blob_path(from.path(), VALID).unwrap().exists());
-        assert_eq!(std::fs::read_dir(tmp_dir(to.path())).unwrap().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn copy_blob_of_a_missing_source_fails_without_leftovers() {
-        let dir = tempfile::tempdir().unwrap();
-        init_dirs(dir.path()).unwrap();
-
-        let result = copy_blob(dir.path(), VALID).await;
-
-        assert!(
-            matches!(result, Err(StorageError::Io(ref e)) if e.kind() == io::ErrorKind::NotFound)
-        );
-        assert_eq!(std::fs::read_dir(tmp_dir(dir.path())).unwrap().count(), 0);
+    fn the_marker_shows_the_disk_is_mounted() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!volume_ready(root.path()));
+        mark_volume(root.path()).unwrap();
+        assert!(volume_ready(root.path()));
     }
 }

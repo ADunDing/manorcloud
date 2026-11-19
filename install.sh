@@ -291,7 +291,7 @@ print_summary() {
     echo "  Status:   systemctl status manorcloud"
     echo "  Logs:     journalctl -u manorcloud -f"
     echo "  Settings: $ENV_FILE (then: sudo systemctl restart manorcloud)"
-    echo "  Export:   sudo manorcloud export <output-dir>"
+    echo "  Files:    in the data directory (/var/lib/manorcloud/data by default), with their real names"
     echo "  Remove:   sudo manorcloud uninstall (add --purge to also delete /var/lib/manorcloud)"
 }
 

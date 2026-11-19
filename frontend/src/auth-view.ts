@@ -194,7 +194,7 @@ async function addSsoButton(form: HTMLElement, errorBox: HTMLElement): Promise<v
 
 // ==================== 修改帳號名稱與密碼 ====================
 
-export interface ChangeCredentialsOptions {
+interface ChangeCredentialsOptions {
   /**
    * 強制模式（首次登入、臨時密碼）：新密碼必填，沒有取消按鈕。
    * 自願模式（帳號設定）：可以只改名稱，有取消按鈕。

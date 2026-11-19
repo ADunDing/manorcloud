@@ -1,39 +1,32 @@
-// 網址（hash）與畫面的對應：
+// 網址（hash）與畫面的對應。資料夾以路徑表示，每一段各自編碼：
 //
-//   #/                     My files
-//   #/folder/{id}          某個資料夾
-//   #/trash                垃圾桶
-//   #/settings/{section}   個人設定：account、sign-in、appearance
-//   #/admin/{section}      管理（只有管理員）：users、storage、sign-in
-//   #/disk/{disk}          管理員在另一顆硬碟上的檔案（disk 是儲存位置的編號，資料目錄是 default）
-//   #/disk/{disk}/folder/{id}
-//   #/disk/{disk}/trash    那一顆硬碟上的垃圾桶
-//   #/disk/{disk}/users    放在那一顆硬碟上的使用者（My files 與每顆硬碟第一層的 users 資料夾）
-//   #/browse/{user}        管理員瀏覽某位使用者的檔案（唯讀）
-//   #/browse/{user}/folder/{id}
+//   #/files/相片/2026        My files 中的資料夾（#/ 是 My files 的最上層）
+//   #/trash                  垃圾桶
+//   #/disk/{disk}/files/…    管理員：一顆硬碟的最上層（disk 是儲存位置的編號，資料目錄是 default）
+//   #/disk/{disk}/trash      那一顆硬碟上的垃圾桶
+//   #/settings/{section}     個人設定：account、sign-in、appearance
+//   #/admin/{section}        管理（只有管理員）：users、storage、sign-in
 //
 // 不認得的網址一律回到 My files；不認得的區塊回到該頁的第一個區塊。
-// 加入新的區塊時，只要加進對應的清單。
 
 export type SettingsSection = "account" | "sign-in" | "appearance";
 export type AdminSection = "users" | "storage" | "sign-in";
 
-/**
- * 管理員的檔案在哪一顆硬碟：undefined 是自己的檔案（My files），
- * null 是資料目錄（Default），數字是儲存位置的編號
- */
-export type Disk = number | null | undefined;
+/** 一組檔案在哪裡：自己的 My files，或管理員看到的一顆硬碟 */
+export type Location =
+  | { readonly kind: "me" }
+  | { readonly kind: "disk"; readonly disk: number | null };
 
-export type Route =
-  | { readonly view: "files"; readonly folderId: number | null; readonly disk: Disk }
-  | { readonly view: "trash"; readonly disk: Disk }
-  | { readonly view: "users"; readonly disk: number | null }
+export const MY_FILES: Location = { kind: "me" };
+
+type Route =
+  | { readonly view: "files"; readonly location: Location; readonly path: readonly string[] }
+  | { readonly view: "trash"; readonly location: Location }
   | { readonly view: "settings"; readonly section: SettingsSection }
-  | { readonly view: "admin"; readonly section: AdminSection }
-  | { readonly view: "browse"; readonly userId: number; readonly folderId: number | null };
+  | { readonly view: "admin"; readonly section: AdminSection };
 
-export const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "sign-in", "appearance"];
-export const ADMIN_SECTIONS: readonly AdminSection[] = ["users", "storage", "sign-in"];
+const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "sign-in", "appearance"];
+const ADMIN_SECTIONS: readonly AdminSection[] = ["users", "storage", "sign-in"];
 
 export const TRASH_HREF = "#/trash";
 
@@ -41,56 +34,68 @@ export function currentRoute(): Route {
   return parseRoute(window.location.hash);
 }
 
-export function parseRoute(hash: string): Route {
-  const path = hash.replace(/^#/, "");
-
-  // 管理員在另一顆硬碟上的檔案：#/disk/{disk}/...，後面的部分與自己的檔案相同
-  const onDisk = /^\/disk\/(default|\d{1,15})(\/.*)?$/.exec(path);
-  const disk: Disk =
-    onDisk?.[1] === undefined ? undefined : onDisk[1] === "default" ? null : Number(onDisk[1]);
-  const rest = onDisk === null ? path : (onDisk[2] ?? "/");
-
-  if (rest === "/trash") {
-    return { view: "trash", disk };
-  }
-
-  if (rest === "/users" && disk !== undefined) {
-    return { view: "users", disk };
-  }
+function parseRoute(hash: string): Route {
+  const raw = hash.replace(/^#/, "");
 
   // 位數上限：比 Number.MAX_SAFE_INTEGER 短，轉換後一定是精確的整數
-  const folder = /^\/folder\/(\d{1,15})$/.exec(rest)?.[1];
-  if (folder !== undefined) {
-    const id = Number(folder);
-    if (id > 0) {
-      return { view: "files", folderId: id, disk };
+  const disk = /^\/disk\/(default|\d{1,15})(\/.*)?$/.exec(raw);
+  if (disk?.[1] !== undefined) {
+    const id = disk[1] === "default" ? null : Number(disk[1]);
+    if (id === null || id > 0) {
+      const location: Location = { kind: "disk", disk: id };
+      const rest = disk[2] ?? "/";
+      if (rest === "/trash") {
+        return { view: "trash", location };
+      }
+      const files = /^\/files((?:\/[^/]*)*)$/.exec(rest);
+      const path = parsePath(files?.[1] ?? "");
+      if (path !== null) {
+        return { view: "files", location, path };
+      }
     }
   }
 
-  if (disk !== undefined) {
-    return { view: "files", folderId: null, disk };
+  if (raw === "/trash") {
+    return { view: "trash", location: MY_FILES };
   }
 
-  const browse = /^\/browse\/(\d{1,15})(?:\/folder\/(\d{1,15}))?$/.exec(path);
-  if (browse?.[1] !== undefined) {
-    const userId = Number(browse[1]);
-    const folderId = browse[2] === undefined ? null : Number(browse[2]);
-    if (userId > 0 && (folderId === null || folderId > 0)) {
-      return { view: "browse", userId, folderId };
+  const files = /^\/files((?:\/[^/]*)*)$/.exec(raw);
+  if (files !== null) {
+    const path = parsePath(files[1] ?? "");
+    if (path !== null) {
+      return { view: "files", location: MY_FILES, path };
     }
   }
 
-  const settings = /^\/settings(?:\/([a-z-]+))?\/?$/.exec(path);
+  const settings = /^\/settings(?:\/([a-z-]+))?\/?$/.exec(raw);
   if (settings !== null) {
     return { view: "settings", section: pick(SETTINGS_SECTIONS, settings[1]) ?? "account" };
   }
 
-  const admin = /^\/admin(?:\/([a-z-]+))?\/?$/.exec(path);
+  const admin = /^\/admin(?:\/([a-z-]+))?\/?$/.exec(raw);
   if (admin !== null) {
     return { view: "admin", section: pick(ADMIN_SECTIONS, admin[1]) ?? "users" };
   }
 
-  return { view: "files", folderId: null, disk: undefined };
+  return { view: "files", location: MY_FILES, path: [] };
+}
+
+/** "/相片/2026" → ["相片", "2026"]。編碼錯誤或含有 . 與 .. 時回傳 null */
+function parsePath(raw: string): string[] | null {
+  const parts: string[] = [];
+  for (const segment of raw.split("/").filter((part) => part !== "")) {
+    let name: string;
+    try {
+      name = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+    if (name === "." || name === ".." || name.includes("/")) {
+      return null;
+    }
+    parts.push(name);
+  }
+  return parts;
 }
 
 /** value 是清單中的其中一個時回傳它（型別也跟著確定），否則 undefined */
@@ -98,18 +103,23 @@ function pick<T extends string>(options: readonly T[], value: string | undefined
   return options.find((option) => option === value);
 }
 
-export function folderHref(folderId: number | null, disk: Disk = undefined): string {
-  const base = disk === undefined ? "#" : `#/disk/${disk ?? "default"}`;
-  return folderId === null ? `${base}/` : `${base}/folder/${folderId}`;
+function encodePath(path: readonly string[]): string {
+  return path.map((part) => `/${encodeURIComponent(part)}`).join("");
 }
 
-export function trashHref(disk: Disk = undefined): string {
-  return disk === undefined ? TRASH_HREF : `#/disk/${disk ?? "default"}/trash`;
+/** 一個資料夾 */
+export function filesHref(location: Location, path: readonly string[] = []): string {
+  switch (location.kind) {
+    case "me":
+      return path.length === 0 ? "#/" : `#/files${encodePath(path)}`;
+    case "disk":
+      return `#/disk/${location.disk ?? "default"}/files${encodePath(path)}`;
+  }
 }
 
-/** 放在這一顆硬碟上的使用者（第一層的 users 資料夾） */
-export function usersHref(disk: number | null): string {
-  return `#/disk/${disk ?? "default"}/users`;
+/** 垃圾桶 */
+export function trashHref(location: Location = MY_FILES): string {
+  return location.kind === "disk" ? `#/disk/${location.disk ?? "default"}/trash` : TRASH_HREF;
 }
 
 export function settingsHref(section: SettingsSection = "account"): string {
@@ -118,9 +128,4 @@ export function settingsHref(section: SettingsSection = "account"): string {
 
 export function adminHref(section: AdminSection = "users"): string {
   return `#/admin/${section}`;
-}
-
-/** 管理員瀏覽某位使用者的檔案 */
-export function browseHref(userId: number, folderId: number | null = null): string {
-  return folderId === null ? `#/browse/${userId}` : `#/browse/${userId}/folder/${folderId}`;
 }

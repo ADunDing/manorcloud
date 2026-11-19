@@ -14,7 +14,10 @@ dependencies, and it runs comfortably on a Raspberry Pi.
 
 ## Features
 
-- **Files and folders** in the browser: upload by drag and drop, download, rename, move, delete
+- **Files and folders** in the browser: upload by drag and drop, download, rename, copy, move,
+  delete (with a trash you can restore from)
+- **Real file names on disk**: the files on the server are ordinary files and folders with their
+  real names, so you can back them up or copy them out with any tool
 - **Large uploads that survive interruptions**: big files are sent in pieces, retried
   automatically when the connection drops, and can be resumed after reloading the page by
   choosing the same file again
@@ -22,6 +25,8 @@ dependencies, and it runs comfortably on a Raspberry Pi.
 - **Several users**, managed by an administrator; each user sees only their own files
 - **Several disks**: an administrator can keep each user's files on a different disk, and
   moves existing files there in the background
+- **Hidden files** (such as `.DS_Store`) are hidden unless you choose to show them in
+  **Settings → Appearance**
 - **Same name, no surprises**: uploading a file whose name is taken keeps both
   (`photo.jpg`, `photo (1).jpg`)
 - **Light**: about 3 MB to download, a few MB of memory when idle
@@ -105,7 +110,7 @@ there; the comments in the configuration file show how.
 To use more than one disk, add each one in **Administration → Storage**, then choose where each
 user's files are kept with **Change storage location** in **Administration → Users**. Existing
 files are moved in the background; until that finishes the user can browse and download, but
-not upload.
+not change anything.
 
 A storage location is a folder that already exists and that the service can write to:
 
@@ -122,14 +127,26 @@ ReadWritePaths=/mnt/disk2/manorcloud
 
 Then run `sudo systemctl restart manorcloud`. The database always stays on the local disk.
 
-Each user's files are kept in a folder named after them, for example
-`/mnt/disk2/manorcloud/alice/`. The file names inside are random: the real names and folders
-are in the database, so use ManorCloud (or `manorcloud export`) to get the files out.
-Administrators also get a space of their own on every other disk, listed in the sidebar under
-**My files**, and work with it just like My files. At the top level of My files and of each
-disk, a read-only **users** folder lists the people whose files are kept on that disk;
-administrators can open and download their files there, but not change them.
-`manorcloud uninstall --purge` doesn't touch these folders; delete them yourself if you no
+A NAS share (NFS, SMB) works the same way: mount it on this computer first (for example in
+`/etc/fstab`), then add the mounted folder as a storage location. If the disk or share isn't
+mounted, ManorCloud notices and refuses to write there instead of filling the empty mount point.
+
+Files are kept with their real names and folders. On every disk (the data directory and each
+storage location) it looks like this:
+
+```text
+/mnt/disk2/manorcloud/
+├── .manorcloud/      ManorCloud's own: unfinished uploads and the trash. Don't change it
+├── users/
+│   └── alice/        alice's My files
+└── Photos/           administrators' files
+```
+
+An administrator's **My files** is the top level of their disk; every other disk is listed in
+the sidebar under **My files**. The **users** folder holds everyone's own files: administrators
+can open and download them there, but not change them. Changes made directly on the disk (for
+example over a network share) show up in ManorCloud right away.
+`manorcloud uninstall --purge` doesn't touch storage locations; delete them yourself if you no
 longer need them.
 
 ### Security
@@ -145,13 +162,15 @@ is set up, set `MANORCLOUD_SECURE_COOKIES=true`.
 | Upgrade                                    | Run the install command again. Your settings and files are kept |
 | Status                                     | `systemctl status manorcloud`                                   |
 | Logs                                       | `journalctl -u manorcloud -f`                                   |
-| Export all files with their original names | `sudo manorcloud export <output-dir>`                           |
 | Uninstall, keeping your files              | `sudo manorcloud uninstall`                                     |
 | Uninstall and delete everything            | `sudo manorcloud uninstall --purge`                             |
 
-`export` writes every user's files to `<output-dir>/<username>/` with their original names,
-folders and modification times. It needs no network and no other software, so your files are
-never locked inside ManorCloud.
+Your files are never locked inside ManorCloud: they are ordinary files with their real names in
+the data directory (`/var/lib/manorcloud/data` by default) and on each storage location.
+
+When you upgrade from a version that stored files under random names, ManorCloud moves them to
+their real names the first time it starts. Connect every storage location first: if one isn't
+available, ManorCloud stops and tells you which one. Nothing is deleted if something goes wrong.
 
 ## License
 

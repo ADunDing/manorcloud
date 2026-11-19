@@ -10,8 +10,10 @@
 //! 預設是嚴格的那一個：新增的 API 照慣例寫 `CurrentUser` 就自動受到保護，
 //! 要允許這些狀態必須刻意改用 `SessionUser`。
 //!
-//! 檔案的 API 用 `FilesUser`：通常就是目前的使用者；管理員可以加上 `?space=` 參數，
-//! 改為操作他在另一顆硬碟上的檔案空間。
+//! 檔案的 API 用 `InSpace`：目前的使用者，加上網址參數 `?space=` 指定的空間。
+
+use std::path::Path;
+use std::sync::Arc;
 
 use axum::{
     extract::{FromRef, FromRequestParts},
@@ -27,7 +29,8 @@ use super::{
 };
 use crate::{
     auth,
-    db::{session, storage as storage_db},
+    db::session,
+    space::{self, Space, SpaceError, SpaceKey},
 };
 
 /// 未登入時統一的訊息：不區分是沒帶 Cookie 還是 session 失效
@@ -157,61 +160,57 @@ where
 
 /// 檔案的 API 要操作誰的檔案。
 ///
-/// 沒有 `space` 參數（或 `space=me`）：目前使用者自己的檔案。
-/// 管理員加上 `space=default` 或 `space={儲存位置的編號}`：
-/// 他在那一顆硬碟上的檔案空間（側邊欄的 Disk2 等，一個隱藏的帳號，見 db::storage::space_account）。
-/// 那顆硬碟正好是管理員自己的檔案所在的位置時，就是他自己的檔案（My files）。
-///
-/// 用網址參數而不是 header：下載是瀏覽器直接開啟的連結，無法加上 header
+/// 檔案的 API：目前的使用者，以及網址參數 `space=` 指定的空間（見 `crate::space`）。
+/// 沒有權限、空間不存在都在進入 handler 之前就被擋下
 #[derive(Debug, Clone)]
-pub struct FilesUser {
-    /// 檔案的主人：所有查詢都以它為準
-    pub id: i64,
+pub struct InSpace {
+    pub user: CurrentUser,
+    pub space: Space,
 }
 
-impl<S> FromRequestParts<S> for FilesUser
+impl<S> FromRequestParts<S> for InSpace
 where
     SqlitePool: FromRef<S>,
+    Arc<Path>: FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = CurrentUser::from_request_parts(parts, state).await?;
-        let space = parts.uri.query().and_then(|query| {
+        let text = parts.uri.query().and_then(|query| {
             query
                 .split('&')
                 .find_map(|pair| pair.strip_prefix("space="))
                 .map(str::to_string)
         });
-        let volume = match space.as_deref() {
-            None | Some("me") => return Ok(FilesUser { id: user.id }),
-            Some("default") => None,
-            Some(id) => Some(id.parse::<i64>().map_err(|_| space_not_found())?),
-        };
-
-        if user.role != "admin" {
-            return Err(AppError::Forbidden(Forbidden::AdminRequired));
-        }
+        let key = SpaceKey::parse(text.as_deref()).ok_or_else(space_not_found)?;
         let pool = SqlitePool::from_ref(state);
-        if let Some(id) = volume
-            && storage_db::find_volume(&pool, id).await?.is_none()
-        {
-            return Err(space_not_found());
-        }
-        let home = storage_db::user_location(&pool, user.id)
-            .await?
-            .ok_or_else(unauthorized)?;
-        if home.volume_id == volume {
-            return Ok(FilesUser { id: user.id });
-        }
-        let id = storage_db::space_account(&pool, volume).await?;
-        Ok(FilesUser { id })
+        let data_dir = Arc::<Path>::from_ref(state);
+        let space = resolve_space(&pool, &data_dir, &user, key).await?;
+        Ok(InSpace { user, space })
     }
 }
 
+/// 找出空間並確認權限（分段上傳完成時，用上傳紀錄中的空間再找一次）
+pub async fn resolve_space(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    user: &CurrentUser,
+    key: SpaceKey,
+) -> Result<Space, AppError> {
+    space::resolve(pool, data_dir, user.id, user.role == "admin", key)
+        .await
+        .map_err(|e| match e {
+            SpaceError::NotFound => space_not_found(),
+            SpaceError::AdminOnly => AppError::Forbidden(Forbidden::AdminRequired),
+            SpaceError::Unavailable(message) => AppError::Unavailable(message),
+            SpaceError::Db(e) => AppError::internal(e),
+        })
+}
+
 fn space_not_found() -> AppError {
-    AppError::NotFound("Storage location not found".to_string())
+    AppError::NotFound("Not found".to_string())
 }
 
 fn unauthorized() -> AppError {

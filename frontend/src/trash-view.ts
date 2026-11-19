@@ -6,8 +6,8 @@
 // 超過 30 天的項目由伺服器的垃圾回收永久刪除。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
-import { trashHref, type Disk } from "./router.js";
-import { spaceOf, withSpace, type Space } from "./space.js";
+import { MY_FILES, trashHref, type Location } from "./router.js";
+import { spaceOfLocation, withSpace, type Space } from "./space.js";
 import type { StorageOverview } from "./types.js";
 import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
@@ -37,9 +37,9 @@ let loading = 0;
 let current: TrashView | null = null;
 
 /** 要顯示哪一個檔案空間的垃圾桶，由 main.ts 依網址決定 */
-export interface TrashOptions {
-  /** undefined：自己的檔案；null 或數字：管理員在那一顆硬碟上的檔案 */
-  readonly disk: Disk;
+interface TrashOptions {
+  /** 自己的 My files，或管理員看到的一顆硬碟 */
+  readonly location: Location;
   /** 管理員：上方多一排分頁，切換每一顆硬碟的垃圾桶 */
   readonly admin: boolean;
   readonly userId: number;
@@ -56,7 +56,7 @@ interface TrashPlace {
 
 let place: TrashPlace = { space: null, rootLabel: "My files", tabs: [] };
 /** 上次的選項：畫面內部重新載入時沿用 */
-let lastOptions: TrashOptions = { disk: undefined, admin: false, userId: 0 };
+let lastOptions: TrashOptions = { location: MY_FILES, admin: false, userId: 0 };
 
 /**
  * 在 container 中顯示垃圾桶。notice：重新載入後要顯示的錯誤。
@@ -72,7 +72,7 @@ export function renderTrash(
   current = null;
   const token = ++loading;
   container.replaceChildren(h("p", { class: "muted" }, "Loading…"));
-  const space = options.disk === undefined ? null : spaceOf(options.disk);
+  const space = spaceOfLocation(options.location);
 
   void (async () => {
     try {
@@ -108,22 +108,23 @@ function trashPlace(
     return { space, rootLabel: "My files", tabs: [] };
   }
   const home = storage.users.find((user) => user.user_id === options.userId)?.volume_id ?? null;
+  const disk = options.location.kind === "disk" ? options.location.disk : undefined;
   const others = storage.volumes.filter((volume) => volume.id !== home);
   const tabs =
     others.length === 0
       ? []
       : [
-          { label: "My files", href: trashHref(undefined), current: options.disk === undefined },
+          { label: "My files", href: trashHref(MY_FILES), current: disk === undefined },
           ...others.map((volume) => ({
             label: volume.name,
-            href: trashHref(volume.id),
-            current: options.disk === volume.id,
+            href: trashHref({ kind: "disk", disk: volume.id }),
+            current: disk === volume.id,
           })),
         ];
   const rootLabel =
-    options.disk === undefined
+    disk === undefined
       ? "My files"
-      : (storage.volumes.find((volume) => volume.id === options.disk)?.name ?? "Unknown");
+      : (storage.volumes.find((volume) => volume.id === disk)?.name ?? "Unknown");
   return { space, rootLabel, tabs };
 }
 

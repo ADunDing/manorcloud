@@ -21,7 +21,8 @@ export interface User {
 }
 
 /**
- * 檔案或資料夾。對應 Rust 端 web/files.rs 的 FileResponse。
+ * 列表中的一個檔案或資料夾（由 ApiItem 轉換而來，見 listing.ts）。
+ * id 只是在這一次列表中的順序：列表與選取用它辨認項目；實際操作一律用名稱組成路徑。
  * 時間是 Unix 秒數。
  */
 export interface FileItem {
@@ -36,15 +37,23 @@ export interface FileItem {
   readonly updated_at: number;
 }
 
-/** 祖先鏈的一層 */
-export interface Crumb {
-  readonly id: number;
+/** 資料夾中的一個項目（GET /api/files 的 items）。名稱就是硬碟上的檔名 */
+export interface ApiItem {
   readonly name: string;
+  readonly kind: "file" | "folder";
+  /** 資料夾為 null */
+  readonly size: number | null;
+  /** 修改時間（Unix 秒數） */
+  readonly modified: number;
+  /** 不能改名、搬移或刪除（硬碟最上層的 users） */
+  readonly locked: boolean;
 }
 
-/** GET /api/files/{id} 的回應：項目資訊加上由根目錄往下的祖先鏈（不含自己） */
-export interface ItemDetail extends FileItem {
-  readonly ancestors: readonly Crumb[];
+/** GET /api/files */
+export interface Listing {
+  /** 這個資料夾不能修改時的原因；可以修改時是 null */
+  readonly read_only: string | null;
+  readonly items: readonly ApiItem[];
 }
 
 /** GET /api/config 的回應：前端需要知道的伺服器設定 */
@@ -107,7 +116,7 @@ export interface StorageMove {
 }
 
 /** 每個使用者在哪個位置、哪個資料夾 */
-export interface StorageAssignment {
+interface StorageAssignment {
   readonly user_id: number;
   readonly username: string;
   /** null：資料目錄（Default） */

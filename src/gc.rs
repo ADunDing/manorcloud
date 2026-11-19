@@ -1,24 +1,18 @@
-//! 垃圾回收：清除磁碟上沒有資料庫參照的檔案、放棄的分段上傳、過期的 session，
-//! 以及放進垃圾桶超過保留期限的項目。
+//! 垃圾回收：放棄的分段上傳、留下來的暫存檔、超過保留期限的垃圾桶項目，以及過期的 session。
 //!
-//! 每個儲存位置（資料目錄，以及管理員加入的其他位置）各自檢查一次。
+//! 每顆有掛載的硬碟（資料目錄與儲存位置）各自檢查它的 `.manorcloud/`。
+//! **只會動 `.manorcloud/` 裡面的東西**，使用者的檔案永遠不會被這裡刪除。
 //!
-//! 核心不變式：資料庫裡的每一個 storage_key，磁碟上一定有對應的 blob；反過來不保證。
-//! 「磁碟有、資料庫沒有」的孤兒由這裡清除，來源包括：
-//! - 程式被 kill -9、斷電、panic=abort 時，TempBlob 的 Drop 沒有執行，tmp/ 留下殘檔
-//! - 上傳時 persist 之後資料庫寫入失敗，而刪除 blob 也失敗
-//! - 刪除項目時，commit 之後刪除 blob 失敗或中途斷線
-//! - 分段上傳：宣告後放棄、取消或完成時刪除暫存檔失敗
-//!
-//! 這是整個專案中唯一會「主動刪除」磁碟檔案的程式，所以規則很嚴格：
+//! 規則：
 //! - 只刪自己認得的東西：名稱、位置、檔案類型全部符合才處理，其他一律跳過
 //! - 永遠不跟隨符號連結
-//! - 查不到資料庫時，絕不刪除任何 blob 或分段上傳的暫存檔
-//! - 只刪超過寬限期的檔案；時間異常（mtime 或 updated_at 在未來）一律保留
+//! - 查不到資料庫時，絕不刪除分段上傳的暫存檔或垃圾桶中的項目
+//! - 只刪超過寬限期的；時間異常（mtime 在未來）一律保留
+//! - 先列出硬碟上的檔案，再查資料庫：紀錄一定比檔案先寫入（見 db::trash、uploads.rs），
+//!   所以列出時已經存在的檔案，查詢時一定查得到它的紀錄
 
 use std::collections::HashSet;
 use std::fmt;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,13 +22,12 @@ use sqlx::SqlitePool;
 use tokio::time::MissedTickBehavior;
 
 use crate::{
-    db::{files as files_db, session, storage as storage_db, uploads as uploads_db},
-    storage,
+    db::{session, storage as storage_db, trash as trash_db, uploads as uploads_db},
+    storage, tree,
 };
 
 /// 啟動後延遲多久才第一次執行。
-/// 樹莓派沒有硬體時鐘，開機時系統時間是上次關機的時間，要等 NTP 同步才正確；
-/// 延後執行讓時間先校正。
+/// 樹莓派沒有硬體時鐘，開機時系統時間是上次關機的時間，要等 NTP 同步才正確
 const INITIAL_DELAY: Duration = Duration::from_secs(5 * 60);
 
 /// 之後每隔多久執行一次
@@ -43,12 +36,9 @@ const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// 寬限期設定
 #[derive(Debug, Clone, Copy)]
 pub struct GcPolicy {
-    /// blobs/ 中的孤兒：persist 與寫入資料庫之間只有極短的空窗，1 小時非常寬裕。
-    /// （persist 會把 mtime 設為當下，所以這個時間是從 persist 起算的。）
-    /// 沒有紀錄的分段上傳暫存檔也用這個：宣告時「先檔案、後紀錄」之間同樣只有極短的空窗。
-    pub blob_grace: Duration,
-    /// tmp/ 中的暫存檔：上傳中每寫入一塊 mtime 就更新，所以這是「多久沒收到資料」。
-    /// 24 小時沒有任何資料進來的上傳幾乎可以確定已經中斷；保守的代價只是多佔一天的空間。
+    /// 沒有紀錄的分段上傳暫存檔、垃圾桶項目：寫入紀錄與檔案之間只有極短的空窗，1 小時非常寬裕
+    pub orphan_grace: Duration,
+    /// tmp/ 中的暫存（一般上傳、複製）：多久沒有變動就視為中斷
     pub tmp_grace: Duration,
     /// 分段上傳的紀錄多久沒有進度就視為放棄。
     /// 從最後一次進度算起：晚上傳到一半闔上筆電，隔天早上還能續傳
@@ -60,7 +50,7 @@ pub struct GcPolicy {
 impl Default for GcPolicy {
     fn default() -> Self {
         GcPolicy {
-            blob_grace: Duration::from_secs(60 * 60),
+            orphan_grace: Duration::from_secs(60 * 60),
             tmp_grace: Duration::from_secs(24 * 60 * 60),
             upload_grace: Duration::from_secs(24 * 60 * 60),
             trash_retention: Duration::from_secs(30 * 24 * 60 * 60),
@@ -71,7 +61,6 @@ impl Default for GcPolicy {
 /// 一次執行的結果
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct GcReport {
-    pub deleted_blobs: u64,
     pub deleted_tmp: u64,
     /// 分段上傳的暫存檔（放棄的上傳，以及沒有紀錄的孤兒）
     pub deleted_parts: u64,
@@ -80,10 +69,8 @@ pub struct GcReport {
     pub expired_sessions: u64,
     /// 超過保留期限、從垃圾桶永久刪除的項目（資料夾算一個）
     pub purged_trash: u64,
-    /// 是孤兒但還在寬限期內，這次保留
-    pub kept_recent: u64,
-    /// 不認得的項目（名稱不符、位置不符、目錄、符號連結），一律不處理
-    pub skipped_unknown: u64,
+    /// 垃圾桶中沒有紀錄的檔案，以及沒有檔案的紀錄
+    pub orphan_trash: u64,
     pub errors: u64,
 }
 
@@ -92,42 +79,20 @@ impl fmt::Display for GcReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "deleted {} blobs, {} temp files, {} upload part files; \
-             expired {} uploads, {} sessions; purged {} trash items; \
-             kept {} recent; skipped {} unknown; {} errors",
-            self.deleted_blobs,
+            "deleted {} temp items, {} upload part files; expired {} uploads, {} sessions; \
+             purged {} trash items, {} orphaned trash entries; {} errors",
             self.deleted_tmp,
             self.deleted_parts,
             self.expired_uploads,
             self.expired_sessions,
             self.purged_trash,
-            self.kept_recent,
-            self.skipped_unknown,
+            self.orphan_trash,
             self.errors
         )
     }
 }
 
-// ==================== 純函式：判斷該刪什麼 ====================
-
-/// 磁碟上的一個候選檔案
-#[derive(Debug, Clone)]
-pub struct Candidate {
-    pub path: PathBuf,
-    pub name: String,
-    pub modified: SystemTime,
-}
-
-/// 篩選結果
-#[derive(Debug, Default)]
-pub struct Selection {
-    pub delete: Vec<PathBuf>,
-    pub kept_recent: u64,
-}
-
-/// 是否已超過寬限期。
-///
-/// mtime 在「現在」之後（例如樹莓派開機時時鐘還沒校正）一律視為未過期：寧可少刪，不可誤刪。
+/// 是否已超過寬限期。mtime 在「現在」之後一律視為未過期：寧可少刪，不可誤刪
 pub fn is_expired(modified: SystemTime, now: SystemTime, grace: Duration) -> bool {
     match now.duration_since(modified) {
         Ok(age) => age > grace,
@@ -135,154 +100,19 @@ pub fn is_expired(modified: SystemTime, now: SystemTime, grace: Duration) -> boo
     }
 }
 
-/// 從候選檔案中選出要刪除的孤兒：不在 `known` 中、而且超過寬限期。
-///
-/// 不碰檔案系統、不碰資料庫、不讀系統時間，所有輸入都由參數提供，方便測試。
-/// tmp/ 的暫存檔沒有對應的資料庫紀錄，傳入空的 `known` 即可。
-pub fn select_orphans(
-    candidates: &[Candidate],
-    known: &HashSet<String>,
-    now: SystemTime,
-    grace: Duration,
-) -> Selection {
-    let mut selection = Selection::default();
-    for c in candidates {
-        if known.contains(&c.name) {
-            continue;
-        }
-        if is_expired(c.modified, now, grace) {
-            selection.delete.push(c.path.clone());
-        } else {
-            selection.kept_recent += 1;
-        }
-    }
-    selection
-}
-
-/// 時間換成 Unix 秒數。早於 1970 或超出 i64 範圍代表時鐘異常，回傳 None
 fn unix_secs(time: SystemTime) -> Option<i64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| i64::try_from(d.as_secs()).ok())
 }
 
-/// 分段上傳暫存檔的檔名：{上傳編號}.part
-fn part_file_name(id: &str) -> String {
-    format!("{id}.part")
+/// 一顆要檢查的硬碟：儲存位置的編號（None 是資料目錄）與根目錄
+struct Root {
+    volume: Option<i64>,
+    path: PathBuf,
 }
 
-/// 是否為分段上傳暫存檔的檔名：編號必須是合法的格式
-fn is_part_file_name(name: &str) -> bool {
-    name.strip_suffix(".part")
-        .is_some_and(storage::is_valid_key)
-}
-
-// ==================== 檔案系統操作（阻塞，在 spawn_blocking 中執行） ====================
-
-/// 列出目錄的結果：符合條件的候選檔案，以及不認得的項目數量
-#[derive(Debug, Default)]
-struct Listing {
-    candidates: Vec<Candidate>,
-    unknown: u64,
-}
-
-/// 列出目錄中「是一般檔案、而且名稱通過 `accept`」的項目。目錄不存在視為空的。
-///
-/// `DirEntry::file_type` 與 `DirEntry::metadata` 都不跟隨符號連結：
-/// 符號連結的類型是「符號連結」而不是「一般檔案」，會被計為不明項目而跳過。
-fn list_files(dir: &Path, accept: impl Fn(&str) -> bool) -> io::Result<Listing> {
-    let mut listing = Listing::default();
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(listing),
-        Err(e) => return Err(e),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let is_file = entry.file_type()?.is_file();
-        match entry.file_name().to_str() {
-            Some(name) if is_file && accept(name) => listing.candidates.push(Candidate {
-                path: entry.path(),
-                name: name.to_string(),
-                modified: entry.metadata()?.modified()?,
-            }),
-            _ => listing.unknown += 1,
-        }
-    }
-    Ok(listing)
-}
-
-/// 列出 blobs/ 底下的分層目錄名稱。不是合法分層目錄的項目計為不明。
-fn list_shards(blobs_dir: &Path) -> io::Result<(Vec<String>, u64)> {
-    let mut shards = Vec::new();
-    let mut unknown = 0;
-    let entries = match fs::read_dir(blobs_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((shards, 0)),
-        Err(e) => return Err(e),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let is_dir = entry.file_type()?.is_dir();
-        match entry.file_name().to_str() {
-            Some(name) if is_dir && storage::is_shard_name(name) => shards.push(name.to_string()),
-            _ => unknown += 1,
-        }
-    }
-    shards.sort();
-    Ok((shards, unknown))
-}
-
-/// 逐一刪除檔案，回傳 (成功數, 錯誤數)。已經不存在的不算錯誤，也不算刪除。
-fn remove_files(paths: Vec<PathBuf>) -> (u64, u64) {
-    let mut deleted = 0;
-    let mut errors = 0;
-    for path in paths {
-        match fs::remove_file(&path) {
-            Ok(()) => deleted += 1,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                eprintln!("gc: cannot delete {}: {e}", path.display());
-                errors += 1;
-            }
-        }
-    }
-    (deleted, errors)
-}
-
-/// 在專用執行緒中執行阻塞的檔案系統操作
-async fn blocking<T, F>(f: F) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(io::Error::other)?
-}
-
-/// 在專用執行緒中刪除檔案，回傳 (成功數, 錯誤數)
-async fn delete_in_background(paths: Vec<PathBuf>) -> (u64, u64) {
-    if paths.is_empty() {
-        return (0, 0);
-    }
-    match blocking(move || Ok(remove_files(paths))).await {
-        Ok(counts) => counts,
-        Err(e) => {
-            eprintln!("gc: the delete task failed: {e}");
-            (0, 1)
-        }
-    }
-}
-
-// ==================== 執行一次 ====================
-
-/// 執行一次完整的垃圾回收。「現在」與寬限期由參數傳入，測試可以控制時間。
-///
-/// 個別步驟的錯誤只記 log 並計入報告，不會中斷其他步驟。
-/// 垃圾桶最先處理：它刪除 blob 時若有失敗，留下的孤兒在同一次的 blobs 掃描中就會被清除。
+/// 執行一次
 pub async fn run_once(
     pool: &SqlitePool,
     data_dir: &Path,
@@ -290,311 +120,250 @@ pub async fn run_once(
     policy: &GcPolicy,
 ) -> GcReport {
     let mut report = GcReport::default();
-    let folders = folders(pool, data_dir, &mut report).await;
+    let roots = roots(pool, data_dir, &mut report).await;
 
-    collect_trash(pool, &folders, now, policy.trash_retention, &mut report).await;
-    for (user_id, root) in &folders {
-        collect_blobs(pool, *user_id, root, now, policy.blob_grace, &mut report).await;
-        collect_tmp(root, now, policy.tmp_grace, &mut report).await;
+    if let Some(cutoff) =
+        unix_secs(now).and_then(|n| n.checked_sub(policy.upload_grace.as_secs() as i64))
+    {
+        match uploads_db::delete_stale(pool, cutoff).await {
+            Ok(ids) => report.expired_uploads += ids.len() as u64,
+            Err(e) => {
+                eprintln!("gc: cannot expire uploads: {e}");
+                report.errors += 1;
+            }
+        }
     }
-    collect_uploads(pool, &folders, now, policy, &mut report).await;
+    for root in &roots {
+        collect_parts(pool, &root.path, now, policy, &mut report).await;
+        collect_tmp(pool, &root.path, now, policy, &mut report).await;
+        collect_trash(pool, root.volume, &root.path, now, policy, &mut report).await;
+    }
     collect_sessions(pool, now, &mut report).await;
     report
 }
 
-/// 每個使用者的資料夾：(使用者, 目錄)。正在搬移的使用者有兩個：原本的位置與目的地。
-///
-/// 沒有掛載的硬碟跳過：掛載點只是一個空的資料夾，沒有東西可以清理。
-/// 查不到時回傳空的清單：少檢查幾個資料夾只是晚一點清理，不會誤刪
-async fn folders(pool: &SqlitePool, data_dir: &Path, report: &mut GcReport) -> Vec<(i64, PathBuf)> {
-    let fail = |report: &mut GcReport, e: &dyn std::fmt::Display| {
-        eprintln!("gc: cannot list the user folders: {e}");
-        report.errors += 1;
-    };
-    let users = match storage_db::user_folders(pool).await {
-        Ok(users) => users,
+/// 有掛載的硬碟。沒有掛載的硬碟跳過：沒有東西可以清理
+async fn roots(pool: &SqlitePool, data_dir: &Path, report: &mut GcReport) -> Vec<Root> {
+    let mut roots = vec![Root {
+        volume: None,
+        path: data_dir.to_path_buf(),
+    }];
+    match storage_db::list_volumes(pool).await {
+        Ok(volumes) => roots.extend(
+            volumes
+                .into_iter()
+                .map(|v| Root {
+                    volume: Some(v.id),
+                    path: PathBuf::from(v.path),
+                })
+                .filter(|root| storage::volume_ready(&root.path)),
+        ),
         Err(e) => {
-            fail(report, &e);
-            return Vec::new();
-        }
-    };
-    let volumes = match storage_db::list_volumes(pool).await {
-        Ok(volumes) => volumes,
-        Err(e) => {
-            fail(report, &e);
-            return Vec::new();
-        }
-    };
-    let root_of = |volume: Option<i64>| -> Option<PathBuf> {
-        match volume {
-            None => Some(data_dir.to_path_buf()),
-            Some(id) => volumes
-                .iter()
-                .find(|v| v.id == id)
-                .map(|v| PathBuf::from(&v.path))
-                .filter(|path| storage::volume_ready(path)),
-        }
-    };
-
-    let mut folders = Vec::new();
-    for user in users {
-        let mut places = vec![user.volume_id];
-        if user.moving {
-            places.push(user.target_volume_id);
-        }
-        for volume in places {
-            if let Some(folder) =
-                root_of(volume).and_then(|root| storage::user_root(&root, &user.folder))
-            {
-                folders.push((user.user_id, folder));
-            }
+            eprintln!("gc: cannot list the storage locations: {e}");
+            report.errors += 1;
         }
     }
-    folders
+    roots
 }
 
-/// 刪除一個 blob。storage_key 在所有資料夾中都是唯一的，所以不知道它在哪裡時，
-/// 每個資料夾都試一次就好（搬移中的使用者兩邊各有一份，也應該兩邊都刪）。
-/// 回傳 (成功數, 錯誤數)
-async fn remove_everywhere(folders: &[(i64, PathBuf)], key: &str) -> (u64, u64) {
-    let mut deleted = 0;
-    let mut errors = 0;
-    for (_, root) in folders {
-        match storage::remove_blob(root, key).await {
-            Ok(()) => deleted += 1,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                eprintln!("gc: cannot delete blob {key} in {}: {e}", root.display());
-                errors += 1;
-            }
+/// 資料夾中的一般檔案或資料夾（不含符號連結）：(名稱, 路徑, 修改時間)
+fn entries(dir: &Path) -> io::Result<Vec<(String, PathBuf, SystemTime)>> {
+    let items = match std::fs::read_dir(dir) {
+        Ok(items) => items,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let item = item?;
+        let meta = std::fs::symlink_metadata(item.path())?;
+        if !(meta.is_file() || meta.is_dir()) {
+            continue;
+        }
+        let Ok(name) = item.file_name().into_string() else {
+            continue;
+        };
+        out.push((name, item.path(), meta.modified()?));
+    }
+    Ok(out)
+}
+
+async fn list(dir: PathBuf, report: &mut GcReport) -> Option<Vec<(String, PathBuf, SystemTime)>> {
+    let shown = dir.display().to_string();
+    match tokio::task::spawn_blocking(move || entries(&dir)).await {
+        Ok(Ok(list)) => Some(list),
+        Ok(Err(e)) => {
+            eprintln!("gc: cannot list {shown}: {e}");
+            report.errors += 1;
+            None
+        }
+        Err(e) => {
+            eprintln!("gc: cannot list {shown}: {e}");
+            report.errors += 1;
+            None
         }
     }
-    (deleted, errors)
 }
 
-/// 永久刪除放進垃圾桶超過保留期限的項目。
-///
-/// 與使用者永久刪除相同的順序：資料庫先刪並 commit，之後才刪 blob。
-/// 時鐘異常時跳過；trashed_at 在未來的項目自然不會被選中
-async fn collect_trash(
+/// 刪除一個項目，回傳是否成功（本來就不在也算成功）
+async fn delete(path: PathBuf, report: &mut GcReport) -> bool {
+    let shown = path.display().to_string();
+    let result = tokio::task::spawn_blocking(move || match tree::remove_path(&path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            eprintln!("gc: cannot delete {shown}: {e}");
+            report.errors += 1;
+            false
+        }
+        Err(e) => {
+            eprintln!("gc: cannot delete {shown}: {e}");
+            report.errors += 1;
+            false
+        }
+    }
+}
+
+/// 沒有紀錄的分段上傳暫存檔
+async fn collect_parts(
     pool: &SqlitePool,
-    folders: &[(i64, PathBuf)],
+    root: &Path,
     now: SystemTime,
-    retention: Duration,
+    policy: &GcPolicy,
     report: &mut GcReport,
 ) {
-    let Some(now_secs) = unix_secs(now) else {
+    let Some(files) = list(storage::uploads_dir(root), report).await else {
         return;
     };
-    let retention = i64::try_from(retention.as_secs()).unwrap_or(i64::MAX);
-
-    let keys = match files_db::purge_trash(pool, now_secs.saturating_sub(retention)).await {
-        Ok((purged, keys)) => {
-            report.purged_trash += purged;
-            keys
-        }
-        Err(e) => {
-            eprintln!("gc: cannot purge the trash: {e}");
-            report.errors += 1;
-            return;
-        }
-    };
-
-    for key in keys {
-        let (deleted, errors) = remove_everywhere(folders, &key).await;
-        report.deleted_blobs += deleted;
-        report.errors += errors;
-    }
-}
-
-/// 清除一個使用者資料夾中 blobs/ 的孤兒：依分層逐一比對，記憶體用量不隨檔案總數成長。
-///
-/// 「被參照」是以使用者為單位：資料夾中不屬於他的 blob 都是孤兒
-async fn collect_blobs(
-    pool: &SqlitePool,
-    user_id: i64,
-    data_dir: &Path,
-    now: SystemTime,
-    grace: Duration,
-    report: &mut GcReport,
-) {
-    let blobs_dir = storage::blobs_dir(data_dir);
-
-    let shards = {
-        let dir = blobs_dir.clone();
-        blocking(move || list_shards(&dir)).await
-    };
-    let (shards, unknown) = match shards {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("gc: cannot list {}: {e}", blobs_dir.display());
-            report.errors += 1;
-            return;
-        }
-    };
-    report.skipped_unknown += unknown;
-
-    for shard in shards {
-        // 1. 列出這個分層的檔案：名稱必須是合法 key，而且開頭與分層目錄相符
-        let shard_dir = blobs_dir.join(&shard);
-        let listing = {
-            let dir = shard_dir.clone();
-            let prefix = shard.clone();
-            blocking(move || {
-                list_files(&dir, |name| {
-                    storage::is_valid_key(name) && name.starts_with(prefix.as_str())
-                })
-            })
-            .await
-        };
-        let listing = match listing {
-            Ok(listing) => listing,
-            Err(e) => {
-                eprintln!("gc: cannot list {}: {e}", shard_dir.display());
-                report.errors += 1;
-                continue;
-            }
-        };
-        report.skipped_unknown += listing.unknown;
-
-        // 2. 查資料庫。查詢失敗就跳過整個分層：沒有正確的 key 清單時絕不刪除任何東西
-        let known: HashSet<String> = match storage_db::keys_in_shard(pool, user_id, &shard).await {
-            Ok(keys) => keys.into_iter().collect(),
-            Err(e) => {
-                eprintln!("gc: cannot query keys for shard {shard}, skipping: {e}");
-                report.errors += 1;
-                continue;
-            }
-        };
-
-        // 3. 判斷並刪除
-        let selection = select_orphans(&listing.candidates, &known, now, grace);
-        report.kept_recent += selection.kept_recent;
-        let (deleted, errors) = delete_in_background(selection.delete).await;
-        report.deleted_blobs += deleted;
-        report.errors += errors;
-    }
-}
-
-/// 清除 tmp/ 中長時間沒有寫入的暫存檔
-async fn collect_tmp(data_dir: &Path, now: SystemTime, grace: Duration, report: &mut GcReport) {
-    let tmp_dir = storage::tmp_dir(data_dir);
-
-    let listing = {
-        let dir = tmp_dir.clone();
-        blocking(move || list_files(&dir, storage::is_temp_file_name)).await
-    };
-    let listing = match listing {
-        Ok(listing) => listing,
-        Err(e) => {
-            eprintln!("gc: cannot list {}: {e}", tmp_dir.display());
-            report.errors += 1;
-            return;
-        }
-    };
-    report.skipped_unknown += listing.unknown;
-
-    // 暫存檔沒有對應的資料庫紀錄：known 是空的，只依寬限期判斷
-    let selection = select_orphans(&listing.candidates, &HashSet::new(), now, grace);
-    report.kept_recent += selection.kept_recent;
-    let (deleted, errors) = delete_in_background(selection.delete).await;
-    report.deleted_tmp += deleted;
-    report.errors += errors;
-}
-
-/// 清除分段上傳：放棄的上傳，以及沒有紀錄的暫存檔。
-///
-/// 上傳的編號在所有位置中都是唯一的：放棄的上傳不必知道它在哪個位置，每個位置都刪一次
-async fn collect_uploads(
-    pool: &SqlitePool,
-    folders: &[(i64, PathBuf)],
-    now: SystemTime,
-    policy: &GcPolicy,
-    report: &mut GcReport,
-) {
-    // 1. 放棄的上傳：先刪紀錄、再刪暫存檔（與使用者取消相同的順序）。
-    //    刪除暫存檔失敗也沒關係：紀錄已經不在，下一步會把它當成孤兒處理。
-    //    時鐘異常時跳過；updated_at 在未來的紀錄自然不會被選中
-    if let Some(now_secs) = unix_secs(now) {
-        let grace = i64::try_from(policy.upload_grace.as_secs()).unwrap_or(i64::MAX);
-        match uploads_db::delete_stale(pool, now_secs.saturating_sub(grace)).await {
-            Ok(ids) => {
-                report.expired_uploads += ids.len() as u64;
-                // 編號受資料庫的 CHECK 保護，這裡再驗證一次：路徑由它組成
-                let paths = folders
-                    .iter()
-                    .flat_map(|(_, root)| {
-                        let dir = storage::uploads_dir(root);
-                        ids.iter()
-                            .filter(|id| storage::is_valid_key(id))
-                            .map(move |id| dir.join(part_file_name(id)))
-                    })
-                    .collect();
-                let (deleted, errors) = delete_in_background(paths).await;
-                report.deleted_parts += deleted;
-                report.errors += errors;
-            }
-            Err(e) => {
-                eprintln!("gc: cannot delete stale uploads: {e}");
-                report.errors += 1;
-            }
-        }
-    }
-
-    for (_, root) in folders {
-        collect_orphan_parts(pool, root, now, policy, report).await;
-    }
-}
-
-/// 一個位置中沒有紀錄的分段上傳暫存檔。先列檔案、再查資料庫：
-/// 列出之後才寫入紀錄的上傳，查詢時已經在清單中；
-/// 查詢之後才寫入紀錄的，它的暫存檔一定很新，在寬限期內被保留
-async fn collect_orphan_parts(
-    pool: &SqlitePool,
-    data_dir: &Path,
-    now: SystemTime,
-    policy: &GcPolicy,
-    report: &mut GcReport,
-) {
-    let uploads_dir = storage::uploads_dir(data_dir);
-    let listing = {
-        let dir = uploads_dir.clone();
-        blocking(move || list_files(&dir, is_part_file_name)).await
-    };
-    let listing = match listing {
-        Ok(listing) => listing,
-        Err(e) => {
-            eprintln!("gc: cannot list {}: {e}", uploads_dir.display());
-            report.errors += 1;
-            return;
-        }
-    };
-    report.skipped_unknown += listing.unknown;
-
-    // 查詢失敗時跳過：沒有正確的清單時絕不刪除任何東西
     let known: HashSet<String> = match uploads_db::all_ids(pool).await {
-        Ok(ids) => ids.iter().map(|id| part_file_name(id)).collect(),
+        Ok(ids) => ids.into_iter().collect(),
         Err(e) => {
             eprintln!("gc: cannot query uploads, skipping their part files: {e}");
             report.errors += 1;
             return;
         }
     };
+    for (name, path, modified) in files {
+        let Some(id) = name
+            .strip_suffix(".part")
+            .filter(|id| storage::is_valid_key(id))
+        else {
+            continue;
+        };
+        if !known.contains(id)
+            && is_expired(modified, now, policy.orphan_grace)
+            && delete(path, report).await
+        {
+            report.deleted_parts += 1;
+        }
+    }
+}
 
-    let selection = select_orphans(&listing.candidates, &known, now, policy.blob_grace);
-    report.kept_recent += selection.kept_recent;
-    let (deleted, errors) = delete_in_background(selection.delete).await;
-    report.deleted_parts += deleted;
-    report.errors += errors;
+/// tmp/ 中太久沒有變動的暫存。進行中的搬移（move-{編號}）可能要好幾個小時，跳過
+async fn collect_tmp(
+    pool: &SqlitePool,
+    root: &Path,
+    now: SystemTime,
+    policy: &GcPolicy,
+    report: &mut GcReport,
+) {
+    let Some(items) = list(storage::tmp_dir(root), report).await else {
+        return;
+    };
+    let running: HashSet<i64> = match storage_db::running_moves(pool).await {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(e) => {
+            eprintln!("gc: cannot query storage moves: {e}");
+            report.errors += 1;
+            return;
+        }
+    };
+    for (name, path, modified) in items {
+        let moving = name
+            .strip_prefix("move-")
+            .and_then(|id| id.parse().ok())
+            .is_some_and(|id| running.contains(&id));
+        if !moving && is_expired(modified, now, policy.tmp_grace) && delete(path, report).await {
+            report.deleted_tmp += 1;
+        }
+    }
+}
+
+/// 垃圾桶：超過保留期限的項目、沒有紀錄的檔案、沒有檔案的紀錄
+async fn collect_trash(
+    pool: &SqlitePool,
+    volume: Option<i64>,
+    root: &Path,
+    now: SystemTime,
+    policy: &GcPolicy,
+    report: &mut GcReport,
+) {
+    let Some(files) = list(storage::trash_dir(root), report).await else {
+        return;
+    };
+    let rows = match trash_db::on_volume(pool, volume).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("gc: cannot query the trash: {e}");
+            report.errors += 1;
+            return;
+        }
+    };
+    let Some(now_secs) = unix_secs(now) else {
+        return;
+    };
+    let retention = policy.trash_retention.as_secs() as i64;
+    let grace = policy.orphan_grace.as_secs() as i64;
+    let on_disk: HashSet<i64> = files
+        .iter()
+        .filter_map(|(name, _, _)| name.parse().ok())
+        .collect();
+
+    for row in &rows {
+        let path = storage::trash_path(root, row.id);
+        if row.trashed_at + retention < now_secs {
+            // 先刪檔案，再刪紀錄
+            if delete(path, report).await {
+                match trash_db::remove(pool, row.id).await {
+                    Ok(_) => report.purged_trash += 1,
+                    Err(e) => {
+                        eprintln!("gc: cannot delete trash entry {}: {e}", row.id);
+                        report.errors += 1;
+                    }
+                }
+            }
+        } else if !on_disk.contains(&row.id) && row.trashed_at + grace < now_secs {
+            // 放進垃圾桶時中途失敗，或檔案被手動刪除了
+            if trash_db::remove(pool, row.id).await.is_ok() {
+                report.orphan_trash += 1;
+            }
+        }
+    }
+
+    let known: HashSet<i64> = rows.iter().map(|row| row.id).collect();
+    for (name, path, modified) in files {
+        let Ok(id) = name.parse::<i64>() else {
+            continue;
+        };
+        // 使用者被刪除之後留下的項目
+        if !known.contains(&id)
+            && is_expired(modified, now, policy.orphan_grace)
+            && delete(path, report).await
+        {
+            report.orphan_trash += 1;
+        }
+    }
 }
 
 /// 刪除過期的 session
 async fn collect_sessions(pool: &SqlitePool, now: SystemTime, report: &mut GcReport) {
-    // 時鐘異常，這次不清理
     let Some(now_secs) = unix_secs(now) else {
         return;
     };
-
     match session::delete_expired(pool, now_secs).await {
         Ok(n) => report.expired_sessions += n,
         Err(e) => {
@@ -606,20 +375,16 @@ async fn collect_sessions(pool: &SqlitePool, now: SystemTime, report: &mut GcRep
 
 // ==================== 定期執行 ====================
 
-/// 在背景定期執行垃圾回收：啟動後延遲一段時間跑第一次，之後每隔固定時間跑一次。
-///
-/// 每次執行都放在獨立的 task 中：就算某次執行因為 bug 而 panic，
-/// 也只影響那一次，排程本身會繼續運作，並把 panic 記錄下來。
+/// 在背景定期執行垃圾回收。每次執行都放在獨立的 task 中：
+/// 就算某次執行因為 bug 而 panic，排程本身會繼續運作
 pub fn spawn_periodic(pool: SqlitePool, data_dir: Arc<Path>, policy: GcPolicy) {
     tokio::spawn(async move {
         tokio::time::sleep(INITIAL_DELAY).await;
 
         let mut interval = tokio::time::interval(INTERVAL);
-        // 若某次執行超過間隔（或系統休眠），之後的排程順延，而不是連續補跑
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            // 第一次 tick 立即完成
             interval.tick().await;
 
             let pool = pool.clone();
@@ -639,477 +404,72 @@ pub fn spawn_periodic(pool: SqlitePool, data_dir: Arc<Path>, policy: GcPolicy) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{files as files_db, session, uploads::NewUpload, user};
-    use tempfile::TempDir;
+    use crate::db::{trash::Place, user};
 
-    const MINUTE: Duration = Duration::from_secs(60);
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
-    /// 產生指定分層前綴的合法 key
-    fn key(prefix: &str, n: u32) -> String {
-        format!("{prefix}{n:030x}")
-    }
-
-    /// 寫入一個檔案並設定它的 mtime
-    fn put(path: &Path, mtime: SystemTime) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, b"x").unwrap();
-        fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(mtime)
-            .unwrap();
-    }
-
-    /// 測試中的檔案都屬於 carol：在 `{位置}/carol/` 底下
-    fn folder(dir: &TempDir) -> PathBuf {
-        dir.path().join("carol")
-    }
-
-    fn blob(dir: &TempDir, key: &str) -> PathBuf {
-        storage::blob_path(&folder(dir), key).unwrap()
-    }
-
-    fn tmp(dir: &TempDir, name: &str) -> PathBuf {
-        storage::tmp_dir(&folder(dir)).join(name)
-    }
-
-    fn part(dir: &TempDir, id: &str) -> PathBuf {
-        storage::uploads_dir(&folder(dir)).join(part_file_name(id))
-    }
-
-    fn candidate(name: &str, modified: SystemTime) -> Candidate {
-        Candidate {
-            path: PathBuf::from(name),
-            name: name.to_string(),
-            modified,
-        }
-    }
-
-    /// 建立一筆上傳紀錄，並把「最後有進度」的時間設為 `updated`
-    async fn make_upload(pool: &SqlitePool, owner: i64, id: &str, updated: SystemTime) {
-        let new = NewUpload {
-            id,
-            owner_id: owner,
-            parent_id: None,
-            name: id,
-            size: 10,
-            file_modified: None,
-        };
-        uploads_db::create_upload(pool, &new, 100).await.unwrap();
-        sqlx::query("UPDATE uploads SET updated_at = ? WHERE id = ?")
-            .bind(unix_secs(updated).unwrap())
-            .bind(id)
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-
-    async fn upload_exists(pool: &SqlitePool, id: &str) -> bool {
-        uploads_db::all_ids(pool)
-            .await
-            .unwrap()
-            .iter()
-            .any(|known| known == id)
-    }
-
-    // ==================== 純函式 ====================
-
-    #[test]
-    fn expiry_respects_grace() {
-        let now = SystemTime::now();
-        let grace = Duration::from_secs(3600);
-
-        assert!(is_expired(now - 2 * grace, now, grace));
-        assert!(!is_expired(now - MINUTE, now, grace));
-        // 剛好等於寬限期不算過期
-        assert!(!is_expired(now - grace, now, grace));
-    }
-
-    #[test]
-    fn future_mtime_is_never_expired() {
-        // 樹莓派開機時時鐘可能落後，檔案的 mtime 看起來在「未來」
-        let now = SystemTime::now();
-        assert!(!is_expired(now + DAY, now, Duration::ZERO));
-    }
-
-    #[test]
-    fn select_skips_known_and_recent() {
-        let now = SystemTime::now();
-        let known: HashSet<String> = ["referenced".to_string()].into();
-        let candidates = [
-            candidate("referenced", now - 2 * DAY),
-            candidate("old-orphan", now - 2 * DAY),
-            candidate("new-orphan", now - MINUTE),
-        ];
-
-        let selection = select_orphans(&candidates, &known, now, Duration::from_secs(3600));
-
-        assert_eq!(selection.delete, vec![PathBuf::from("old-orphan")]);
-        assert_eq!(selection.kept_recent, 1);
-    }
-
-    #[test]
-    fn part_file_names() {
-        assert!(is_part_file_name(&part_file_name(&key("ab", 1))));
-        for bad in [
-            "notes.part",
-            "ABCDEF0123456789ABCDEF0123456789.part",
-            &key("ab", 1),
-        ] {
-            assert!(!is_part_file_name(bad), "{bad}");
-        }
-    }
-
-    #[test]
-    fn report_is_ascii() {
-        // 印到終端機與 journal：必須是英文
-        let report = GcReport {
-            deleted_blobs: 1,
-            errors: 2,
-            ..GcReport::default()
-        };
-        assert!(report.to_string().is_ascii());
-    }
-
-    // ==================== run_once：blobs 與 tmp ====================
-
-    #[sqlx::test]
-    async fn deletes_only_old_orphans(pool: SqlitePool) {
-        let dir = tempfile::tempdir().unwrap();
-        let owner = user::create_user(&pool, "carol", "x").await.unwrap();
-        let now = SystemTime::now();
-
-        let referenced = key("00", 1);
-        let old_orphan = key("00", 2);
-        let new_orphan = key("01", 3);
-        let future_orphan = key("02", 4);
-        files_db::create_file(&pool, owner, None, "a.txt", 1, None, &referenced)
-            .await
-            .unwrap();
-        put(&blob(&dir, &referenced), now - 2 * DAY);
-        put(&blob(&dir, &old_orphan), now - 2 * DAY);
-        put(&blob(&dir, &new_orphan), now - MINUTE);
-        put(&blob(&dir, &future_orphan), now + DAY);
-
-        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
-
-        assert!(
-            blob(&dir, &referenced).exists(),
-            "有資料庫紀錄的 blob 不能刪"
-        );
-        assert!(!blob(&dir, &old_orphan).exists(), "超過寬限期的孤兒要刪");
-        assert!(blob(&dir, &new_orphan).exists(), "寬限期內的孤兒要保留");
-        assert!(blob(&dir, &future_orphan).exists(), "mtime 在未來的要保留");
-        assert_eq!(report.deleted_blobs, 1);
-        assert_eq!(report.kept_recent, 2);
-        assert_eq!(report.errors, 0);
+    fn old(path: &Path) {
+        tree::set_modified(path, SystemTime::now() - 40 * DAY);
     }
 
     #[sqlx::test]
-    async fn skips_unknown_and_misplaced_items(pool: SqlitePool) {
-        user::create_user(&pool, "carol", "x").await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let old = SystemTime::now() - 2 * DAY;
-        let blobs = storage::blobs_dir(&folder(&dir));
-
-        let readme = blobs.join("00").join("README");
-        let notes = blobs.join("notes.txt");
-        let bad_shard = blobs.join("zz").join(key("00", 1));
-        // 合法 key 放錯分層：開頭是 aa，卻放在 bb/
-        let misplaced = blobs.join("bb").join(key("aa", 1));
-        put(&readme, old);
-        put(&notes, old);
-        put(&bad_shard, old);
-        put(&misplaced, old);
-
-        let report = run_once(&pool, dir.path(), SystemTime::now(), &GcPolicy::default()).await;
-
-        for path in [&readme, &notes, &bad_shard, &misplaced] {
-            assert!(path.exists(), "不認得的項目不能刪：{}", path.display());
-        }
-        assert_eq!(report.deleted_blobs, 0);
-        // README、notes.txt、zz/ 目錄、bb/ 裡放錯的檔案
-        assert_eq!(report.skipped_unknown, 4);
-    }
-
-    #[sqlx::test]
-    #[cfg(unix)]
-    async fn never_follows_symlinks(pool: SqlitePool) {
-        user::create_user(&pool, "carol", "x").await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let target = outside.path().join("precious.txt");
-        put(&target, SystemTime::now() - 2 * DAY);
-
-        // 在分層目錄裡放一個名稱是合法 key 的符號連結，指向外部檔案
-        let link = blob(&dir, &key("00", 1));
-        fs::create_dir_all(link.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        let report = run_once(&pool, dir.path(), SystemTime::now(), &GcPolicy::default()).await;
-
-        assert!(target.exists(), "符號連結指向的外部檔案絕不能被刪");
-        assert!(link.symlink_metadata().is_ok(), "符號連結本身也不處理");
-        assert_eq!(report.deleted_blobs, 0);
-        assert_eq!(report.skipped_unknown, 1);
-    }
-
-    #[sqlx::test]
-    async fn cleans_stale_temp_files(pool: SqlitePool) {
-        user::create_user(&pool, "carol", "x").await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let now = SystemTime::now();
-
-        let stale = tmp(&dir, &format!("{}.part", key("00", 1)));
-        let active = tmp(&dir, &format!("{}.part", key("00", 2)));
-        let unknown = tmp(&dir, "random.txt");
-        put(&stale, now - 2 * DAY);
-        put(&active, now - MINUTE);
-        put(&unknown, now - 2 * DAY);
-
-        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
-
-        assert!(!stale.exists(), "超過 24 小時沒寫入的暫存檔要刪");
-        assert!(active.exists(), "還在寫入的暫存檔要保留");
-        assert!(unknown.exists(), "不是 TempBlob 產生的檔案不能刪");
-        assert_eq!(report.deleted_tmp, 1);
-        assert_eq!(report.kept_recent, 1);
-        assert_eq!(report.skipped_unknown, 1);
-    }
-
-    // ==================== run_once：垃圾桶 ====================
-
-    #[sqlx::test]
-    async fn purges_trash_past_the_retention_only(pool: SqlitePool) {
-        let dir = tempfile::tempdir().unwrap();
-        let owner = user::create_user(&pool, "carol", "x").await.unwrap();
-        let now = SystemTime::now();
-        let now_secs = unix_secs(now).unwrap();
-
-        let old_key = key("00", 1);
-        let recent_key = key("00", 2);
-        let old = files_db::create_file(&pool, owner, None, "old.txt", 1, None, &old_key)
-            .await
-            .unwrap();
-        let recent = files_db::create_file(&pool, owner, None, "recent.txt", 1, None, &recent_key)
-            .await
-            .unwrap();
-        // blob 的 mtime 很舊：確認保住 recent.txt 的是資料庫紀錄，而不是寬限期
-        put(&blob(&dir, &old_key), now - 40 * DAY);
-        put(&blob(&dir, &recent_key), now - 40 * DAY);
-        files_db::move_to_trash(&pool, owner, old.id, now_secs - 31 * 24 * 60 * 60)
-            .await
-            .unwrap();
-        files_db::move_to_trash(&pool, owner, recent.id, now_secs - 24 * 60 * 60)
-            .await
-            .unwrap();
-
-        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
-
-        assert_eq!(report.purged_trash, 1);
-        assert!(!blob(&dir, &old_key).exists(), "超過 30 天的要永久刪除");
-        assert!(blob(&dir, &recent_key).exists(), "30 天內的要保留");
-        assert_eq!(files_db::list_trash(&pool, owner).await.unwrap().len(), 1);
-        assert_eq!(report.errors, 0);
-    }
-
-    // ==================== run_once：分段上傳 ====================
-
-    #[sqlx::test]
-    async fn expires_abandoned_uploads_and_their_part_files(pool: SqlitePool) {
-        let dir = tempfile::tempdir().unwrap();
-        let owner = user::create_user(&pool, "carol", "x").await.unwrap();
-        let now = SystemTime::now();
-
-        let abandoned = key("aa", 1);
-        let active = key("aa", 2);
-        let future = key("aa", 3);
-        make_upload(&pool, owner, &abandoned, now - 2 * DAY).await;
-        make_upload(&pool, owner, &active, now - MINUTE).await;
-        // 時鐘曾經跳動：updated_at 在未來
-        make_upload(&pool, owner, &future, now + DAY).await;
-        for id in [&abandoned, &active, &future] {
-            put(&part(&dir, id), now - 2 * DAY);
-        }
-
-        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
-
-        assert!(!upload_exists(&pool, &abandoned).await, "放棄的紀錄要刪");
-        assert!(!part(&dir, &abandoned).exists(), "放棄的暫存檔要刪");
-        // 有紀錄的暫存檔：即使 mtime 很舊（例如很久沒寫入但最近查詢過進度）也不是孤兒
-        assert!(upload_exists(&pool, &active).await);
-        assert!(part(&dir, &active).exists());
-        assert!(
-            upload_exists(&pool, &future).await,
-            "updated_at 在未來的要保留"
-        );
-        assert!(part(&dir, &future).exists());
-        assert_eq!(report.expired_uploads, 1);
-        assert_eq!(report.deleted_parts, 1);
-        assert_eq!(report.errors, 0);
-    }
-
-    #[sqlx::test]
-    async fn deletes_only_old_part_files_without_records(pool: SqlitePool) {
-        user::create_user(&pool, "carol", "x").await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let now = SystemTime::now();
-
-        let old_orphan = part(&dir, &key("bb", 1));
-        // 剛建立、紀錄還沒寫入（宣告時「先檔案、後紀錄」之間的空窗）
-        let new_orphan = part(&dir, &key("bb", 2));
-        let unknown = storage::uploads_dir(&folder(&dir)).join("notes.txt");
-        put(&old_orphan, now - 2 * DAY);
-        put(&new_orphan, now - MINUTE);
-        put(&unknown, now - 2 * DAY);
-
-        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
-
-        assert!(!old_orphan.exists(), "超過寬限期、沒有紀錄的暫存檔要刪");
-        assert!(new_orphan.exists(), "寬限期內的要保留");
-        assert!(unknown.exists(), "不認得的檔案不能刪");
-        assert_eq!(report.deleted_parts, 1);
-        assert_eq!(report.kept_recent, 1);
-        assert_eq!(report.skipped_unknown, 1);
-    }
-
-    // ==================== run_once：其他 ====================
-
-    #[sqlx::test]
-    async fn deletes_expired_sessions(pool: SqlitePool) {
-        let dir = tempfile::tempdir().unwrap();
-        let owner = user::create_user(&pool, "carol", "x").await.unwrap();
-        let now = SystemTime::now();
-        let now_secs = unix_secs(now).unwrap();
-        session::create_session(&pool, owner, &[1u8; 32], now_secs - 10)
-            .await
-            .unwrap();
-        session::create_session(&pool, owner, &[2u8; 32], now_secs + 3600)
-            .await
-            .unwrap();
-
-        let report = run_once(&pool, dir.path(), now, &GcPolicy::default()).await;
-
-        assert_eq!(report.expired_sessions, 1);
-        assert!(
-            session::find_user_by_token_hash(&pool, &[2u8; 32])
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[sqlx::test]
-    async fn missing_directories_are_not_errors(pool: SqlitePool) {
-        // 全新的資料目錄：blobs/、tmp/、uploads/ 都還不存在
-        let dir = tempfile::tempdir().unwrap();
-
-        let report = run_once(&pool, dir.path(), SystemTime::now(), &GcPolicy::default()).await;
-
-        assert_eq!(report, GcReport::default());
-    }
-
-    #[sqlx::test]
-    async fn database_failure_never_deletes_anything(pool: SqlitePool) {
-        let dir = tempfile::tempdir().unwrap();
-        let old = SystemTime::now() - 2 * DAY;
-        let orphan_blob = key("00", 1);
-        let orphan_part = part(&dir, &key("cc", 1));
-        put(&blob(&dir, &orphan_blob), old);
-        put(&orphan_part, old);
-
-        // 模擬資料庫故障：關閉連線池後任何查詢都會失敗
-        pool.close().await;
-        let report = run_once(&pool, dir.path(), SystemTime::now(), &GcPolicy::default()).await;
-
-        // 查不到資料庫時，就算看起來是孤兒也絕不刪除
-        assert!(blob(&dir, &orphan_blob).exists());
-        assert!(orphan_part.exists());
-        assert_eq!(report.deleted_blobs, 0);
-        assert_eq!(report.deleted_parts, 0);
-        assert!(report.errors >= 1);
-    }
-
-    // ==================== 多個儲存位置 ====================
-
-    #[sqlx::test]
-    async fn each_folder_keeps_only_its_users_blobs(pool: SqlitePool) {
+    async fn only_systems_leftovers_are_removed(pool: SqlitePool) {
         let data = tempfile::tempdir().unwrap();
-        let disk = tempfile::tempdir().unwrap();
-        storage::mark_volume(disk.path()).unwrap();
-        let now = SystemTime::now();
+        let root = data.path();
+        storage::init_dirs(root).unwrap();
+        // 使用者的檔案：無論多舊都不碰
+        std::fs::write(root.join("old.txt"), b"x").unwrap();
+        old(&root.join("old.txt"));
+        // tmp：舊的刪，新的留
+        std::fs::write(storage::tmp_dir(root).join("upload-a"), b"x").unwrap();
+        old(&storage::tmp_dir(root).join("upload-a"));
+        std::fs::write(storage::tmp_dir(root).join("upload-b"), b"x").unwrap();
+        // 沒有紀錄的暫存檔
+        let orphan = storage::uploads_dir(root).join(format!("{:032x}.part", 1));
+        std::fs::write(&orphan, b"x").unwrap();
+        old(&orphan);
+
+        let report = run_once(&pool, root, SystemTime::now(), &GcPolicy::default()).await;
+
+        assert_eq!(report.deleted_tmp, 1);
+        assert_eq!(report.deleted_parts, 1);
+        assert!(root.join("old.txt").exists());
+        assert!(storage::tmp_dir(root).join("upload-b").exists());
+        assert!(!orphan.exists());
+    }
+
+    #[sqlx::test]
+    async fn the_trash_is_emptied_after_the_retention_period(pool: SqlitePool) {
+        let data = tempfile::tempdir().unwrap();
+        let root = data.path();
+        storage::init_dirs(root).unwrap();
         let carol = user::create_user(&pool, "carol", "x").await.unwrap();
-        let alice = user::create_user(&pool, "alice", "x").await.unwrap();
-        let volume = storage_db::add_volume(&pool, "disk2", disk.path().to_str().unwrap())
-            .await
-            .unwrap()
-            .id;
-        sqlx::query("UPDATE users SET storage_volume_id = ? WHERE id = ?")
-            .bind(volume)
-            .bind(carol)
+        let place = Place {
+            volume_id: None,
+            owner_id: Some(carol),
+        };
+        let expired = trash_db::add(&pool, place, "a", false, 1).await.unwrap();
+        sqlx::query("UPDATE trash SET trashed_at = 0 WHERE id = ?")
+            .bind(expired)
             .execute(&pool)
             .await
             .unwrap();
-        let mine = key("00", 1);
-        let hers = key("00", 2);
-        files_db::create_file(&pool, carol, None, "a.txt", 1, None, &mine)
-            .await
-            .unwrap();
-        files_db::create_file(&pool, alice, None, "a.txt", 1, None, &hers)
-            .await
-            .unwrap();
-        // carol 在 disk2 的資料夾：自己的檔案，以及一個不屬於她的（alice 的 key）
-        put(&blob(&disk, &mine), now - 2 * DAY);
-        put(&blob(&disk, &hers), now - 2 * DAY);
-        // alice 在資料目錄的資料夾
-        let alices = storage::blob_path(&data.path().join("alice"), &hers).unwrap();
-        put(&alices, now - 2 * DAY);
-        // disk2 中 carol 資料夾的 tmp/ 一樣會被清理
-        put(
-            &tmp(&disk, &format!("{}.part", key("aa", 1))),
-            now - 2 * DAY,
-        );
+        let recent = trash_db::add(&pool, place, "b", false, 1).await.unwrap();
+        for id in [expired, recent] {
+            std::fs::write(storage::trash_path(root, id), b"x").unwrap();
+        }
+        // 沒有紀錄的舊檔案（使用者被刪除之後留下的）
+        let left = storage::trash_path(root, 999);
+        std::fs::write(&left, b"x").unwrap();
+        old(&left);
 
-        let report = run_once(&pool, data.path(), now, &GcPolicy::default()).await;
+        let report = run_once(&pool, root, SystemTime::now(), &GcPolicy::default()).await;
 
-        assert!(blob(&disk, &mine).exists());
-        assert!(
-            !blob(&disk, &hers).exists(),
-            "別人的 blob 在這個資料夾裡是孤兒"
-        );
-        assert!(alices.exists());
-        assert_eq!(report.deleted_blobs, 1);
-        assert_eq!(report.deleted_tmp, 1);
-        assert_eq!(report.errors, 0);
-    }
-
-    #[sqlx::test]
-    async fn copies_of_a_move_in_progress_are_kept(pool: SqlitePool) {
-        let data = tempfile::tempdir().unwrap();
-        let disk = tempfile::tempdir().unwrap();
-        storage::mark_volume(disk.path()).unwrap();
-        let now = SystemTime::now();
-        let carol = user::create_user(&pool, "carol", "x").await.unwrap();
-        let volume = storage_db::add_volume(&pool, "disk2", disk.path().to_str().unwrap())
-            .await
-            .unwrap()
-            .id;
-        let mine = key("00", 1);
-        files_db::create_file(&pool, carol, None, "a.txt", 1, None, &mine)
-            .await
-            .unwrap();
-        storage_db::start_move(&pool, carol, Some(volume))
-            .await
-            .unwrap();
-        // 搬了好幾個小時：已經複製過去的 blob 早就超過寬限期
-        put(&blob(&data, &mine), now - 2 * DAY);
-        put(&blob(&disk, &mine), now - 2 * DAY);
-
-        run_once(&pool, data.path(), now, &GcPolicy::default()).await;
-
-        assert!(blob(&data, &mine).exists());
-        assert!(blob(&disk, &mine).exists());
+        assert_eq!(report.purged_trash, 1);
+        assert_eq!(report.orphan_trash, 1);
+        assert!(!storage::trash_path(root, expired).exists());
+        assert!(storage::trash_path(root, recent).exists());
+        assert!(!left.exists());
+        assert_eq!(trash_db::list(&pool, place).await.unwrap().len(), 1);
     }
 }

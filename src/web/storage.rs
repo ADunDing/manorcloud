@@ -1,14 +1,14 @@
-//! 儲存位置：每個使用者的檔案放在哪顆硬碟。
-//!
-//! - 給其他 handler 用：`files_root`（讀取、刪除）與 `writable_root`（新增檔案）
-//! - 管理員 API：新增、刪除儲存位置，為使用者更換位置，查看搬移的進度
+//! 儲存位置：每個人的檔案放在哪顆硬碟。
 //!
 //!   GET    /api/admin/storage                       所有位置、每個人在哪裡、搬移的進度
 //!   POST   /api/admin/storage                       新增位置
-//!   DELETE /api/admin/storage/{id}                  刪除位置（沒有人使用時）
+//!   DELETE /api/admin/storage/{id}                  刪除位置（沒有人使用、硬碟上沒有檔案時）
 //!   PUT    /api/admin/users/{id}/storage            更換使用者的位置
 //!   POST   /api/admin/users/{id}/storage/retry      重試失敗的搬移
 //!   DELETE /api/admin/users/{id}/storage/move       取消搬移，檔案留在原處
+//!
+//! 一般使用者換位置時，他的 `users/{名稱}` 與垃圾桶在背景複製過去（見 mover.rs）；
+//! 管理員的 My files 是硬碟的最上層，換位置只是改成以另一顆硬碟作為他的 My files，不搬任何檔案。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,13 +23,17 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-use super::{error::AppError, extract::AdminUser, state::AppState};
+use super::{error::AppError, extract::AdminUser, spaces::blocking, state::AppState};
 use crate::{
-    db::storage::{
-        self as storage_db, AddVolumeError, DeleteVolumeError, StartMove, StartMoveError,
+    db::{
+        storage::{
+            self as storage_db, AddVolumeError, DeleteVolumeError, StartMove, StartMoveError,
+        },
+        trash as trash_db,
     },
     folders, mover,
-    storage::{self, resumable},
+    storage::{self, USERS_DIR, resumable},
+    tree,
 };
 
 /// 名稱的長度上限，與 migration 的 CHECK 一致
@@ -42,71 +46,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/users/{id}/storage", put(change_location))
         .route("/api/admin/users/{id}/storage/retry", post(retry))
         .route("/api/admin/users/{id}/storage/move", delete(cancel))
-}
-
-// ==================== 給其他 handler 用 ====================
-
-/// 使用者的資料夾（`{位置}/{帳號名稱}`）：讀取、下載、刪除用。搬移期間仍是原本的位置
-pub(super) async fn files_root(
-    pool: &SqlitePool,
-    data_dir: &Path,
-    user_id: i64,
-) -> Result<PathBuf, AppError> {
-    Ok(location(pool, data_dir, user_id).await?.0)
-}
-
-/// 新增檔案（上傳、複製）用的目錄。搬移期間拒絕：
-/// 新的檔案會寫進原本的位置，搬完之後就找不到了
-pub(super) async fn writable_root(
-    pool: &SqlitePool,
-    data_dir: &Path,
-    user_id: i64,
-) -> Result<PathBuf, AppError> {
-    let (root, moving) = location(pool, data_dir, user_id).await?;
-    if moving {
-        return Err(AppError::Conflict(
-            "Your files are being moved to another disk. Try again when it's finished".to_string(),
-        ));
-    }
-    // 第一次寫入時才建立資料夾。之後只多一次 stat
-    if !tokio::fs::metadata(storage::blobs_dir(&root))
-        .await
-        .is_ok_and(|m| m.is_dir())
-    {
-        let dir = root.clone();
-        tokio::task::spawn_blocking(move || storage::init_dirs(&dir))
-            .await
-            .map_err(AppError::internal)?
-            .map_err(|e| AppError::internal(format!("cannot create {}: {e}", root.display())))?;
-    }
-    Ok(root)
-}
-
-async fn location(
-    pool: &SqlitePool,
-    data_dir: &Path,
-    user_id: i64,
-) -> Result<(PathBuf, bool), AppError> {
-    let here = storage_db::user_location(pool, user_id)
-        .await?
-        // 已經通過身分驗證的使用者在這一刻被刪除了
-        .ok_or_else(|| AppError::internal(format!("user {user_id} no longer exists")))?;
-    // 硬碟沒有掛載：不能讓檔案寫到系統碟上空的掛載點（見 storage::VOLUME_MARKER）
-    if let Some(path) = &here.path
-        && !storage::volume_ready(Path::new(path))
-    {
-        eprintln!("storage: {path} is not available (is the disk mounted?)");
-        return Err(disk_unavailable());
-    }
-    let root = folders::user_root(data_dir, &here).map_err(AppError::internal)?;
-    Ok((root, here.moving))
-}
-
-fn disk_unavailable() -> AppError {
-    AppError::Unavailable(
-        "The disk where your files are kept isn't available right now. Ask your administrator"
-            .to_string(),
-    )
 }
 
 // ==================== 查看 ====================
@@ -224,7 +163,8 @@ struct AddRequest {
 
 /// POST /api/admin/storage：新增儲存位置。
 ///
-/// 路徑必須是已經存在、ManorCloud 可以寫入的資料夾（通常是硬碟的掛載點底下的資料夾）。
+/// 路徑必須是已經存在、ManorCloud 可以寫入的資料夾（通常是硬碟的掛載點，或底下的資料夾）。
+/// 裡面原本就有的檔案會出現在這顆硬碟的最上層。
 /// 存入的是解析過符號連結的真實路徑，之後連結被改掉也不會指到別的地方
 async fn add_volume(
     admin: AdminUser,
@@ -242,12 +182,13 @@ async fn add_volume(
         return Err(AppError::Conflict("That name is already taken".to_string()));
     }
 
-    let existing = storage_db::list_volumes(&pool).await?;
-    let mut taken: Vec<(String, PathBuf)> = existing
+    // 不能和既有的位置（含資料目錄）重疊：同一個資料夾會同時出現在兩顆「硬碟」上
+    let mut taken: Vec<(String, PathBuf)> = storage_db::list_volumes(&pool)
+        .await?
         .into_iter()
-        .map(|v| (v.name, PathBuf::from(v.path)))
+        .map(|v| (format!("the storage {}", v.name), PathBuf::from(v.path)))
         .collect();
-    taken.push(("Default".to_string(), data_dir.to_path_buf()));
+    taken.push(("the storage Default".to_string(), data_dir.to_path_buf()));
 
     let raw = req.path.trim().to_string();
     let path = tokio::task::spawn_blocking(move || prepare_folder(&raw, &taken))
@@ -264,7 +205,7 @@ async fn add_volume(
                 AppError::Conflict("That name is already taken".to_string())
             }
             AddVolumeError::PathTaken => {
-                AppError::Conflict("That folder is already a storage location".to_string())
+                AppError::Conflict("That folder is already a storage".to_string())
             }
             AddVolumeError::Db(e) => AppError::internal(e),
         })?;
@@ -279,10 +220,8 @@ async fn add_volume(
     ))
 }
 
-/// 檢查資料夾並建立 tmp/、blobs/、uploads/，回傳解析過符號連結的絕對路徑。阻塞操作。
-///
-/// `taken`：既有的位置（含資料目錄）。新的位置不能在它們裡面，也不能包含它們：
-/// 垃圾回收會把每個位置的 blobs/ 當成自己的，重疊時會把別人的檔案當成孤兒
+/// 檢查資料夾並建立標記檔，回傳解析過符號連結的絕對路徑。阻塞操作。
+/// `taken`：不能重疊的資料夾（說明, 路徑）
 fn prepare_folder(raw: &str, taken: &[(String, PathBuf)]) -> Result<PathBuf, AppError> {
     let bad = |m: &str| AppError::BadRequest(m.to_string());
 
@@ -298,20 +237,22 @@ fn prepare_folder(raw: &str, taken: &[(String, PathBuf)]) -> Result<PathBuf, App
     if !path.is_dir() {
         return Err(bad("That path isn't a folder"));
     }
+    if path == Path::new("/") {
+        return Err(bad("The whole system disk can't be a storage"));
+    }
 
-    for (name, other) in taken {
+    for (what, other) in taken {
         // 資料目錄可能還不存在（測試）或是相對路徑：比較前先盡量解析
         let other = other.canonicalize().unwrap_or_else(|_| other.clone());
         if path.starts_with(&other) || other.starts_with(&path) {
             return Err(AppError::Conflict(format!(
-                "That folder overlaps with the storage location {name}"
+                "That folder overlaps with {what}"
             )));
         }
     }
 
-    // 實際寫入一次：權限、唯讀掛載、systemd 的 ReadWritePaths 限制都會在這裡出現。
-    // 標記檔同時證明這裡寫得進去。每個人的資料夾在他第一次寫入時才建立
-    let writable = storage::mark_volume(&path);
+    // 實際寫入一次：權限、唯讀掛載、systemd 的 ReadWritePaths 限制都會在這裡出現
+    let writable = storage::mark_volume(&path).and_then(|()| storage::init_dirs(&path));
     if let Err(e) = writable {
         return Err(match e.kind() {
             io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => bad(
@@ -325,7 +266,30 @@ fn prepare_folder(raw: &str, taken: &[(String, PathBuf)]) -> Result<PathBuf, App
     Ok(path)
 }
 
-/// DELETE /api/admin/storage/{id}：刪除儲存位置。資料夾本身留在磁碟上
+/// 硬碟上還有沒有檔案（`.manorcloud`、`lost+found` 與空的 `users` 不算）
+fn has_files(root: &Path) -> io::Result<bool> {
+    for item in std::fs::read_dir(root)? {
+        let name = item?.file_name();
+        let name = name.to_string_lossy();
+        if tree::is_system_name(&name) || name == "lost+found" {
+            continue;
+        }
+        if name == USERS_DIR
+            && std::fs::read_dir(root.join(USERS_DIR))?.all(|user| {
+                user.is_ok_and(|user| {
+                    std::fs::read_dir(user.path()).is_ok_and(|mut items| items.next().is_none())
+                })
+            })
+        {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// DELETE /api/admin/storage/{id}：刪除儲存位置。只有沒有人使用、硬碟上也沒有檔案時可以刪除；
+/// 只移除 ManorCloud 自己的 `.manorcloud` 與空的資料夾
 async fn delete_volume(
     admin: AdminUser,
     State(pool): State<SqlitePool>,
@@ -334,22 +298,37 @@ async fn delete_volume(
     let volume = storage_db::find_volume(&pool, id)
         .await?
         .ok_or_else(volume_not_found)?;
-    let space = storage_db::delete_volume(&pool, id)
+    let root = PathBuf::from(&volume.path);
+    let trashed = !trash_db::on_volume(&pool, Some(id)).await?.is_empty();
+    let checked = root.clone();
+    let files = storage::volume_ready(&root) && blocking(move || has_files(&checked)).await?;
+    if files || trashed {
+        return Err(AppError::Conflict(format!(
+            "Delete the files in {} first, including the ones in Trash",
+            volume.name
+        )));
+    }
+    storage_db::delete_volume(&pool, id)
         .await
         .map_err(|e| match e {
             DeleteVolumeError::NotFound => volume_not_found(),
             DeleteVolumeError::InUse => AppError::Conflict(
-                "Move everyone's files to another location before removing this one".to_string(),
+                "Move everyone's files to another storage before removing this one".to_string(),
             ),
-            DeleteVolumeError::HasFiles => AppError::Conflict(format!(
-                "Delete the files in {} first, including the ones in Trash",
-                volume.name
-            )),
             DeleteVolumeError::Db(e) => AppError::internal(e),
         })?;
-    // 管理員在這裡的檔案空間（已經是空的）
-    if let Some(folder) = space.and_then(|f| storage::user_root(Path::new(&volume.path), &f)) {
-        folders::remove_user_folder(&folder).await;
+    if storage::volume_ready(&root) {
+        let _ = blocking(move || {
+            let users = root.join(USERS_DIR);
+            if let Ok(items) = std::fs::read_dir(&users) {
+                for item in items.flatten() {
+                    let _ = std::fs::remove_dir(item.path());
+                }
+                let _ = std::fs::remove_dir(&users);
+            }
+            std::fs::remove_dir_all(storage::system_dir(&root))
+        })
+        .await;
     }
     println!(
         "storage: location {id} removed by administrator {}",
@@ -369,14 +348,14 @@ struct ChangeRequest {
 
 #[derive(Serialize)]
 struct ChangeResponse {
-    /// true：檔案正在背景搬移；false：沒有檔案，已經換好了
+    /// true：檔案正在背景搬移；false：已經換好了
     moving: bool,
 }
 
 /// PUT /api/admin/users/{id}/storage：更換使用者的位置。
 ///
-/// 有檔案時在背景搬移，這段期間這個人可以照常瀏覽與下載，但不能上傳或複製。
-/// 他未完成的上傳會被取消（暫存檔在原本的位置）
+/// 一般使用者有檔案時在背景搬移，這段期間他可以照常瀏覽與下載，但不能修改。
+/// 他上傳到 My files、還沒完成的上傳會被取消（暫存檔在原本的位置）
 async fn change_location(
     admin: AdminUser,
     State(pool): State<SqlitePool>,
@@ -395,35 +374,70 @@ async fn change_location(
             );
             if !storage::volume_ready(&path) {
                 return Err(AppError::Conflict(
-                    "That storage location isn't available. Is the disk connected?".to_string(),
+                    "That storage isn't available. Is the disk connected?".to_string(),
                 ));
             }
             path
         }
     };
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await?;
+    let Some(role) = role else {
+        return Err(AppError::NotFound("User not found".to_string()));
+    };
     let from = storage_db::user_location(&pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-    let source = folders::user_root(&data_dir, &from).map_err(AppError::internal)?;
-
-    // 目的地放不下時，在開始之前就拒絕，而不是搬到一半才失敗
-    let needed: i64 = storage_db::move_keys(&pool, user_id)
-        .await?
-        .iter()
-        .map(|(_, size)| *size)
-        .sum();
-    let available = storage::available_bytes(&target).map_err(|e| {
-        AppError::Conflict(format!(
-            "The storage location can't be reached ({e}). Is the disk connected?"
-        ))
-    })?;
-    if u64::try_from(needed).unwrap_or(0) > available {
-        return Err(AppError::InsufficientStorage(
-            "There isn't enough free space on that storage location".to_string(),
+    if from.volume_id == req.volume_id {
+        return Err(AppError::Conflict(
+            "Their files are already there".to_string(),
         ));
     }
 
-    let started = storage_db::start_move(&pool, user_id, req.volume_id)
+    // 管理員：只是換一顆硬碟作為他的 My files
+    if role == "admin" {
+        storage_db::set_volume(&pool, user_id, req.volume_id).await?;
+        println!(
+            "storage: administrator {user_id} now uses {} as My files (by administrator {})",
+            target.display(),
+            admin.id
+        );
+        return Ok(Json(ChangeResponse { moving: false }));
+    }
+
+    let old_root = folders::volume_root(&pool, &data_dir, from.volume_id)
+        .await
+        .map_err(AppError::internal)?;
+    let source = storage::user_dir(&old_root, &from.folder)
+        .ok_or_else(|| AppError::internal("invalid folder name"))?;
+
+    // 要搬的大小：My files 與垃圾桶。目的地放不下時，在開始之前就拒絕
+    let trash = trash_db::of_owner(&pool, user_id).await?;
+    let measured = source.clone();
+    let (has_any, mut needed) = blocking(move || {
+        let has = std::fs::read_dir(&measured).is_ok_and(|mut items| items.next().is_some());
+        Ok((has, tree::tree_size(&measured)))
+    })
+    .await?;
+    needed += trash
+        .iter()
+        .map(|item| u64::try_from(item.size).unwrap_or(0))
+        .sum::<u64>();
+    let available = storage::available_bytes(&target).map_err(|e| {
+        AppError::Conflict(format!(
+            "The storage can't be reached ({e}). Is the disk connected?"
+        ))
+    })?;
+    if needed > available {
+        return Err(AppError::InsufficientStorage(
+            "There isn't enough free space on that storage".to_string(),
+        ));
+    }
+    let total = (has_any || !trash.is_empty()).then(|| i64::try_from(needed).unwrap_or(i64::MAX));
+
+    let started = storage_db::start_move(&pool, user_id, req.volume_id, total)
         .await
         .map_err(|e| match e {
             StartMoveError::UserNotFound => AppError::NotFound("User not found".to_string()),
@@ -443,7 +457,7 @@ async fn change_location(
         StartMove::Switched { cancelled_uploads } => {
             // 沒有檔案要搬：在新的位置建立他的資料夾，原本那個（空的）資料夾移除
             folders::create_user_folder(&pool, &data_dir, user_id).await;
-            folders::remove_user_folder(&source).await;
+            let _ = tokio::fs::remove_dir(&source).await;
             (false, cancelled_uploads)
         }
         StartMove::Started {
@@ -456,7 +470,7 @@ async fn change_location(
     };
     // 被取消的上傳：紀錄已經刪除，暫存檔在原本的位置。刪不掉的由垃圾回收處理
     for id in cancelled {
-        if let Err(e) = resumable::remove_part(&source, &id).await {
+        if let Err(e) = resumable::remove_part(&storage::uploads_dir(&old_root), &id).await {
             eprintln!("storage: cannot remove the cancelled upload {id}: {e}");
         }
     }
@@ -484,7 +498,7 @@ async fn retry(
 }
 
 /// DELETE /api/admin/users/{id}/storage/move：取消搬移，檔案留在原本的位置。
-/// 已經複製過去的部分由垃圾回收清除
+/// 已經複製過去的部分在目的地的 .manorcloud/tmp 中，由垃圾回收清除
 async fn cancel(
     _admin: AdminUser,
     State(pool): State<SqlitePool>,
@@ -499,50 +513,27 @@ async fn cancel(
 }
 
 fn volume_not_found() -> AppError {
-    AppError::NotFound("Storage location not found".to_string())
+    AppError::NotFound("Storage not found".to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{MIB, TestApp, empty_request, request};
+    use super::super::test_support::{MIB, TestApp};
     use super::*;
-    use axum::{
-        body::{Body, Bytes},
-        http::{HeaderMap, Method, header},
-    };
-    use serde_json::Value;
+    use axum::http::Method;
+    use serde_json::json;
     use std::time::Duration;
 
-    async fn make_admin(t: &TestApp) {
-        sqlx::query("UPDATE users SET role = 'admin' WHERE id = ?")
-            .bind(t.user_id)
-            .execute(&t.pool)
-            .await
-            .unwrap();
-    }
-
-    async fn send(
-        t: &TestApp,
-        method: Method,
-        uri: &str,
-        body: &str,
-    ) -> (StatusCode, HeaderMap, Bytes) {
-        let req = request(method, uri, Some(&t.cookie))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
-        t.send(req).await
-    }
-
-    fn json(body: &Bytes) -> Value {
-        serde_json::from_slice(body).unwrap()
-    }
-
     async fn add(t: &TestApp, dir: &Path) -> i64 {
-        let body = format!(r#"{{"name":"Disk 2","path":"{}"}}"#, dir.display());
-        let (status, _, body) = send(t, Method::POST, "/api/admin/storage", &body).await;
-        assert_eq!(status, StatusCode::CREATED, "{body:?}");
-        json(&body)["id"].as_i64().unwrap()
+        let (status, body) = t
+            .json(
+                Method::POST,
+                "/api/admin/storage",
+                Some(json!({"name": "Disk 2", "path": dir})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body["id"].as_i64().unwrap()
     }
 
     /// 等背景的搬移做完
@@ -559,102 +550,147 @@ mod tests {
     #[sqlx::test]
     async fn members_cannot_use_the_storage_api(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
-
-        let (status, _, _) = t
-            .send(empty_request(
-                Method::GET,
-                "/api/admin/storage",
-                Some(&t.cookie),
-            ))
-            .await;
-
+        let (status, _) = t.json(Method::GET, "/api/admin/storage", None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[sqlx::test]
     async fn adding_a_location_validates_the_folder(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
-        make_admin(&t).await;
+        t.make_admin().await;
         let disk = tempfile::tempdir().unwrap();
-        storage::mark_volume(disk.path()).unwrap();
         let data = t.data_dir();
         std::fs::create_dir(data.join("inside")).unwrap();
 
         let cases = [
-            ("relative/path".to_string(), StatusCode::BAD_REQUEST),
-            ("/definitely/not/here".to_string(), StatusCode::BAD_REQUEST),
+            ("relative/path".into(), StatusCode::BAD_REQUEST),
+            ("/definitely/not/here".into(), StatusCode::BAD_REQUEST),
             // 資料目錄本身，以及它裡面的資料夾
-            (data.display().to_string(), StatusCode::CONFLICT),
-            (
-                data.join("inside").display().to_string(),
-                StatusCode::CONFLICT,
-            ),
+            (data.clone(), StatusCode::CONFLICT),
+            (data.join("inside"), StatusCode::CONFLICT),
         ];
         for (path, expected) in cases {
-            let body = format!(r#"{{"name":"x","path":"{path}"}}"#);
-            let (status, _, _) = send(&t, Method::POST, "/api/admin/storage", &body).await;
-            assert_eq!(status, expected, "{path}");
+            let (status, _) = t
+                .json(
+                    Method::POST,
+                    "/api/admin/storage",
+                    Some(json!({"name": "x", "path": path})),
+                )
+                .await;
+            assert_eq!(status, expected, "{}", path.display());
         }
 
         add(&t, disk.path()).await;
         // 標記檔已經建立
         assert!(storage::volume_ready(disk.path()));
-        // 同一個資料夾不能加兩次
-        let body = format!(r#"{{"name":"Other","path":"{}"}}"#, disk.path().display());
-        let (status, _, _) = send(&t, Method::POST, "/api/admin/storage", &body).await;
+        let (status, _) = t
+            .json(
+                Method::POST,
+                "/api/admin/storage",
+                Some(json!({"name": "Other", "path": disk.path()})),
+            )
+            .await;
         assert_eq!(status, StatusCode::CONFLICT);
     }
 
     #[sqlx::test]
-    async fn changing_location_moves_the_files(pool: SqlitePool) {
+    async fn changing_location_moves_the_files_and_the_trash(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
-        make_admin(&t).await;
+        t.make_admin().await;
         let disk = tempfile::tempdir().unwrap();
-        storage::mark_volume(disk.path()).unwrap();
         let volume = add(&t, disk.path()).await;
         let alice = t.other_user("alice").await;
-        let (_, key) = t.store_file(alice, None, "a.txt", b"hello").await;
-
-        let uri = format!("/api/admin/users/{alice}/storage");
-        let (status, _, body) = send(
-            &t,
-            Method::PUT,
-            &uri,
-            &format!(r#"{{"volume_id":{volume}}}"#),
+        let home = t.home("alice");
+        std::fs::create_dir(home.join("相片")).unwrap();
+        std::fs::write(home.join("相片/a.txt"), b"hello").unwrap();
+        // 垃圾桶中的一個檔案
+        let trashed = trash_db::add(
+            &t.pool,
+            trash_db::Place {
+                volume_id: None,
+                owner_id: Some(alice),
+            },
+            "b.txt",
+            false,
+            3,
         )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json(&body)["moving"], true);
+        .await
+        .unwrap();
+        std::fs::create_dir_all(storage::trash_dir(&t.data_dir())).unwrap();
+        std::fs::write(storage::trash_path(&t.data_dir(), trashed), b"bye").unwrap();
+
+        let (status, body) = t
+            .json(
+                Method::PUT,
+                &format!("/api/admin/users/{alice}/storage"),
+                Some(json!({"volume_id": volume})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["moving"], true);
         wait_for_moves(&t).await;
 
-        // 新的位置有，原本的位置沒有了
-        // 在 disk2 中 alice 自己的資料夾
-        let folder = disk.path().canonicalize().unwrap().join("alice");
-        assert!(storage::blob_path(&folder, &key).unwrap().exists());
-        assert!(!t.blob_exists(&key));
+        let disk = disk.path().canonicalize().unwrap();
         assert_eq!(
-            files_root(&t.pool, &t.data_dir(), alice).await.unwrap(),
-            folder
+            std::fs::read(disk.join("users/alice/相片/a.txt")).unwrap(),
+            b"hello"
         );
+        assert_eq!(
+            std::fs::read(storage::trash_path(&disk, trashed)).unwrap(),
+            b"bye"
+        );
+        assert!(!home.exists());
+        assert!(!storage::trash_path(&t.data_dir(), trashed).exists());
+
         // 有人在使用的位置不能刪除
-        let (status, _, _) = t
-            .send(empty_request(
+        let (status, _) = t
+            .json(
                 Method::DELETE,
                 &format!("/api/admin/storage/{volume}"),
-                Some(&t.cookie),
-            ))
+                None,
+            )
             .await;
         assert_eq!(status, StatusCode::CONFLICT);
 
         // 搬回資料目錄
-        let (status, _, _) = send(&t, Method::PUT, &uri, r#"{"volume_id":null}"#).await;
+        let (status, _) = t
+            .json(
+                Method::PUT,
+                &format!("/api/admin/users/{alice}/storage"),
+                Some(json!({"volume_id": null})),
+            )
+            .await;
         assert_eq!(status, StatusCode::OK);
         wait_for_moves(&t).await;
-        assert!(t.blob_exists(&key));
+        assert!(t.data_dir().join("users/alice/相片/a.txt").is_file());
     }
 
     #[sqlx::test]
-    async fn new_files_are_refused_while_moving(pool: SqlitePool) {
+    async fn administrators_switch_without_moving(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        t.make_admin().await;
+        let disk = tempfile::tempdir().unwrap();
+        let volume = add(&t, disk.path()).await;
+        std::fs::write(t.data_dir().join("mine.txt"), b"x").unwrap();
+
+        let (status, body) = t
+            .json(
+                Method::PUT,
+                &format!("/api/admin/users/{}/storage", t.user_id),
+                Some(json!({"volume_id": volume})),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["moving"], false);
+        // 檔案留在原處；My files 現在是 Disk 2 的最上層
+        assert!(t.data_dir().join("mine.txt").exists());
+        let (_, body) = t.json(Method::GET, "/api/files", None).await;
+        assert_eq!(body["items"], json!([]));
+    }
+
+    #[sqlx::test]
+    async fn changes_are_refused_while_moving(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
         let disk = tempfile::tempdir().unwrap();
         storage::mark_volume(disk.path()).unwrap();
@@ -662,29 +698,22 @@ mod tests {
             .await
             .unwrap()
             .id;
-        t.store_file(t.user_id, None, "a.txt", b"hello").await;
+        std::fs::write(t.home("carol").join("a.txt"), b"x").unwrap();
         // 直接建立搬移紀錄，不啟動背景工作：狀態固定在「搬移中」
-        storage_db::start_move(&t.pool, t.user_id, Some(volume))
+        storage_db::start_move(&t.pool, t.user_id, Some(volume), Some(1))
             .await
             .unwrap();
 
-        assert!(matches!(
-            writable_root(&t.pool, &t.data_dir(), t.user_id).await,
-            Err(AppError::Conflict(_))
-        ));
-        // 讀取照常是原本的位置
-        assert_eq!(
-            files_root(&t.pool, &t.data_dir(), t.user_id).await.unwrap(),
-            t.data_dir().join("carol")
-        );
-
-        let (status, _, _) = send(
-            &t,
-            Method::POST,
-            "/api/uploads",
-            r#"{"name":"b.txt","size":3}"#,
-        )
-        .await;
+        let (status, body) = t.json(Method::GET, "/api/files", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["read_only"].is_string());
+        let (status, _) = t
+            .json(
+                Method::POST,
+                "/api/uploads",
+                Some(json!({"name": "b.txt", "size": 3})),
+            )
+            .await;
         assert_eq!(status, StatusCode::CONFLICT);
     }
 
@@ -704,139 +733,33 @@ mod tests {
             .await
             .unwrap();
 
-        let (status, _, _) = send(
-            &t,
-            Method::POST,
-            "/api/uploads",
-            r#"{"name":"b.txt","size":3}"#,
-        )
-        .await;
+        let (status, _) = t
+            .json(
+                Method::POST,
+                "/api/uploads",
+                Some(json!({"name": "b.txt", "size": 3})),
+            )
+            .await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(std::fs::read_dir(mountpoint.path()).unwrap().count(), 0);
     }
 
-    // ==================== 管理員在各硬碟上的檔案空間 ====================
-
     #[sqlx::test]
-    async fn admin_files_on_another_disk_are_kept_apart(pool: SqlitePool) {
+    async fn a_location_with_files_cannot_be_removed(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
-        make_admin(&t).await;
+        t.make_admin().await;
         let disk = tempfile::tempdir().unwrap();
         let volume = add(&t, disk.path()).await;
-        let space = format!("space={volume}");
+        std::fs::write(disk.path().join("報告.pdf"), b"x").unwrap();
 
-        // 在 Disk 2 建立資料夾、上傳檔案
-        let (status, _, _) = send(
-            &t,
-            Method::POST,
-            &format!("/api/folders?{space}"),
-            r#"{"name":"Backup"}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
-
-        // Disk 2 看得到，自己的 My files 看不到
-        let (_, _, body) = t
-            .send(empty_request(
-                Method::GET,
-                &format!("/api/files?{space}"),
-                Some(&t.cookie),
-            ))
-            .await;
-        assert_eq!(json(&body)[0]["name"], "Backup");
-        let (_, _, body) = t
-            .send(empty_request(Method::GET, "/api/files", Some(&t.cookie)))
-            .await;
-        assert_eq!(json(&body).as_array().unwrap().len(), 0);
-
-        // 自己的檔案所在的位置（Default）就是 My files
-        let (_, _, body) = t
-            .send(empty_request(
-                Method::GET,
-                "/api/files?space=default",
-                Some(&t.cookie),
-            ))
-            .await;
-        assert_eq!(json(&body).as_array().unwrap().len(), 0);
-
-        // 檔案空間不是使用者：不出現在使用者清單中
-        let (_, _, body) = t
-            .send(empty_request(
-                Method::GET,
-                "/api/admin/users",
-                Some(&t.cookie),
-            ))
-            .await;
-        assert!(
-            json(&body)
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|u| !u["username"].as_str().unwrap().starts_with('~'))
-        );
-
-        // 還有檔案時不能移除這個位置
         let uri = format!("/api/admin/storage/{volume}");
-        let (status, _, _) = t
-            .send(empty_request(Method::DELETE, &uri, Some(&t.cookie)))
-            .await;
+        let (status, _) = t.json(Method::DELETE, &uri, None).await;
         assert_eq!(status, StatusCode::CONFLICT);
-    }
 
-    #[sqlx::test]
-    async fn an_empty_space_is_removed_with_its_location(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        make_admin(&t).await;
-        let disk = tempfile::tempdir().unwrap();
-        let volume = add(&t, disk.path()).await;
-        // 打開一次 Disk 2：建立檔案空間
-        let (status, _, _) = t
-            .send(empty_request(
-                Method::GET,
-                &format!("/api/files?space={volume}"),
-                Some(&t.cookie),
-            ))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, _, _) = t
-            .send(empty_request(
-                Method::DELETE,
-                &format!("/api/admin/storage/{volume}"),
-                Some(&t.cookie),
-            ))
-            .await;
-
+        std::fs::remove_file(disk.path().join("報告.pdf")).unwrap();
+        let (status, _) = t.json(Method::DELETE, &uri, None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let spaces: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM storage_spaces")
-            .fetch_one(&t.pool)
-            .await
-            .unwrap();
-        assert_eq!(spaces, 0);
-    }
-
-    #[sqlx::test]
-    async fn members_cannot_use_spaces(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-
-        let (status, _, _) = t
-            .send(empty_request(
-                Method::GET,
-                "/api/files?space=default",
-                Some(&t.cookie),
-            ))
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // space=me 是自己的檔案，任何人都可以
-        let (status, _, _) = t
-            .send(empty_request(
-                Method::GET,
-                "/api/files?space=me",
-                Some(&t.cookie),
-            ))
-            .await;
-        assert_eq!(status, StatusCode::OK);
+        assert!(!disk.path().join(".manorcloud").exists());
     }
 }

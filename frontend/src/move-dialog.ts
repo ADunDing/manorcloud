@@ -1,4 +1,4 @@
-// 選擇目的地資料夾的對話框，給「移動」使用。
+// 選擇目的地資料夾的對話框，給「複製」與「移動」使用。
 //
 // 用瀏覽器內建的 <dialog>：showModal() 會把背景變成不能操作，Esc 自動關閉，
 // 焦點也會留在對話框裡，不必自己處理這些細節。
@@ -6,11 +6,12 @@
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
-import { withSpace, type Space } from "./space.js";
-import type { Crumb, FileItem, ItemDetail } from "./types.js";
+import { isInside } from "./listing.js";
+import { apiUrl, joinPath, type Space } from "./space.js";
+import type { Listing } from "./types.js";
 
-/** 在哪一個檔案空間中選擇：自己的檔案，或管理員在另一顆硬碟上的檔案 */
-export interface FolderPlace {
+/** 在哪一組檔案中選擇（見 space.ts） */
+interface FolderPlace {
   readonly space: Space;
   /** 路徑最前面的名稱：My files 或硬碟的名稱 */
   readonly rootLabel: string;
@@ -19,27 +20,28 @@ export interface FolderPlace {
 /**
  * 讓使用者選擇一個資料夾。
  *
- * @param start    一開始顯示的資料夾（null 為 My files）
+ * @param start    一開始顯示的資料夾
  * @param excluded 不能選的資料夾：要移動的資料夾本身（不能搬進自己裡面）
- * @param place    在哪一個檔案空間中選擇；只能選同一個空間中的資料夾
- * @returns 選定的資料夾編號（null 為 My files）；取消時為 undefined
+ * @param place    在哪一組檔案中選擇；只能選同一組中的資料夾
+ * @returns 選定的資料夾；取消時為 undefined
  */
 export function chooseFolder(
   title: string,
   confirmLabel: string,
-  start: number | null,
-  excluded: ReadonlySet<number>,
-  place: FolderPlace = { space: null, rootLabel: "My files" },
-): Promise<number | null | undefined> {
+  start: readonly string[],
+  excluded: readonly (readonly string[])[],
+  place: FolderPlace,
+): Promise<readonly string[] | undefined> {
   return new Promise((resolve) => {
-    let location: number | null = start;
-    let result: number | null | undefined;
+    let location: readonly string[] = start;
+    let result: readonly string[] | undefined;
     /** 載入序號：較慢回來的舊結果不能蓋掉新的 */
     let loading = 0;
 
     const path = h("nav", { class: "dialog-path", "aria-label": "Location" });
     const list = h("ul", { class: "folder-list", "aria-label": "Folders" });
     const error = h("p", { class: "error", role: "alert" });
+    const note = h("p", { class: "hint" });
     const confirm = h("button", { type: "button", class: "primary" }, confirmLabel);
     const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
     const dialog = h(
@@ -48,6 +50,7 @@ export function chooseFolder(
       h("h2", { class: "dialog-title" }, title),
       path,
       list,
+      note,
       error,
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
@@ -63,31 +66,26 @@ export function chooseFolder(
       resolve(result);
     });
 
-    async function open(folderId: number | null): Promise<void> {
+    async function open(folder: readonly string[]): Promise<void> {
       const token = ++loading;
-      location = folderId;
+      location = folder;
       confirm.disabled = true;
       error.textContent = "";
+      note.textContent = "";
       list.replaceChildren(h("li", {}, h("p", { class: "folder-empty" }, "Loading…")));
+      renderPath();
 
       try {
-        const [items, detail] = await Promise.all([
-          api.get<FileItem[]>(
-            withSpace(
-              folderId === null ? "/api/files" : `/api/files?parent_id=${folderId}`,
-              place.space,
-            ),
-          ),
-          folderId === null
-            ? Promise.resolve(null)
-            : api.get<ItemDetail>(withSpace(`/api/files/${folderId}`, place.space)),
-        ]);
+        const listing = await api.get<Listing>(
+          apiUrl("/api/files", place.space, { path: joinPath(folder) }),
+        );
         if (token !== loading) {
           return;
         }
-        renderPath(detail);
-        renderFolders(items.filter((item) => item.kind === "folder"));
-        confirm.disabled = false;
+        renderFolders(listing.items.filter((item) => item.kind === "folder").map((item) => item.name));
+        // 不能放進這裡（例如別人在 users 中的資料夾）：可以往下找，但不能選
+        confirm.disabled = listing.read_only !== null;
+        note.textContent = listing.read_only ?? "";
       } catch (failure) {
         if (token !== loading) {
           return;
@@ -103,30 +101,31 @@ export function chooseFolder(
     }
 
     /** My files / 相片 / 2026：上層的每一層都可以點回去 */
-    function renderPath(detail: ItemDetail | null): void {
-      const crumbs: Crumb[] = detail ? [...detail.ancestors, { id: detail.id, name: detail.name }] : [];
-      const parts: Node[] = [pathStep(place.rootLabel, null, crumbs.length === 0)];
-      crumbs.forEach((crumb, index) => {
+    function renderPath(): void {
+      const parts: Node[] = [pathStep(place.rootLabel, [], location.length === 0)];
+      location.forEach((name, index) => {
         parts.push(h("span", { class: "separator", "aria-hidden": "true" }, "/"));
-        parts.push(pathStep(crumb.name, crumb.id, index === crumbs.length - 1));
+        parts.push(pathStep(name, location.slice(0, index + 1), index === location.length - 1));
       });
       path.replaceChildren(...parts);
     }
 
-    function pathStep(name: string, id: number | null, isCurrent: boolean): Node {
+    function pathStep(name: string, target: readonly string[], isCurrent: boolean): Node {
       return isCurrent
         ? h("strong", { "aria-current": "location" }, name)
-        : h("button", { type: "button", class: "link", onClick: () => void open(id) }, name);
+        : h("button", { type: "button", class: "link", onClick: () => void open(target) }, name);
     }
 
-    function renderFolders(folders: readonly FileItem[]): void {
-      if (folders.length === 0) {
+    function renderFolders(names: readonly string[]): void {
+      if (names.length === 0) {
         list.replaceChildren(h("li", {}, h("p", { class: "folder-empty" }, "No folders here")));
         return;
       }
+      const sorted = [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
       list.replaceChildren(
-        ...folders.map((folder) => {
-          const blocked = excluded.has(folder.id);
+        ...sorted.map((name) => {
+          const target = [...location, name];
+          const blocked = excluded.some((item) => isInside(target, item));
           return h(
             "li",
             {},
@@ -137,10 +136,10 @@ export function chooseFolder(
                 class: "folder-button",
                 disabled: blocked,
                 title: blocked ? "A folder can't be moved into itself" : undefined,
-                onClick: () => void open(folder.id),
+                onClick: () => void open(target),
               },
               icon("folder"),
-              folder.name,
+              name,
             ),
           );
         }),

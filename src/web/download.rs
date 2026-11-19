@@ -7,21 +7,14 @@
 //! 打包下載的回應（application/zip）使用相同的防線。
 
 use std::io::{self, SeekFrom};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use axum::{
-    Router,
     body::{Body, Bytes},
-    extract::{Path as UrlPath, Query, State},
     http::{HeaderMap, StatusCode, header, response::Builder},
     response::Response,
-    routing::get,
 };
 use futures_util::stream;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
@@ -29,99 +22,36 @@ use tokio_util::io::ReaderStream;
 
 use super::{
     error::AppError,
-    extract::FilesUser,
     range::{self, RangeRequest},
-    state::AppState,
-    storage::files_root,
 };
-use crate::{
-    db::files::{self as files_db, TreeEntry},
-    storage::{self, archive::ZipWriter},
-};
-
-/// 「不存在」「屬於別人」「是資料夾」對外一律使用這個訊息
-const FILE_NOT_FOUND: &str = "File not found";
-
-/// 打包下載時，「不存在」與「屬於別人」對外一律使用這個訊息
-const ITEM_NOT_FOUND: &str = "Item not found";
+use crate::storage::archive::ZipWriter;
 
 /// 每次從磁碟讀取的大小。預設的 4 KiB 會讓大檔案產生大量系統呼叫；
 /// 64 KiB 仍是固定的一小塊，記憶體用量不隨檔案大小成長。
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
 /// 一次打包下載最多選幾個項目（資料夾裡面的內容不算在內）
-const MAX_ARCHIVE_ITEMS: usize = 1000;
+pub(super) const MAX_ARCHIVE_ITEMS: usize = 1000;
 
 /// 打包時，送往網路的資料最多排隊幾塊。讀磁碟比網路快時在這裡等待，記憶體用量固定
 const ARCHIVE_QUEUE: usize = 8;
 
-pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/api/files/{id}/content", get(download))
-        .route("/api/archive", get(archive))
-}
-
-/// GET /api/files/{id}/content：下載檔案內容，支援 Range 與 If-Range。
-async fn download(
-    user: FilesUser,
-    State(pool): State<SqlitePool>,
-    State(data_dir): State<Arc<Path>>,
-    UrlPath(id): UrlPath<i64>,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    send_file(&pool, &data_dir, user.id, id, &headers).await
-}
-
-/// 下載 `owner` 的一個檔案。自己的檔案，或管理員瀏覽別人的檔案（見 browse.rs）共用
-pub(super) async fn send_file(
-    pool: &SqlitePool,
-    data_dir: &Path,
-    owner: i64,
-    id: i64,
+/// 回傳一個已經開啟的檔案：依 Range 與 If-Range 決定整個檔案、一段範圍，還是 416。
+pub(super) async fn file_response(
+    mut file: File,
+    total: u64,
+    name: &str,
+    etag: &str,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
-    // 1. 只查得到這個人的項目；資料夾沒有內容可下載。三種情況都是同一個 404。
-    let entry = files_db::find_file(pool, owner, id)
-        .await?
-        .filter(|e| e.kind == "file")
-        .ok_or_else(file_not_found)?;
-    let file_id = entry.id;
-
-    // 2. 找到 blob。CHECK 約束保證檔案一定有合法的 storage_key，
-    //    走到錯誤分支代表資料庫被竄改或程式有 bug，屬於伺服器問題。
-    let key = entry
-        .storage_key
-        .as_deref()
-        .ok_or_else(|| AppError::internal(format!("file {file_id} has no storage_key")))?;
-    let root = files_root(pool, data_dir, owner).await?;
-    let path = storage::blob_path(&root, key)
-        .ok_or_else(|| AppError::internal(format!("file {file_id} has an invalid storage_key")))?;
-
-    // 3. 開檔。資料庫有紀錄、磁碟卻沒有檔案是「資料不一致」：
-    //    伺服器的資料損壞了，不是使用者的錯，回 500 並記錄，而不是 404。
-    let mut file = File::open(&path).await.map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            AppError::internal(format!(
-                "inconsistent data: the blob of file {file_id} is missing ({})",
-                path.display()
-            ))
-        } else {
-            AppError::internal(format!("cannot open the blob of file {file_id}: {e}"))
-        }
-    })?;
-
-    // 以磁碟上的實際大小計算範圍與 Content-Length，確保與實際送出的位元組數一致
-    let total = file.metadata().await.map_err(AppError::internal)?.len();
-    let etag = etag_for(key);
-
-    // 4. 決定回傳整個檔案、一段範圍，還是 416。
+    // 決定回傳整個檔案、一段範圍，還是 416。
     //    header 值不是合法 UTF-8 時視為沒帶（Range 語法錯誤本來就該忽略）。
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     let if_range = headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok());
-    let decision = range::evaluate(range_header, if_range, &etag, total);
+    let decision = range::evaluate(range_header, if_range, etag, total);
 
     let response = match decision {
-        RangeRequest::Full => base_response(&entry.name, &etag)
+        RangeRequest::Full => base_response(name, etag)
             .status(StatusCode::OK)
             .header(header::CONTENT_LENGTH, total)
             .body(stream_body(file)),
@@ -131,14 +61,14 @@ pub(super) async fn send_file(
             file.seek(SeekFrom::Start(r.start()))
                 .await
                 .map_err(AppError::internal)?;
-            base_response(&entry.name, &etag)
+            base_response(name, etag)
                 .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_RANGE, r.content_range(total))
                 .header(header::CONTENT_LENGTH, r.byte_count())
                 .body(stream_body(file.take(r.byte_count())))
         }
 
-        RangeRequest::Unsatisfiable => base_response(&entry.name, &etag)
+        RangeRequest::Unsatisfiable => base_response(name, etag)
             .status(StatusCode::RANGE_NOT_SATISFIABLE)
             .header(
                 header::CONTENT_RANGE,
@@ -183,90 +113,26 @@ where
     Body::from_stream(ReaderStream::with_capacity(reader, STREAM_CHUNK_BYTES))
 }
 
-/// 由 storage_key 衍生 ETag：`"<SHA-256 前 16 位元組的 hex>"`。
-///
-/// 為什麼從 storage_key 衍生，而不是從 id：
-/// - 同一筆紀錄的內容永遠不變（storage_key 寫入後不再修改；改名、搬移不影響它）。
-/// - 但「同一個 id 數字」不保證指向同一筆紀錄：files.id 沒有 AUTOINCREMENT，
-///   刪除 id 最大的項目後，下一個新項目會重新使用同一個 id。
-///   若 ETag 來自 id，斷點續傳就可能把舊檔的前半與新檔的後半拼在一起。
-///   storage_key 是每份內容獨有的隨機值，id 被重用時 ETag 必然不同。
-///
-/// 為什麼不直接用 storage_key：它是內部資訊，一路以來不讓它出現在任何回應裡。
-/// 128 位元的隨機值經過雜湊後無法反推。`manorcloud-etag:` 前綴是領域分隔，
-/// 確保這個雜湊只在 ETag 這個用途中有意義。
-///
-/// 是強 ETag（沒有 `W/`）：內容逐位元組不變，而 If-Range 規定只能用強比對。
-fn etag_for(storage_key: &str) -> String {
-    let digest = Sha256::digest(format!("manorcloud-etag:{storage_key}").as_bytes());
-    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    format!("\"{hex}\"")
-}
-
-fn file_not_found() -> AppError {
-    AppError::NotFound(FILE_NOT_FOUND.to_string())
-}
-
 // ==================== 打包下載 ====================
 
-#[derive(Deserialize)]
-struct ArchiveQuery {
-    /// 以逗號分隔的項目編號，例如 `12,15,40`
-    ids: String,
+/// 打包下載中的一個項目
+pub(super) struct ArchiveItem {
+    /// zip 中的路徑
+    pub path: String,
+    /// 修改時間（Unix 秒）
+    pub mtime: i64,
+    /// 檔案內容在磁碟上的位置；資料夾是 None
+    pub source: Option<PathBuf>,
 }
 
-/// GET /api/archive?ids=1,2,3：把選取的檔案與資料夾（連同底下所有內容）打包成一個 .zip。
-///
-/// - 邊讀邊送：不先在磁碟上產生壓縮檔，幾 GB 的資料也不佔用額外空間，下載立刻開始
-/// - 不壓縮（只打包），見 `storage::archive`
-/// - 選取的項目必須在同一個資料夾：它們在 zip 中並列於最上層，名稱不會重複
-/// - 任何一個項目不存在或屬於別人，整個請求都是同一個 404
-///
-/// 用 GET 而不是 POST：瀏覽器直接把它當成一般的檔案下載，有進度、可以在下載管理員中看到。
-/// 它沒有副作用，和單一檔案的下載一樣不需要 CSRF 防護。
-async fn archive(
-    user: FilesUser,
-    State(pool): State<SqlitePool>,
-    State(data_dir): State<Arc<Path>>,
-    Query(query): Query<ArchiveQuery>,
+/// 把項目邊讀邊打包成 .zip 送出。
+/// `roots`：選取的項目的名稱，決定下載的檔名
+pub(super) fn archive_response(
+    items: Vec<ArchiveItem>,
+    roots: &[String],
 ) -> Result<Response, AppError> {
-    send_archive(&pool, &data_dir, user.id, &query.ids).await
-}
-
-/// 打包 `owner` 的項目。自己的檔案，或管理員瀏覽別人的檔案（見 browse.rs）共用
-pub(super) async fn send_archive(
-    pool: &SqlitePool,
-    data_dir: &Path,
-    owner: i64,
-    ids: &str,
-) -> Result<Response, AppError> {
-    let ids = parse_ids(ids)?;
-
-    let mut entries = Vec::new();
-    let mut parent: Option<Option<i64>> = None;
-    let mut roots = Vec::new();
-    for id in ids {
-        // 每個項目一條 SQL 取得整棵子樹，打包的是這個時間點的狀態
-        let tree = files_db::subtree(pool, owner, id).await?;
-        let Some(root) = tree.first() else {
-            return Err(AppError::NotFound(ITEM_NOT_FOUND.to_string()));
-        };
-        match parent {
-            None => parent = Some(root.parent_id),
-            Some(expected) if expected != root.parent_id => {
-                return Err(AppError::BadRequest(
-                    "The items must be in the same folder".to_string(),
-                ));
-            }
-            Some(_) => {}
-        }
-        roots.push(root.name.clone());
-        entries.extend(tree);
-    }
-
-    let root: Arc<Path> = Arc::from(files_root(pool, data_dir, owner).await?);
     let (sender, receiver) = mpsc::channel(ARCHIVE_QUEUE);
-    tokio::spawn(write_archive(root, entries, sender));
+    tokio::spawn(write_archive(items, sender));
     let body = Body::from_stream(stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
     }));
@@ -276,7 +142,7 @@ pub(super) async fn send_archive(
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
             header::CONTENT_DISPOSITION,
-            content_disposition(&archive_name(&roots)),
+            content_disposition(&archive_name(roots)),
         )
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
@@ -286,26 +152,6 @@ pub(super) async fn send_archive(
         .header(header::CACHE_CONTROL, "private, no-store")
         .body(body)
         .map_err(AppError::internal)
-}
-
-/// 解析 `12,15,40`：去掉重複，保留原本的順序
-fn parse_ids(text: &str) -> Result<Vec<i64>, AppError> {
-    let mut ids = Vec::new();
-    for part in text.split(',') {
-        let id: i64 = part
-            .trim()
-            .parse()
-            .map_err(|_| AppError::BadRequest("Invalid list of items".to_string()))?;
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
-    }
-    if ids.len() > MAX_ARCHIVE_ITEMS {
-        return Err(AppError::BadRequest(format!(
-            "You can download at most {MAX_ARCHIVE_ITEMS} items at once"
-        )));
-    }
-    Ok(ids)
 }
 
 /// 下載的檔名：只選一個項目時用它的名稱，否則是 ManorCloud-日期.zip
@@ -321,12 +167,8 @@ fn archive_name(roots: &[String]) -> String {
 /// 中途失敗時送出一個錯誤：連線以失敗結束，瀏覽器顯示「下載失敗」，
 /// 而不是留下一個看似完成、其實缺了內容的 zip。
 /// 使用者取消下載時，接收端被丟棄，送出失敗，這裡就停止讀取磁碟。
-async fn write_archive(
-    data_dir: Arc<Path>,
-    entries: Vec<TreeEntry>,
-    sender: mpsc::Sender<io::Result<Bytes>>,
-) {
-    if let Err(e) = stream_entries(&data_dir, &entries, &sender).await
+async fn write_archive(items: Vec<ArchiveItem>, sender: mpsc::Sender<io::Result<Bytes>>) {
+    if let Err(e) = stream_entries(&items, &sender).await
         && !sender.is_closed()
     {
         eprintln!("archive download failed: {e}");
@@ -335,34 +177,31 @@ async fn write_archive(
 }
 
 async fn stream_entries(
-    data_dir: &Path,
-    entries: &[TreeEntry],
+    items: &[ArchiveItem],
     sender: &mpsc::Sender<io::Result<Bytes>>,
 ) -> io::Result<()> {
     let mut zip = ZipWriter::new();
     let mut buffer = vec![0u8; STREAM_CHUNK_BYTES];
 
-    for entry in entries {
-        if entry.kind == "folder" {
+    for item in items {
+        let Some(source) = &item.source else {
             let header = zip
-                .directory(&entry.path, entry.updated_at)
+                .directory(&item.path, item.mtime)
                 .map_err(io::Error::other)?;
             send(sender, header).await?;
             continue;
-        }
+        };
 
-        let key = entry
-            .storage_key
-            .as_deref()
-            .ok_or_else(|| io::Error::other(format!("file {} has no storage_key", entry.id)))?;
-        let path = storage::blob_path(data_dir, key).ok_or_else(|| {
-            io::Error::other(format!("file {} has an invalid storage_key", entry.id))
-        })?;
-        let mut file = File::open(&path).await?;
+        // 不跟隨符號連結：走訪與開檔之間被換成連結，也不會讀到空間以外的檔案
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(source)
+            .await?;
         let size = file.metadata().await?.len();
 
         let header = zip
-            .start_file(&entry.path, entry.updated_at, size)
+            .start_file(&item.path, item.mtime, size)
             .map_err(io::Error::other)?;
         send(sender, header).await?;
         loop {
@@ -435,12 +274,8 @@ fn is_attr_char(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{MIB, TestApp, request};
     use super::*;
-    use axum::{
-        body::Bytes,
-        http::{HeaderValue, Method},
-    };
+    use axum::http::HeaderValue;
 
     // ==================== content_disposition ====================
 
@@ -543,456 +378,5 @@ mod tests {
             // filename* 解碼後必須與原名完全相同
             assert_eq!(decode_filename_star(&value), name);
         }
-    }
-
-    // ==================== etag_for ====================
-
-    #[test]
-    fn etag_is_quoted_hex_and_deterministic() {
-        let key = "0123456789abcdef0123456789abcdef";
-        let etag = etag_for(key);
-
-        // 引號 + 32 個 hex 字元 + 引號
-        assert_eq!(etag.len(), 34);
-        assert!(etag.starts_with('"') && etag.ends_with('"'));
-        assert!(etag[1..33].bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_eq!(etag, etag_for(key));
-    }
-
-    #[test]
-    fn etag_differs_per_key_and_hides_it() {
-        let a = "0123456789abcdef0123456789abcdef";
-        let b = "fedcba9876543210fedcba9876543210";
-
-        assert_ne!(etag_for(a), etag_for(b));
-        assert!(!etag_for(a).contains(a));
-    }
-
-    // ==================== 下載 handler ====================
-
-    /// 測試內容：1000 個位元組，每個位置的值都不同（以 251 為週期），方便確認切片位置正確
-    fn sample() -> Vec<u8> {
-        (0..1000u32)
-            .map(|i| u8::try_from(i % 251).unwrap())
-            .collect()
-    }
-
-    fn content_uri(id: i64) -> String {
-        format!("/api/files/{id}/content")
-    }
-
-    async fn get(
-        t: &TestApp,
-        id: i64,
-        cookie: Option<&str>,
-        extra: &[(&str, &str)],
-    ) -> (StatusCode, HeaderMap, Bytes) {
-        let mut builder = request(Method::GET, &content_uri(id), cookie);
-        for (name, value) in extra {
-            builder = builder.header(*name, *value);
-        }
-        t.send(builder.body(Body::empty()).unwrap()).await
-    }
-
-    fn header_str(headers: &HeaderMap, name: header::HeaderName) -> &str {
-        headers.get(name).unwrap().to_str().unwrap()
-    }
-
-    /// 每一種下載回應都必須帶著的 header
-    fn assert_security_headers(headers: &HeaderMap) {
-        assert_eq!(
-            header_str(headers, header::CONTENT_TYPE),
-            "application/octet-stream"
-        );
-        assert!(header_str(headers, header::CONTENT_DISPOSITION).starts_with("attachment;"));
-        assert_eq!(
-            header_str(headers, header::X_CONTENT_TYPE_OPTIONS),
-            "nosniff"
-        );
-        assert!(header_str(headers, header::CONTENT_SECURITY_POLICY).contains("sandbox"));
-        assert!(header_str(headers, header::CACHE_CONTROL).contains("private"));
-        assert_eq!(header_str(headers, header::ACCEPT_RANGES), "bytes");
-        assert!(headers.contains_key(header::ETAG));
-    }
-
-    #[sqlx::test]
-    async fn full_download(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let content = sample();
-        let (id, key) = t.store_file(t.user_id, None, "data.bin", &content).await;
-
-        let (status, headers, body) = get(&t, id, Some(&t.cookie), &[]).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(&body[..], &content[..]);
-        assert_eq!(header_str(&headers, header::CONTENT_LENGTH), "1000");
-        assert_security_headers(&headers);
-        assert!(!header_str(&headers, header::ETAG).contains(&key));
-    }
-
-    #[sqlx::test]
-    async fn closed_range(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let content = sample();
-        let (id, _) = t.store_file(t.user_id, None, "data.bin", &content).await;
-
-        let (status, headers, body) =
-            get(&t, id, Some(&t.cookie), &[("range", "bytes=0-99")]).await;
-
-        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(&body[..], &content[0..100]);
-        assert_eq!(
-            header_str(&headers, header::CONTENT_RANGE),
-            "bytes 0-99/1000"
-        );
-        assert_eq!(header_str(&headers, header::CONTENT_LENGTH), "100");
-    }
-
-    #[sqlx::test]
-    async fn suffix_and_open_ranges(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let content = sample();
-        let (id, _) = t.store_file(t.user_id, None, "data.bin", &content).await;
-
-        let (_, headers, body) = get(&t, id, Some(&t.cookie), &[("range", "bytes=-100")]).await;
-        assert_eq!(&body[..], &content[900..]);
-        assert_eq!(
-            header_str(&headers, header::CONTENT_RANGE),
-            "bytes 900-999/1000"
-        );
-
-        let (_, headers, body) = get(&t, id, Some(&t.cookie), &[("range", "bytes=100-")]).await;
-        assert_eq!(&body[..], &content[100..]);
-        assert_eq!(
-            header_str(&headers, header::CONTENT_RANGE),
-            "bytes 100-999/1000"
-        );
-
-        // 從中間開始的一段：確認 seek 與 take 的位置都正確
-        let (_, _, body) = get(&t, id, Some(&t.cookie), &[("range", "bytes=500-509")]).await;
-        assert_eq!(&body[..], &content[500..510]);
-    }
-
-    #[sqlx::test]
-    async fn unsatisfiable_range(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "data.bin", &sample()).await;
-
-        let (status, headers, body) =
-            get(&t, id, Some(&t.cookie), &[("range", "bytes=99999999-")]).await;
-
-        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
-        assert_eq!(header_str(&headers, header::CONTENT_RANGE), "bytes */1000");
-        assert!(body.is_empty());
-    }
-
-    #[sqlx::test]
-    async fn garbage_range_returns_full_file(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let content = sample();
-        let (id, _) = t.store_file(t.user_id, None, "data.bin", &content).await;
-
-        let (status, _, body) = get(&t, id, Some(&t.cookie), &[("range", "garbage")]).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(&body[..], &content[..]);
-    }
-
-    #[sqlx::test]
-    async fn security_headers_on_every_status(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "hack.html", &sample()).await;
-
-        for (range, expected) in [
-            (None, StatusCode::OK),
-            (Some("bytes=0-9"), StatusCode::PARTIAL_CONTENT),
-            (Some("bytes=99999-"), StatusCode::RANGE_NOT_SATISFIABLE),
-        ] {
-            let extra: Vec<(&str, &str)> = range.map(|r| ("range", r)).into_iter().collect();
-            let (status, headers, _) = get(&t, id, Some(&t.cookie), &extra).await;
-
-            assert_eq!(status, expected);
-            assert_security_headers(&headers);
-        }
-    }
-
-    #[sqlx::test]
-    async fn if_range_controls_partial_response(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let content = sample();
-        let (id, _) = t.store_file(t.user_id, None, "data.bin", &content).await;
-        let (_, headers, _) = get(&t, id, Some(&t.cookie), &[]).await;
-        let etag = header_str(&headers, header::ETAG).to_string();
-
-        // 相符 → 206
-        let (status, _, body) = get(
-            &t,
-            id,
-            Some(&t.cookie),
-            &[("range", "bytes=0-9"), ("if-range", &etag)],
-        )
-        .await;
-        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(&body[..], &content[0..10]);
-
-        // 不相符、弱 ETag、日期 → 200 整個檔案
-        let weak = format!("W/{etag}");
-        for if_range in [
-            "\"ffffffffffffffffffffffffffffffff\"",
-            weak.as_str(),
-            "Wed, 21 Oct 2026 07:28:00 GMT",
-        ] {
-            let (status, _, body) = get(
-                &t,
-                id,
-                Some(&t.cookie),
-                &[("range", "bytes=0-9"), ("if-range", if_range)],
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{if_range}");
-            assert_eq!(body.len(), 1000, "{if_range}");
-        }
-    }
-
-    #[sqlx::test]
-    async fn etag_survives_rename(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "a.bin", &sample()).await;
-        let (_, before, _) = get(&t, id, Some(&t.cookie), &[]).await;
-
-        files_db::update_item(&t.pool, t.user_id, id, Some("renamed.bin"), None)
-            .await
-            .unwrap();
-        let (_, after, _) = get(&t, id, Some(&t.cookie), &[]).await;
-
-        // 內容沒變，續傳不該被迫重新下載整個檔案
-        assert_eq!(before.get(header::ETAG), after.get(header::ETAG));
-    }
-
-    /// id 被重新使用時，舊的 ETag 必須讓續傳失效，否則會把兩個檔案拼在一起
-    #[sqlx::test]
-    async fn reused_id_gets_a_different_etag(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (old_id, _) = t
-            .store_file(t.user_id, None, "old.bin", b"old content")
-            .await;
-        let (_, headers, _) = get(&t, old_id, Some(&t.cookie), &[]).await;
-        let old_etag = header_str(&headers, header::ETAG).to_string();
-
-        files_db::delete_tree(&t.pool, t.user_id, old_id)
-            .await
-            .unwrap();
-        let (new_id, _) = t
-            .store_file(t.user_id, None, "new.bin", b"NEW CONTENT")
-            .await;
-
-        // SQLite 沒有 AUTOINCREMENT 時，刪掉最大的 id 後會重新使用它
-        assert_eq!(new_id, old_id);
-
-        // 用舊的 ETag 從第 4 個位元組續傳：必須拿到整個新檔案，而不是新檔案的後半段
-        let (status, _, body) = get(
-            &t,
-            new_id,
-            Some(&t.cookie),
-            &[("range", "bytes=4-"), ("if-range", &old_etag)],
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(&body[..], b"NEW CONTENT");
-    }
-
-    #[sqlx::test]
-    async fn empty_file_ignores_range(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "empty.bin", b"").await;
-
-        let (status, headers, body) = get(&t, id, Some(&t.cookie), &[("range", "bytes=0-")]).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.is_empty());
-        assert_eq!(header_str(&headers, header::CONTENT_LENGTH), "0");
-    }
-
-    #[sqlx::test]
-    async fn folder_foreign_and_missing_are_indistinguishable(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let folder = t.make_folder(t.user_id, None, "docs").await;
-        let alice = t.other_user("alice").await;
-        let (foreign, _) = t.store_file(alice, None, "secret.txt", b"secret").await;
-
-        let folder_res = get(&t, folder, Some(&t.cookie), &[]).await;
-        let foreign_res = get(&t, foreign, Some(&t.cookie), &[]).await;
-        let missing_res = get(&t, 999_999, Some(&t.cookie), &[]).await;
-
-        assert_eq!(missing_res.0, StatusCode::NOT_FOUND);
-        assert_eq!(
-            (folder_res.0, &folder_res.2),
-            (missing_res.0, &missing_res.2)
-        );
-        assert_eq!(
-            (foreign_res.0, &foreign_res.2),
-            (missing_res.0, &missing_res.2)
-        );
-    }
-
-    #[sqlx::test]
-    async fn missing_blob_is_a_server_error(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, key) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-        // 模擬資料損壞：資料庫有紀錄，磁碟上的 blob 卻被刪掉了
-        std::fs::remove_file(storage::blob_path(&t.dir.path().join("carol"), &key).unwrap())
-            .unwrap();
-
-        let (status, _, body) = get(&t, id, Some(&t.cookie), &[]).await;
-
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        // 對外只有通用訊息，不洩漏路徑
-        let body = std::str::from_utf8(&body).unwrap();
-        assert!(!body.contains("blobs"), "{body}");
-    }
-
-    #[sqlx::test]
-    async fn unauthenticated_download_returns_401(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-
-        let (status, _, _) = get(&t, id, None, &[]).await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    // ==================== 打包下載 ====================
-
-    async fn archive_get(
-        t: &TestApp,
-        ids: &str,
-        cookie: Option<&str>,
-    ) -> (StatusCode, HeaderMap, Bytes) {
-        let uri = format!("/api/archive?ids={ids}");
-        t.send(
-            request(Method::GET, &uri, cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-    }
-
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-    }
-
-    #[sqlx::test]
-    async fn archive_contains_folders_and_files(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let docs = t.make_folder(t.user_id, None, "docs").await;
-        t.make_folder(t.user_id, Some(docs), "空的").await;
-        t.store_file(t.user_id, Some(docs), "a.txt", b"alpha content")
-            .await;
-        let (c, _) = t.store_file(t.user_id, None, "c.txt", b"gamma").await;
-
-        let (status, headers, body) =
-            archive_get(&t, &format!("{docs},{c}"), Some(&t.cookie)).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            header_str(&headers, header::CONTENT_TYPE),
-            "application/zip"
-        );
-        assert!(header_str(&headers, header::CONTENT_DISPOSITION).starts_with("attachment;"));
-        assert_eq!(
-            header_str(&headers, header::X_CONTENT_TYPE_OPTIONS),
-            "nosniff"
-        );
-        assert!(header_str(&headers, header::CONTENT_SECURITY_POLICY).contains("sandbox"));
-        // 第一個本地檔頭與最後的結尾紀錄
-        assert!(body.starts_with(b"PK\x03\x04"));
-        assert_eq!(&body[body.len() - 22..body.len() - 18], b"PK\x05\x06");
-        for needle in [
-            "docs/".as_bytes(),
-            "docs/空的/".as_bytes(),
-            b"docs/a.txt",
-            b"c.txt",
-            b"alpha content",
-            b"gamma",
-        ] {
-            assert!(
-                contains(&body, needle),
-                "{}",
-                String::from_utf8_lossy(needle)
-            );
-        }
-    }
-
-    #[sqlx::test]
-    async fn archive_of_one_folder_is_named_after_it(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let docs = t.make_folder(t.user_id, None, "docs").await;
-
-        let (_, headers, _) = archive_get(&t, &docs.to_string(), Some(&t.cookie)).await;
-
-        assert!(
-            header_str(&headers, header::CONTENT_DISPOSITION).contains("filename=\"docs.zip\"")
-        );
-    }
-
-    #[sqlx::test]
-    async fn archive_foreign_and_missing_are_indistinguishable(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let alice = t.other_user("alice").await;
-        let (foreign, _) = t.store_file(alice, None, "secret.txt", b"secret").await;
-        let (own, _) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-
-        let foreign_res = archive_get(&t, &format!("{own},{foreign}"), Some(&t.cookie)).await;
-        let missing_res = archive_get(&t, &format!("{own},999999"), Some(&t.cookie)).await;
-
-        assert_eq!(foreign_res.0, StatusCode::NOT_FOUND);
-        assert_eq!(
-            (foreign_res.0, &foreign_res.2),
-            (missing_res.0, &missing_res.2)
-        );
-    }
-
-    #[sqlx::test]
-    async fn archive_items_must_share_a_folder(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let docs = t.make_folder(t.user_id, None, "docs").await;
-        let (inside, _) = t.store_file(t.user_id, Some(docs), "a.txt", b"a").await;
-        let (outside, _) = t.store_file(t.user_id, None, "b.txt", b"b").await;
-
-        let (status, _, _) = archive_get(&t, &format!("{inside},{outside}"), Some(&t.cookie)).await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-    }
-
-    #[sqlx::test]
-    async fn archive_rejects_invalid_lists(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-
-        for ids in ["", "abc", "1,,2", "1;2"] {
-            let (status, _, _) = archive_get(&t, ids, Some(&t.cookie)).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{ids:?}");
-        }
-    }
-
-    #[sqlx::test]
-    async fn unauthenticated_archive_returns_401(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-
-        let (status, _, _) = archive_get(&t, &id.to_string(), None).await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn parse_ids_removes_duplicates_and_keeps_order() {
-        assert_eq!(parse_ids("3, 1,3,2").unwrap(), vec![3, 1, 2]);
-        let too_many = (1..=1001)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        assert!(parse_ids(&too_many).is_err());
     }
 }

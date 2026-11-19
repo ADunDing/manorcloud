@@ -250,8 +250,7 @@ class AdminView {
 
   private volumeName(id: number | null): string {
     return (
-      this.storage.volumes.find((volume) => volume.id === id)?.name ??
-      "Unknown"
+      this.storage.volumes.find((volume) => volume.id === id)?.name ?? "Unknown"
     );
   }
 
@@ -334,11 +333,11 @@ class AdminView {
       const onlyOne = this.storage.volumes.length < 2;
       return [
         {
-          label: "Change storage location",
+          label: "Change storage",
           icon: "disk",
           disabled: onlyOne,
           title: onlyOne
-            ? "Add another location in Administration → Storage first"
+            ? "Add another storage in Administration → Storage first"
             : undefined,
           onSelect: () => void this.changeStorage(user),
         },
@@ -380,7 +379,11 @@ class AdminView {
             "select",
             { class: "dialog-input" },
             volumes.map((volume) =>
-              h("option", { value: volume.id === null ? "" : String(volume.id) }, volume.name),
+              h(
+                "option",
+                { value: volume.id === null ? "" : String(volume.id) },
+                volume.name,
+              ),
             ),
           );
     await nameDialog({
@@ -395,7 +398,11 @@ class AdminView {
               { class: "dialog-field" },
               "Keep their files on",
               disk,
-              h("span", { class: "hint" }, "A folder with their username is created there."),
+              h(
+                "span",
+                { class: "hint" },
+                "A folder with their username is created there.",
+              ),
             ),
       submit: async (username) => {
         created = await api.post<CreatedUser>("/api/admin/users", { username });
@@ -409,7 +416,9 @@ class AdminView {
     // 新帳號還沒有任何檔案：換位置會立刻完成，不需要搬移
     if (disk !== null && disk.value !== "") {
       try {
-        await api.put(`/api/admin/users/${user.id}/storage`, { volume_id: Number(disk.value) });
+        await api.put(`/api/admin/users/${user.id}/storage`, {
+          volume_id: Number(disk.value),
+        });
       } catch (error) {
         if (!isHandledGlobally(error)) {
           this.errorBox.textContent = `${user.username} was created, but their files are kept on Default: ${messageOf(error)}`;
@@ -526,9 +535,7 @@ class AdminView {
     if (!confirmed) {
       return;
     }
-    this.perform(() =>
-      api.delete(`/api/admin/users/${user.id}/storage/move`),
-    );
+    this.perform(() => api.delete(`/api/admin/users/${user.id}/storage/move`));
   }
 
   /** 刪除使用者與他所有的檔案。必須輸入帳號名稱才能確認 */
@@ -722,7 +729,11 @@ function chooseVolume(
     if (firstFree !== undefined) {
       firstFree.selected = true;
     }
-    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const cancel = h(
+      "button",
+      { type: "button", class: "secondary" },
+      "Cancel",
+    );
     const confirm = h(
       "button",
       { type: "submit", class: "primary", disabled: firstFree === undefined },
@@ -736,9 +747,9 @@ function chooseVolume(
       h(
         "p",
         { class: "dialog-message" },
-        "Their files are copied to the new location in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.",
+        "Their files are copied to the new storage in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.",
       ),
-      h("label", { class: "dialog-field" }, "Location", select),
+      h("label", { class: "dialog-field" }, "Storage", select),
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
     const dialog = h("dialog", { class: "dialog", "aria-label": title }, form);

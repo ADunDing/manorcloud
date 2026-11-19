@@ -1,16 +1,13 @@
 mod admin;
 mod assets;
 mod auth;
-mod browse;
 mod csrf;
 mod download;
 mod error;
 mod extract;
-mod files;
-mod items;
 mod range;
-mod register;
 mod shutdown;
+mod spaces;
 mod sso;
 mod state;
 mod storage;
@@ -86,15 +83,12 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
     Router::new()
         .merge(auth::router())
         .merge(admin::router())
-        .merge(files::router(upload_limit))
-        .merge(download::router())
-        .merge(items::router())
+        .merge(spaces::router(upload_limit))
         .merge(uploads::router())
         .merge(trash::router())
         .merge(sso::router())
         .merge(two_factor::router())
         .merge(storage::router())
-        .merge(browse::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }
 

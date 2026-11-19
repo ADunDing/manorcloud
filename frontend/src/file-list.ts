@@ -44,7 +44,7 @@ export function saveView(view: ViewMode): void {
  */
 export const DRAG_TYPE = "application/x-manorcloud-items";
 
-export interface FileListOptions {
+interface FileListOptions {
   readonly view: ViewMode;
   /** 雙擊或按 Enter：資料夾進入、檔案下載 */
   readonly onOpen: (item: FileItem) => void;

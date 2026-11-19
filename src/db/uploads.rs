@@ -15,7 +15,7 @@ use sqlx::{FromRow, SqlitePool};
 /// `concat!` 在編譯時把字串接起來，結果仍是 `&'static str`，欄位清單也只寫一次。
 macro_rules! columns {
     () => {
-        "id, owner_id, parent_id, name, size, received, file_modified, created_at, updated_at"
+        "id, owner_id, space, dir, name, size, received, file_modified, created_at, updated_at"
     };
 }
 
@@ -24,7 +24,10 @@ macro_rules! columns {
 pub struct Upload {
     pub id: String,
     pub owner_id: i64,
-    pub parent_id: Option<i64>,
+    /// 上傳到哪個空間（與網址的 space= 相同：me、default、儲存位置的編號）
+    pub space: String,
+    /// 空間中的哪個資料夾；空字串是最上層
+    pub dir: String,
     pub name: String,
     pub size: i64,
     pub received: i64,
@@ -37,7 +40,8 @@ pub struct Upload {
 pub struct NewUpload<'a> {
     pub id: &'a str,
     pub owner_id: i64,
-    pub parent_id: Option<i64>,
+    pub space: &'a str,
+    pub dir: &'a str,
     /// 必須已經通過 validate_file_name
     pub name: &'a str,
     pub size: i64,
@@ -50,9 +54,6 @@ pub enum CreateUploadError {
     TooManyPending {
         limit: u32,
     },
-    /// 父資料夾不存在、或屬於其他使用者（由複合外鍵擋下）。
-    /// HTTP 層與 files 相同，一律回傳 404，不透露資料夾是否存在
-    ParentNotFound,
     Db(sqlx::Error),
 }
 
@@ -62,7 +63,6 @@ impl fmt::Display for CreateUploadError {
             CreateUploadError::TooManyPending { limit } => {
                 write!(f, "too many unfinished uploads (limit {limit})")
             }
-            CreateUploadError::ParentNotFound => f.write_str("parent folder not found"),
             CreateUploadError::Db(e) => write!(f, "database error: {e}"),
         }
     }
@@ -80,8 +80,8 @@ pub async fn create_upload(
     max_pending: u32,
 ) -> Result<Upload, CreateUploadError> {
     const SQL: &str = concat!(
-        "INSERT INTO uploads (id, owner_id, parent_id, name, size, file_modified) ",
-        "SELECT ?, ?, ?, ?, ?, ? ",
+        "INSERT INTO uploads (id, owner_id, space, dir, name, size, file_modified) ",
+        "SELECT ?, ?, ?, ?, ?, ?, ? ",
         "WHERE (SELECT COUNT(*) FROM uploads WHERE owner_id = ?) < ? ",
         "RETURNING ",
         columns!()
@@ -90,7 +90,8 @@ pub async fn create_upload(
     let inserted = sqlx::query_as::<_, Upload>(SQL)
         .bind(new.id)
         .bind(new.owner_id)
-        .bind(new.parent_id)
+        .bind(new.space)
+        .bind(new.dir)
         .bind(new.name)
         .bind(new.size)
         .bind(new.file_modified)
@@ -98,15 +99,7 @@ pub async fn create_upload(
         .bind(max_pending)
         .fetch_optional(pool)
         .await
-        .map_err(|e| {
-            if e.as_database_error()
-                .is_some_and(|db| db.is_foreign_key_violation())
-            {
-                CreateUploadError::ParentNotFound
-            } else {
-                CreateUploadError::Db(e)
-            }
-        })?;
+        .map_err(CreateUploadError::Db)?;
 
     // 沒有寫入任何一列：WHERE 的數量條件不成立
     inserted.ok_or(CreateUploadError::TooManyPending { limit: max_pending })
@@ -196,7 +189,7 @@ pub async fn pending_bytes(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
 /// 刪除超過 `cutoff`（Unix 秒數）沒有進度的上傳紀錄，回傳被刪除的編號。
 ///
 /// 一條敘述同時找出並刪除：不會有「查出來之後、刪除之前剛好有了新進度」的空窗。
-/// 垃圾回收接著刪除這些編號的暫存檔
+/// 暫存檔接著被垃圾回收當作孤兒清除
 pub async fn delete_stale(pool: &SqlitePool, cutoff: i64) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar("DELETE FROM uploads WHERE updated_at < ? RETURNING id")
         .bind(cutoff)
@@ -214,17 +207,18 @@ pub async fn all_ids(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{files as files_db, user};
+    use crate::db::user;
 
     fn id(n: u32) -> String {
         format!("{n:032x}")
     }
 
-    fn new_upload(id: &str, owner_id: i64, parent_id: Option<i64>) -> NewUpload<'_> {
+    fn new_upload(id: &str, owner_id: i64, _unused: Option<i64>) -> NewUpload<'_> {
         NewUpload {
             id,
             owner_id,
-            parent_id,
+            space: "me",
+            dir: "相片",
             name: "movie.mp4",
             size: 100,
             file_modified: Some(1_700_000_000_000),
@@ -295,20 +289,6 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn other_users_folder_is_rejected(pool: SqlitePool) {
-        let carol = make_user(&pool, "carol").await;
-        let dave = make_user(&pool, "dave").await;
-        let daves_folder = files_db::create_folder(&pool, dave, None, "dave's")
-            .await
-            .unwrap()
-            .id;
-
-        let result = create_upload(&pool, &new_upload(&id(1), carol, Some(daves_folder)), 5).await;
-
-        assert!(matches!(result, Err(CreateUploadError::ParentNotFound)));
-    }
-
-    #[sqlx::test]
     async fn invalid_ids_are_rejected_by_the_database(pool: SqlitePool) {
         let carol = make_user(&pool, "carol").await;
 
@@ -375,28 +355,6 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    // ==================== 連帶刪除 ====================
-
-    #[sqlx::test]
-    async fn deleting_the_folder_removes_its_uploads(pool: SqlitePool) {
-        let carol = make_user(&pool, "carol").await;
-        let folder = files_db::create_folder(&pool, carol, None, "videos")
-            .await
-            .unwrap()
-            .id;
-        create_upload(&pool, &new_upload(&id(1), carol, Some(folder)), 5)
-            .await
-            .unwrap();
-
-        sqlx::query("DELETE FROM files WHERE id = ?")
-            .bind(folder)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        assert_eq!(find_upload(&pool, carol, &id(1)).await.unwrap(), None);
     }
 
     // ==================== 空間與同名 ====================

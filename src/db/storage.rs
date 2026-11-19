@@ -6,8 +6,6 @@
 //! 巨集需要一個已經有這些表的資料庫才能編譯。#[sqlx::test] 會套用所有 migration，
 //! 測試照樣能驗證每一條 SQL。
 
-use std::collections::HashSet;
-
 use sqlx::{FromRow, SqlitePool};
 
 /// 一個儲存位置
@@ -69,8 +67,6 @@ pub enum DeleteVolumeError {
     NotFound,
     /// 還有使用者在這個位置，或正在搬過來
     InUse,
-    /// 管理員在這個位置上的檔案空間還有檔案（含垃圾桶）
-    HasFiles,
     Db(sqlx::Error),
 }
 
@@ -80,19 +76,13 @@ impl From<sqlx::Error> for DeleteVolumeError {
     }
 }
 
-/// 刪除儲存位置的紀錄，以及管理員在這裡的檔案空間（必須已經是空的）。
-/// 回傳檔案空間的資料夾名稱，呼叫端把它從磁碟上移除；其他資料夾不受影響。
-///
-/// 檢查與刪除在同一個 IMMEDIATE 交易中：檢查之後不會有人剛好被換到這個位置
-pub async fn delete_volume(
-    pool: &SqlitePool,
-    id: i64,
-) -> Result<Option<String>, DeleteVolumeError> {
+/// 刪除儲存位置的紀錄。硬碟上是否還有檔案由呼叫端先確認；
+/// 這裡在同一個 IMMEDIATE 交易中確認沒有人在這個位置，檢查之後不會有人剛好被換過來
+pub async fn delete_volume(pool: &SqlitePool, id: i64) -> Result<(), DeleteVolumeError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     let in_use: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM users WHERE storage_volume_id = ?1 \
-                          AND id NOT IN (SELECT user_id FROM storage_spaces)) \
+        "SELECT EXISTS (SELECT 1 FROM users WHERE storage_volume_id = ?1) \
              OR EXISTS (SELECT 1 FROM storage_moves WHERE target_volume_id = ?1)",
     )
     .bind(id)
@@ -100,29 +90,6 @@ pub async fn delete_volume(
     .await?;
     if in_use {
         return Err(DeleteVolumeError::InUse);
-    }
-
-    let space: Option<(i64, String)> = sqlx::query_as(
-        "SELECT users.id, COALESCE(users.storage_folder, users.username) \
-         FROM storage_spaces JOIN users ON users.id = storage_spaces.user_id \
-         WHERE storage_spaces.volume_key = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some((space_user, _)) = &space {
-        let has_files: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM files WHERE owner_id = ?)")
-                .bind(space_user)
-                .fetch_one(&mut *tx)
-                .await?;
-        if has_files {
-            return Err(DeleteVolumeError::HasFiles);
-        }
-        sqlx::query("DELETE FROM users WHERE id = ?")
-            .bind(space_user)
-            .execute(&mut *tx)
-            .await?;
     }
 
     let deleted = sqlx::query("DELETE FROM storage_volumes WHERE id = ?")
@@ -135,52 +102,12 @@ pub async fn delete_volume(
     }
 
     tx.commit().await?;
-    Ok(space.map(|(_, folder)| folder))
-}
-
-// ==================== 管理員在各硬碟上的檔案空間 ====================
-
-/// 檔案空間在磁碟上的資料夾名稱。含有 `.`，一般帳號名稱不允許，不會撞名
-pub const SPACE_FOLDER: &str = "manorcloud.admin";
-
-/// 管理員在這個位置上的檔案空間（隱藏帳號）的編號，第一次使用時建立。
-/// 位置必須存在，由呼叫端先確認
-pub async fn space_account(pool: &SqlitePool, volume: Option<i64>) -> Result<i64, sqlx::Error> {
-    let key = volume.unwrap_or(0);
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-
-    let existing: Option<i64> =
-        sqlx::query_scalar("SELECT user_id FROM storage_spaces WHERE volume_key = ?")
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if let Some(id) = existing {
-        return Ok(id);
-    }
-
-    // 停用、沒有密碼：不能登入。帳號名稱含有 ~，一般帳號不允許
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (username, disabled, storage_volume_id, storage_folder) \
-         VALUES (?, 1, ?, ?) RETURNING id",
-    )
-    .bind(format!("~disk-{key}"))
-    .bind(volume)
-    .bind(SPACE_FOLDER)
-    .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query("INSERT INTO storage_spaces (volume_key, user_id) VALUES (?, ?)")
-        .bind(key)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
-    Ok(id)
+    Ok(())
 }
 
 // ==================== 使用者的位置 ====================
 
-/// 使用者的檔案目前在哪裡：`{位置}/{folder}/`
+/// 使用者的檔案目前在哪裡：一般使用者是 `{位置}/users/{folder}/`，管理員是位置的最上層
 #[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct UserLocation {
     /// None：資料目錄
@@ -226,9 +153,7 @@ pub async fn assignments(pool: &SqlitePool) -> Result<Vec<Assignment>, sqlx::Err
     sqlx::query_as(
         "SELECT id AS user_id, username, storage_volume_id AS volume_id, \
                 COALESCE(storage_folder, username) AS folder \
-         FROM users \
-         WHERE id NOT IN (SELECT user_id FROM storage_spaces) \
-         ORDER BY username",
+         FROM users ORDER BY username",
     )
     .fetch_all(pool)
     .await
@@ -257,14 +182,6 @@ pub async fn user_folders(pool: &SqlitePool) -> Result<Vec<UserFolder>, sqlx::Er
     )
     .fetch_all(pool)
     .await
-}
-
-/// 使用者未完成的上傳（啟動時整理資料夾用）
-pub async fn upload_ids(pool: &SqlitePool, user_id: i64) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT id FROM uploads WHERE owner_id = ? ORDER BY id")
-        .bind(user_id)
-        .fetch_all(pool)
-        .await
 }
 
 /// 帳號名稱與資料夾名稱（帳號改名後，讓資料夾跟著改名用）
@@ -398,15 +315,18 @@ impl From<sqlx::Error> for StartMoveError {
 
 /// 把使用者換到另一個位置。目的地是否存在由呼叫端先確認（外鍵也會擋下）。
 ///
-/// - 沒有任何檔案（含垃圾桶）：直接修改位置
-/// - 有檔案：建立搬移紀錄，並取消這個人所有未完成的上傳。
-///   它們的暫存檔在原本的位置，搬完之後無法在新位置完成
+/// `total_bytes` 是要搬的大小（My files 與垃圾桶），由呼叫端從硬碟上算出：
+/// - None（沒有任何檔案）：直接修改位置
+/// - Some：建立搬移紀錄，由背景工作複製過去
 ///
+/// 兩種情況都會取消這個人上傳到 My files、還沒完成的上傳：
+/// 它們的暫存檔在原本的位置，搬完之後無法在新位置完成。
 /// 失敗、等待重試的搬移會被新的取代
 pub async fn start_move(
     pool: &SqlitePool,
     user_id: i64,
     target: Option<i64>,
+    total_bytes: Option<i64>,
 ) -> Result<StartMove, StartMoveError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
@@ -456,27 +376,18 @@ pub async fn start_move(
         return Err(StartMoveError::FolderTaken);
     }
 
-    let (files, total): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files \
-         WHERE owner_id = ? AND storage_key IS NOT NULL",
-    )
-    .bind(user_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    if files == 0 {
+    let cancelled = cancel_uploads(&mut tx, user_id).await?;
+    let Some(total) = total_bytes else {
         sqlx::query("UPDATE users SET storage_volume_id = ? WHERE id = ?")
             .bind(target)
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
-        // 未完成的上傳也在原本的位置
-        let cancelled = cancel_uploads(&mut tx, user_id).await?;
         tx.commit().await?;
         return Ok(StartMove::Switched {
             cancelled_uploads: cancelled,
         });
-    }
+    };
 
     let move_id: i64 = sqlx::query_scalar(
         "INSERT INTO storage_moves (user_id, target_volume_id, total_bytes) \
@@ -484,10 +395,9 @@ pub async fn start_move(
     )
     .bind(user_id)
     .bind(target)
-    .bind(total)
+    .bind(total.max(0))
     .fetch_one(&mut *tx)
     .await?;
-    let cancelled = cancel_uploads(&mut tx, user_id).await?;
 
     tx.commit().await?;
     Ok(StartMove::Started {
@@ -496,25 +406,29 @@ pub async fn start_move(
     })
 }
 
+/// 直接修改使用者的位置，不搬任何檔案（管理員：他的 My files 就是那顆硬碟的最上層）
+pub async fn set_volume(
+    pool: &SqlitePool,
+    user_id: i64,
+    target: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let updated = sqlx::query("UPDATE users SET storage_volume_id = ? WHERE id = ?")
+        .bind(target)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(updated == 1)
+}
+
 async fn cancel_uploads(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("DELETE FROM uploads WHERE owner_id = ? RETURNING id")
+    sqlx::query_scalar("DELETE FROM uploads WHERE owner_id = ? AND space = 'me' RETURNING id")
         .bind(user_id)
         .fetch_all(&mut **tx)
         .await
-}
-
-/// 要搬的檔案：(storage_key, 大小)，含垃圾桶
-pub async fn move_keys(pool: &SqlitePool, user_id: i64) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT storage_key, COALESCE(size, 0) FROM files \
-         WHERE owner_id = ? AND storage_key IS NOT NULL ORDER BY storage_key",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
 }
 
 /// 更新進度。回傳 false：這筆搬移已經被取消（或使用者被刪除），背景工作應該停下來
@@ -551,21 +465,10 @@ pub enum Finish {
     Done,
     /// 紀錄已經不在或已經失敗（被取消、使用者被刪除），什麼都沒有改
     Cancelled,
-    /// 還有沒複製到的檔案：搬移開始的那一刻剛好有上傳或複製正在完成。
-    /// 呼叫端把它們也複製過去，再呼叫一次
-    Missing(Vec<(String, i64)>),
 }
 
-/// 搬完了：確認每個檔案都已經複製，再修改使用者的位置並刪除搬移紀錄，在同一個交易中完成。
-///
-/// 為什麼要再確認一次：搬移開始時才被擋下的是「之後才開始」的上傳與複製，
-/// 開始之前就已經在進行、剛好在這段期間完成的，它們的 blob 寫在原本的位置。
-/// IMMEDIATE 交易讓確認與切換之間不會再有新的檔案寫入
-pub async fn finish_move(
-    pool: &SqlitePool,
-    move_id: i64,
-    copied: &HashSet<String>,
-) -> Result<Finish, sqlx::Error> {
+/// 搬完了：修改使用者的位置（垃圾桶的紀錄也一起），並刪除搬移紀錄，在同一個交易中完成
+pub async fn finish_move(pool: &SqlitePool, move_id: i64) -> Result<Finish, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     let found: Option<(i64, Option<i64>)> = sqlx::query_as(
@@ -578,27 +481,16 @@ pub async fn finish_move(
         return Ok(Finish::Cancelled);
     };
 
-    let keys: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT storage_key, COALESCE(size, 0) FROM files \
-         WHERE owner_id = ? AND storage_key IS NOT NULL ORDER BY storage_key",
-    )
-    .bind(user_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let missing: Vec<(String, i64)> = keys
-        .into_iter()
-        .filter(|(key, _)| !copied.contains(key))
-        .collect();
-    if !missing.is_empty() {
-        // tx 在這裡被丟棄，自動 rollback
-        return Ok(Finish::Missing(missing));
-    }
-
     sqlx::query("DELETE FROM storage_moves WHERE id = ?")
         .bind(move_id)
         .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE users SET storage_volume_id = ? WHERE id = ?")
+        .bind(target)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE trash SET volume_id = ? WHERE owner_id = ?")
         .bind(target)
         .bind(user_id)
         .execute(&mut *tx)
@@ -620,7 +512,7 @@ pub async fn retry_move(pool: &SqlitePool, user_id: i64) -> Result<Option<i64>, 
 }
 
 /// 取消搬移（進行中或失敗的）：檔案留在原本的位置。
-/// 已經複製到目的地的部分沒有紀錄參照，由垃圾回收清除。回傳是否有紀錄被刪除
+/// 已經複製到目的地的部分在那顆硬碟的 .manorcloud/tmp 中，由垃圾回收清除。回傳是否有紀錄被刪除
 pub async fn cancel_move(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::Error> {
     let deleted = sqlx::query("DELETE FROM storage_moves WHERE user_id = ?")
         .bind(user_id)
@@ -630,41 +522,10 @@ pub async fn cancel_move(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::
     Ok(deleted > 0)
 }
 
-// ==================== 垃圾回收 ====================
-
-/// 某個使用者、某個分層中的 storage_key（垃圾回收用）。
-///
-/// 每個使用者有自己的資料夾，垃圾回收逐一檢查每個人的資料夾：
-/// 資料夾中不屬於這個人的 blob 都是孤兒（例如搬移完成後留在原本位置的複本）。
-///
-/// 用範圍查詢 `>= 'ab' AND < 'abg'` 而不是 `substr(storage_key, 1, 2) = 'ab'`：
-/// 後者會讓 storage_key 的唯一索引失效。
-/// 上界成立的原因：key 只含 0-9a-f，第三個字元最大是 'f'，而 'g' 排在 'f' 之後。
-pub async fn keys_in_shard(
-    pool: &SqlitePool,
-    user_id: i64,
-    shard: &str,
-) -> Result<Vec<String>, sqlx::Error> {
-    let upper = format!("{shard}g");
-    sqlx::query_scalar(
-        "SELECT storage_key FROM files \
-         WHERE storage_key >= ? AND storage_key < ? AND owner_id = ?",
-    )
-    .bind(shard)
-    .bind(upper)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{files, user};
-
-    fn key(n: u32) -> String {
-        format!("{n:032x}")
-    }
+    use crate::db::user;
 
     async fn volume(pool: &SqlitePool, name: &str) -> i64 {
         add_volume(pool, name, &format!("/mnt/{name}"))
@@ -713,7 +574,7 @@ mod tests {
         let carol = user::create_user(&pool, "carol", "x").await.unwrap();
         let disk = volume(&pool, "disk2").await;
 
-        let result = start_move(&pool, carol, Some(disk)).await.unwrap();
+        let result = start_move(&pool, carol, Some(disk), None).await.unwrap();
 
         assert_eq!(
             result,
@@ -725,7 +586,7 @@ mod tests {
         assert_eq!(here.volume_id, Some(disk));
         assert_eq!(here.path.as_deref(), Some("/mnt/disk2"));
         assert!(matches!(
-            start_move(&pool, carol, Some(disk)).await,
+            start_move(&pool, carol, Some(disk), None).await,
             Err(StartMoveError::AlreadyThere)
         ));
     }
@@ -734,28 +595,24 @@ mod tests {
     async fn moving_files_tracks_progress_and_finishes(pool: SqlitePool) {
         let carol = user::create_user(&pool, "carol", "x").await.unwrap();
         let disk = volume(&pool, "disk2").await;
-        files::create_file(&pool, carol, None, "a", 10, None, &key(1))
-            .await
-            .unwrap();
-        files::create_file(&pool, carol, None, "b", 5, None, &key(2))
+        sqlx::query("INSERT INTO trash (owner_id, path, kind) VALUES (?, 'a', 'file')")
+            .bind(carol)
+            .execute(&pool)
             .await
             .unwrap();
 
-        let StartMove::Started { move_id, .. } =
-            start_move(&pool, carol, Some(disk)).await.unwrap()
+        let StartMove::Started { move_id, .. } = start_move(&pool, carol, Some(disk), Some(15))
+            .await
+            .unwrap()
         else {
             panic!("expected a move");
         };
 
         assert!(location(&pool, carol).await.moving);
         assert!(matches!(
-            start_move(&pool, carol, None).await,
+            start_move(&pool, carol, None, None).await,
             Err(StartMoveError::InProgress)
         ));
-        assert_eq!(
-            move_keys(&pool, carol).await.unwrap(),
-            [(key(1), 10), (key(2), 5)]
-        );
         assert!(set_progress(&pool, move_id, 10).await.unwrap());
         assert_eq!(
             find_move(&pool, move_id)
@@ -766,41 +623,36 @@ mod tests {
             10
         );
 
-        // 只複製了一個：不能完成，回報還沒複製的
-        let mut copied = HashSet::from([key(1)]);
-        assert_eq!(
-            finish_move(&pool, move_id, &copied).await.unwrap(),
-            Finish::Missing(vec![(key(2), 5)])
-        );
-        assert!(location(&pool, carol).await.moving);
-
-        copied.insert(key(2));
-        assert_eq!(
-            finish_move(&pool, move_id, &copied).await.unwrap(),
-            Finish::Done
-        );
+        assert_eq!(finish_move(&pool, move_id).await.unwrap(), Finish::Done);
 
         let here = location(&pool, carol).await;
         assert_eq!(here.volume_id, Some(disk));
         assert!(!here.moving);
         assert!(list_moves(&pool).await.unwrap().is_empty());
+        // 垃圾桶的紀錄跟著換到新的位置
+        let trash_volume: Option<i64> = sqlx::query_scalar("SELECT volume_id FROM trash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trash_volume, Some(disk));
     }
 
     #[sqlx::test]
-    async fn starting_a_move_cancels_unfinished_uploads(pool: SqlitePool) {
+    async fn changing_location_cancels_unfinished_uploads(pool: SqlitePool) {
         let carol = user::create_user(&pool, "carol", "x").await.unwrap();
         let disk = volume(&pool, "disk2").await;
-        files::create_file(&pool, carol, None, "a", 1, None, &key(1))
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO uploads (id, owner_id, name, size) VALUES (?, ?, 'x', 3)")
-            .bind(key(9))
-            .bind(carol)
-            .execute(&pool)
-            .await
-            .unwrap();
+        let id = format!("{:032x}", 9);
+        sqlx::query(
+            "INSERT INTO uploads (id, owner_id, space, dir, name, size) \
+             VALUES (?, ?, 'me', '', 'x', 3)",
+        )
+        .bind(&id)
+        .bind(carol)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let result = start_move(&pool, carol, Some(disk)).await.unwrap();
+        let result = start_move(&pool, carol, Some(disk), Some(1)).await.unwrap();
 
         let StartMove::Started {
             cancelled_uploads, ..
@@ -808,18 +660,15 @@ mod tests {
         else {
             panic!("expected a move");
         };
-        assert_eq!(cancelled_uploads, [key(9)]);
+        assert_eq!(cancelled_uploads, [id]);
     }
 
     #[sqlx::test]
     async fn failed_move_stops_blocking_and_can_be_retried_or_cancelled(pool: SqlitePool) {
         let carol = user::create_user(&pool, "carol", "x").await.unwrap();
         let disk = volume(&pool, "disk2").await;
-        files::create_file(&pool, carol, None, "a", 1, None, &key(1))
-            .await
-            .unwrap();
         let StartMove::Started { move_id, .. } =
-            start_move(&pool, carol, Some(disk)).await.unwrap()
+            start_move(&pool, carol, Some(disk), Some(1)).await.unwrap()
         else {
             panic!("expected a move");
         };
@@ -830,9 +679,7 @@ mod tests {
         // 失敗的紀錄不能再推進或完成
         assert!(!set_progress(&pool, move_id, 1).await.unwrap());
         assert_eq!(
-            finish_move(&pool, move_id, &HashSet::from([key(1)]))
-                .await
-                .unwrap(),
+            finish_move(&pool, move_id).await.unwrap(),
             Finish::Cancelled
         );
         assert_eq!(location(&pool, carol).await.volume_id, None);
@@ -848,7 +695,7 @@ mod tests {
 
         // 立刻重新開始：新的紀錄不會拿到舊的編號，舊的工作仍然碰不到它
         let StartMove::Started { move_id: again, .. } =
-            start_move(&pool, carol, Some(disk)).await.unwrap()
+            start_move(&pool, carol, Some(disk), Some(1)).await.unwrap()
         else {
             panic!("expected a move");
         };
@@ -860,54 +707,19 @@ mod tests {
     async fn volumes_in_use_cannot_be_deleted(pool: SqlitePool) {
         let carol = user::create_user(&pool, "carol", "x").await.unwrap();
         let disk = volume(&pool, "disk2").await;
-        start_move(&pool, carol, Some(disk)).await.unwrap();
+        start_move(&pool, carol, Some(disk), None).await.unwrap();
 
         assert!(matches!(
             delete_volume(&pool, disk).await,
             Err(DeleteVolumeError::InUse)
         ));
 
-        start_move(&pool, carol, None).await.unwrap();
+        start_move(&pool, carol, None, None).await.unwrap();
         delete_volume(&pool, disk).await.unwrap();
         assert!(matches!(
             delete_volume(&pool, disk).await,
             Err(DeleteVolumeError::NotFound)
         ));
-    }
-
-    #[sqlx::test]
-    async fn keys_in_shard_returns_only_that_users_shard(pool: SqlitePool) {
-        let owner = user::create_user(&pool, "carol", "x").await.unwrap();
-        let other = user::create_user(&pool, "alice", "x").await.unwrap();
-        let in_00 = key(1); // "000...01"，分層 00
-        let in_01 = format!("01{}", "0".repeat(30));
-        let others = key(2);
-        for (i, k) in [&in_00, &in_01].into_iter().enumerate() {
-            files::create_file(&pool, owner, None, &format!("{i}.txt"), 0, None, k)
-                .await
-                .unwrap();
-        }
-        files::create_file(&pool, other, None, "x.txt", 0, None, &others)
-            .await
-            .unwrap();
-        // 資料夾沒有 storage_key，不應出現在任何分層
-        files::create_folder(&pool, owner, None, "docs")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            keys_in_shard(&pool, owner, "00").await.unwrap(),
-            vec![in_00]
-        );
-        assert_eq!(
-            keys_in_shard(&pool, owner, "01").await.unwrap(),
-            vec![in_01]
-        );
-        assert!(keys_in_shard(&pool, owner, "ff").await.unwrap().is_empty());
-        assert_eq!(
-            keys_in_shard(&pool, other, "00").await.unwrap(),
-            vec![others]
-        );
     }
 
     #[sqlx::test]
@@ -932,15 +744,12 @@ mod tests {
         assert!(!set_folder(&pool, alice, "alice", "carol").await.unwrap());
 
         // 不同位置可以：alice 搬到 disk2 之後，在那裡叫 carol 也沒有關係
-        start_move(&pool, alice, Some(disk)).await.unwrap();
+        start_move(&pool, alice, Some(disk), None).await.unwrap();
         assert!(set_folder(&pool, alice, "alice", "carol").await.unwrap());
 
         // 但 carol 不能再搬到 disk2：那裡已經有叫 carol 的資料夾
-        files::create_file(&pool, carol, None, "a", 1, None, &key(1))
-            .await
-            .unwrap();
         assert!(matches!(
-            start_move(&pool, carol, Some(disk)).await,
+            start_move(&pool, carol, Some(disk), Some(1)).await,
             Err(StartMoveError::FolderTaken)
         ));
     }

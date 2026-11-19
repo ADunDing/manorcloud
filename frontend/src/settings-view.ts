@@ -406,7 +406,51 @@ function renderAppearance(panel: HTMLElement): void {
     "You can also switch with the buttons at the top right of My files.",
   );
 
-  panel.replaceChildren(h("h2", { class: "section-title" }, "Appearance"), themeGroup, viewGroup);
+  // 隱藏檔：存在伺服器上，每台裝置都一樣
+  const hidden = h("input", { type: "checkbox", disabled: true });
+  const hiddenError = h("p", { class: "error", role: "alert" });
+  const hiddenGroup = h(
+    "fieldset",
+    { class: "settings-group" },
+    h("legend", {}, "Hidden files"),
+    h(
+      "div",
+      { class: "choices" },
+      choiceLabel(
+        hidden,
+        "Show hidden files",
+        "Files whose names start with a dot, such as .DS_Store from a Mac",
+      ),
+    ),
+    hiddenError,
+  );
+  void (async () => {
+    try {
+      const prefs = await api.get<{ show_hidden: boolean }>("/api/me/preferences");
+      hidden.checked = prefs.show_hidden;
+      hidden.disabled = false;
+    } catch (error) {
+      if (!isHandledGlobally(error)) {
+        hiddenError.textContent = messageOf(error);
+      }
+    }
+  })();
+  hidden.addEventListener("change", () => {
+    hiddenError.textContent = "";
+    void api.put("/api/me/preferences", { show_hidden: hidden.checked }).catch((error: unknown) => {
+      hidden.checked = !hidden.checked;
+      if (!isHandledGlobally(error)) {
+        hiddenError.textContent = messageOf(error);
+      }
+    });
+  });
+
+  panel.replaceChildren(
+    h("h2", { class: "section-title" }, "Appearance"),
+    themeGroup,
+    viewGroup,
+    hiddenGroup,
+  );
 }
 
 // ==================== Administration ====================

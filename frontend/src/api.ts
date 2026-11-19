@@ -20,7 +20,7 @@ export class ApiError extends Error {
   }
 }
 
-export interface RequestOptions {
+interface RequestOptions {
   /**
    * 收到 401 時是否通知「登入失效」，預設為 true。
    * 登入 API 的 401 代表「帳號或密碼錯誤」而不是「登入失效」，呼叫時要設為 false，

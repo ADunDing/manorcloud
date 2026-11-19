@@ -7,7 +7,7 @@
 import { api } from "./api.js";
 
 /** 登入畫面需要的資訊（GET /api/auth/sso） */
-export interface SsoInfo {
+interface SsoInfo {
   readonly enabled: boolean;
   readonly display_name: string | null;
 }
@@ -51,7 +51,7 @@ export async function startSso(mode: "login" | "link"): Promise<void> {
 }
 
 /** 從身分提供者回來的結果 */
-export interface SsoResult {
+interface SsoResult {
   /** 失敗的說明；沒有失敗時為 null */
   readonly error: string | null;
   /** 剛完成連結 */

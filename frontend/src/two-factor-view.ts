@@ -32,7 +32,7 @@ interface RecoveryCodes {
   readonly recovery_codes: readonly string[];
 }
 
-export interface SetupOptions {
+interface SetupOptions {
   /** 完成（看過備用碼並按下 Done）之後呼叫 */
   readonly onDone: () => void;
   /** 有的話顯示 Cancel；管理員要求設定的畫面沒有 */
@@ -196,7 +196,7 @@ export function codeInput(): HTMLInputElement {
 }
 
 /** QR code：每個黑點是一個 1×1 的方塊，全部畫成同一條路徑；四周留 4 格空白（規格要求） */
-export function qrSvg(size: number, modules: string): SVGSVGElement {
+function qrSvg(size: number, modules: string): SVGSVGElement {
   const margin = 4;
   const total = size + margin * 2;
   const svg = document.createElementNS(SVG_NS, "svg");

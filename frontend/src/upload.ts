@@ -31,15 +31,12 @@ export interface UploadHandle {
  */
 export function startUpload(
   file: File,
-  folderId: number | null,
+  dir: string,
   onProgress: (fraction: number) => void,
   space: Space = null,
 ): UploadHandle {
-  const params = new URLSearchParams({ name: file.name });
-  if (folderId !== null) {
-    params.set("parent_id", String(folderId));
-  }
-  // 管理員在另一顆硬碟上的檔案（見 space.ts）
+  const params = new URLSearchParams({ name: file.name, path: dir });
+  // 檔案在哪一個空間（見 space.ts）
   if (space !== null) {
     params.set("space", space);
   }
@@ -63,7 +60,7 @@ export function startUpload(
     });
 
     xhr.addEventListener("error", () => reject(new ApiError(0, "Can't reach the server")));
-    // 伺服器端的 TempBlob 守衛會刪除寫到一半的暫存檔
+    // 伺服器端會刪除寫到一半的暫存檔
     xhr.addEventListener("abort", () => reject(new UploadCancelled()));
   });
 

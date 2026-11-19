@@ -62,7 +62,7 @@ pub fn run(args: &[OsString]) -> Result<(), String> {
             layout::CONFIG_DIR,
             layout::STATE_DIR
         );
-        println!("To keep a copy of the files first: sudo manorcloud export <output-dir>");
+        println!("The files are still in the data directory, with their real names and folders.");
         return Ok(());
     }
 
@@ -99,7 +99,7 @@ fn parse_args(args: &[OsString]) -> Result<bool, String> {
 
 /// 設定中指到 STATE_DIR 以外的資料位置，每一項是一行要顯示給使用者的文字。
 ///
-/// 用與伺服器、export 相同的規則讀取設定。設定檔讀不到或格式錯誤時不阻擋移除，
+/// 用與伺服器相同的規則讀取設定。設定檔讀不到或格式錯誤時不阻擋移除，
 /// 但提醒使用者自行確認：寧可多提醒，不可讓人以為資料都已刪除。
 fn data_outside_state_dir() -> Vec<String> {
     let settings = match config::load_from_file(Path::new(layout::ENV_FILE)) {
@@ -195,8 +195,10 @@ fn confirm_purge(left_behind: &[String]) -> Result<(), String> {
             summary.push_str(&format!("  {line}\n"));
         }
     }
-    summary
-        .push_str("\nTo keep a copy of the files first: sudo manorcloud export <output-dir>\n\n");
+    summary.push_str(
+        "\nTo keep the files, copy them out of the data directory first \
+         (they have their real names and folders).\n\n",
+    );
     write_tty(&tty, &summary)?;
 
     // 讀取用的 BufReader 只建立一次：每次重建會丟掉已經讀進緩衝區、還沒處理的內容

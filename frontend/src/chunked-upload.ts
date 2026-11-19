@@ -26,7 +26,10 @@ const CHUNK_TIMEOUT_MS = 5 * 60 * 1000;
 /** 伺服器上一筆未完成的上傳 */
 export interface UploadInfo {
   id: string;
-  parent_id: number | null;
+  /** 上傳到哪個空間（space= 的值） */
+  space: string;
+  /** 空間中的哪個資料夾，例如 相片/2026 */
+  path: string;
   name: string;
   size: number;
   received: number;
@@ -34,8 +37,8 @@ export interface UploadInfo {
   updated_at: number;
 }
 
-export interface ChunkedUploadOptions {
-  /** 目標所在的檔案空間（管理員在另一顆硬碟上的檔案）；沒有時是自己的檔案 */
+interface ChunkedUploadOptions {
+  /** 目標所在的空間（見 space.ts）；沒有時是自己的 My files */
   space?: Space;
   onProgress: (fraction: number) => void;
   /** 顯示重試等提示，null 代表清除 */
@@ -67,11 +70,11 @@ export function isSameFile(file: File, info: UploadInfo): boolean {
 /** 開始分段上傳 */
 export function startChunkedUpload(
   file: File,
-  folderId: number | null,
+  dir: string,
   options: ChunkedUploadOptions,
 ): UploadHandle {
   const control = new Control(options.space ?? null);
-  const done = run(file, folderId, options, control);
+  const done = run(file, dir, options, control);
   return { done, cancel: () => control.cancel() };
 }
 
@@ -212,7 +215,7 @@ function retryNotice(error: unknown, delay: number): string {
 
 async function run(
   file: File,
-  folderId: number | null,
+  dir: string,
   options: ChunkedUploadOptions,
   control: Control,
 ): Promise<void> {
@@ -220,7 +223,7 @@ async function run(
   const info =
     options.resume ??
     (await api.post<UploadInfo>(control.url("/api/uploads"), {
-      parent_id: folderId,
+      path: dir,
       name: file.name,
       size: file.size,
       // 重新整理後用來比對是不是同一個檔案

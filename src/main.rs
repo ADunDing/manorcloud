@@ -1,16 +1,18 @@
 mod auth;
 mod bootstrap;
 mod config;
+mod convert;
 mod db;
-mod export;
 mod files;
 mod folders;
 mod gc;
 mod layout;
 mod mover;
 mod rescue;
+mod space;
 mod storage;
 mod systemd;
+mod tree;
 mod uninstall;
 mod web;
 
@@ -32,7 +34,6 @@ ManorCloud runs in the background as a systemd service. Manage it with systemctl
   journalctl -u manorcloud -f       follow the logs
 
 Administration (requires sudo):
-  manorcloud export <output-dir>    export all files with their original names and folders
   manorcloud uninstall [--purge]    remove the program and service;
                                     --purge also deletes /var/lib/manorcloud and the configuration
   sudo -u manorcloud manorcloud reset-2fa <username>
@@ -45,7 +46,7 @@ Other:
 
 Files:
   /etc/manorcloud/manorcloud.env    configuration
-  /var/lib/manorcloud               database and user files
+  /var/lib/manorcloud               database; files are in data/ with their real names
 ";
 
 /// 命令列解析的結果
@@ -56,7 +57,6 @@ enum Command {
     Help,
     Version,
     Run,
-    Export(Vec<OsString>),
     Uninstall(Vec<OsString>),
     ResetTwoFactor(Vec<OsString>),
     /// 不認得的指令或參數，附上原因
@@ -80,7 +80,6 @@ fn parse_command(args: &[OsString]) -> Command {
                 .to_string(),
         ),
         // 子指令自己解析剩下的參數
-        "export" => Command::Export(rest.to_vec()),
         "uninstall" => Command::Uninstall(rest.to_vec()),
         "reset-2fa" => Command::ResetTwoFactor(rest.to_vec()),
         "-h" | "--help" | "help" => Command::Help,
@@ -158,7 +157,6 @@ fn main() -> ExitCode {
             runtime.shutdown_timeout(Duration::from_secs(5));
             ExitCode::SUCCESS
         }
-        Command::Export(rest) => report(runtime().block_on(export::run(&rest))),
         // uninstall 不需要非同步，也就不建立執行環境
         Command::Uninstall(rest) => report(uninstall::run(&rest)),
         Command::ResetTwoFactor(rest) => report(runtime().block_on(rescue::run(&rest))),
@@ -219,23 +217,27 @@ async fn serve() {
         println!("{}", bootstrap::banner(&admin));
     }
 
-    // 舊版把所有人的檔案放在同一個 blobs/ 中：搬進每個人自己的資料夾。
+    // 舊版以隨機名稱存放檔案：放到真實的資料夾與檔名。
     // 必須在垃圾回收與接受請求之前完成；做不完就不啟動，避免檔案看起來不見了
-    if let Err(e) = folders::relayout(&pool, &config.data_dir).await {
-        eprintln!("cannot reorganize the stored files: {e}");
+    if let Err(e) = convert::run(&pool, &config.data_dir).await {
+        eprintln!("cannot move the files to their real names: {e}");
+        std::process::exit(1);
+    }
+    if let Err(e) = storage::init_dirs(&config.data_dir) {
+        eprintln!("cannot prepare {}: {e}", config.data_dir.display());
         std::process::exit(1);
     }
     // 帳號改名之後沒能跟著改名的資料夾，再試一次
     folders::sync_all_names(&pool, &config.data_dir).await;
 
-    // 背景垃圾回收：清除孤兒 blob、殘留暫存檔與過期 session
+    // 背景垃圾回收：清除殘留的暫存檔、過期的垃圾桶項目與 session
     gc::spawn_periodic(
         pool.clone(),
         Arc::from(config.data_dir.as_path()),
         gc::GcPolicy::default(),
     );
 
-    // 上次停止時還沒做完的儲存位置搬移：接著做完（已經複製好的會被略過）
+    // 上次停止時還沒做完的儲存位置搬移：從頭再做一次
     mover::resume_all(&pool, &Arc::from(config.data_dir.as_path())).await;
 
     // 看門狗：定期確認資料庫連線正常後回報 systemd，卡死時由 systemd 重啟
@@ -280,20 +282,12 @@ mod tests {
     }
 
     #[test]
-    fn export_receives_its_arguments() {
-        assert_eq!(
-            parse(&["export", "--env-file", "/tmp/x.env", "/tmp/out"]),
-            Command::Export(vec![
-                OsString::from("--env-file"),
-                OsString::from("/tmp/x.env"),
-                OsString::from("/tmp/out"),
-            ])
-        );
-    }
-
-    #[test]
-    fn export_is_listed_in_help() {
-        assert!(HELP.contains("manorcloud export"));
+    fn export_is_gone() {
+        // 檔案就是硬碟上真實的檔案，直接複製就好
+        assert!(matches!(
+            parse(&["export", "/tmp/out"]),
+            Command::Invalid(_)
+        ));
     }
 
     #[test]

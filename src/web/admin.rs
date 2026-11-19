@@ -202,8 +202,9 @@ async fn update_user(
 
 /// DELETE /api/admin/users/{id}：刪除使用者與他所有的資料。
 ///
-/// 順序與刪除檔案相同：先刪資料庫（commit），再刪 blob；中途失敗只會留下孤兒 blob，
-/// 由垃圾回收清除。不能刪除自己：會立刻失去這個帳號，而且很可能是誤按。
+/// 先刪資料庫，再刪他的資料夾（users/{名稱}）；垃圾桶中的項目沒有紀錄之後由垃圾回收清除。
+/// 管理員的檔案在硬碟的最上層、與其他管理員共用，不會被刪除。
+/// 不能刪除自己：會立刻失去這個帳號，而且很可能是誤按。
 async fn delete_user(
     admin: AdminUser,
     State(pool): State<SqlitePool>,
@@ -216,22 +217,22 @@ async fn delete_user(
         ));
     }
 
-    // 先找出他的資料夾：刪除之後就查不到了。正在搬移時，目的地也有一個
-    let folders = folders::folders_of(&pool, &data_dir, id)
+    // 先找出他的資料夾：刪除之後就查不到了
+    let folder = folders::user_folder(&pool, &data_dir, id)
         .await
         .map_err(AppError::internal)?;
-    let keys = user::delete_user(&pool, id)
+    user::delete_user(&pool, id)
         .await
         .map_err(admin_update_error)?;
-    for folder in &folders {
-        folders::remove_user_folder(folder).await;
+    if let Some(folder) = folder {
+        match tokio::fs::remove_dir_all(&folder).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("admin: cannot remove {}: {e}", folder.display()),
+        }
     }
 
-    println!(
-        "admin: deleted user {id} and {} files by administrator {}",
-        keys.len(),
-        admin.id
-    );
+    println!("admin: deleted user {id} by administrator {}", admin.id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -618,15 +619,13 @@ mod tests {
     // ==================== 刪除 ====================
 
     #[sqlx::test]
-    async fn deleting_user_removes_files_blobs_and_sessions(pool: SqlitePool) {
+    async fn deleting_user_removes_their_folder_and_sessions(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
         make_admin(&t).await;
         let alice = t.other_user("alice").await;
         let alice_cookie = session_for(&t, alice).await;
-        let folder = t.make_folder(alice, None, "Photos").await;
-        let (_, top) = t.store_file(alice, None, "a.txt", b"a").await;
-        let (_, nested) = t.store_file(alice, Some(folder), "b.txt", b"b").await;
-        let (_, mine) = t.store_file(t.user_id, None, "a.txt", b"c").await;
+        std::fs::write(t.home("alice").join("a.txt"), b"a").unwrap();
+        std::fs::write(t.data_dir().join("mine.txt"), b"c").unwrap();
 
         let (status, _, _) = t
             .send(empty_request(
@@ -637,11 +636,9 @@ mod tests {
             .await;
 
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(!t.blob_exists(&top));
-        assert!(!t.blob_exists(&nested));
+        assert!(!t.data_dir().join("users/alice").exists());
         // 別人的檔案不受影響
-        assert!(t.blob_exists(&mine));
-        assert_eq!(t.row_count().await, 1);
+        assert!(t.data_dir().join("mine.txt").exists());
         assert_eq!(me_status(&t, &alice_cookie).await, StatusCode::UNAUTHORIZED);
         // 名稱可以再次使用
         assert!(user::create_user(&t.pool, "alice", "x").await.is_ok());

@@ -1,10 +1,11 @@
-//! 垃圾桶：列出、還原、永久刪除、清空。
+//! 垃圾桶：列出、還原、永久刪除、清空。每個空間各自的垃圾桶，以網址參數 `space=` 區分。
 //!
-//! 放進垃圾桶是 DELETE /api/files/{id}（見 items.rs）。這裡的永久刪除與 items.rs 的刪除流程相同：
-//! 資料庫先刪並 commit，之後才刪 blob，失敗的留給垃圾回收。
-
-use std::path::Path;
-use std::sync::Arc;
+//!   GET    /api/trash                 垃圾桶的內容，最近刪除的在前
+//!   POST   /api/trash/{id}/restore    還原到原本的位置（同名時自動改名）
+//!   DELETE /api/trash/{id}            永久刪除
+//!   DELETE /api/trash                 清空
+//!
+//! 放進垃圾桶是 DELETE /api/files（見 spaces.rs）。永久刪除先刪檔案、再刪紀錄（見 db::trash）。
 
 use axum::{
     Json, Router,
@@ -16,19 +17,27 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use super::{
-    error::AppError, extract::FilesUser, files::FileResponse, items::remove_blobs, state::AppState,
-    storage::files_root,
+    error::AppError,
+    extract::InSpace,
+    spaces::{blocking, denied},
+    state::AppState,
 };
-use crate::db::files::{self as files_db, RestoreError};
-
-/// 「不在垃圾桶中」與「屬於別人」對外一律使用這個訊息
-const NOT_IN_TRASH: &str = "Item not found in the trash";
+use crate::{
+    db::trash::{self as trash_db, TrashItem},
+    space::Space,
+    storage,
+    tree::{self, OnConflict, RelPath},
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/trash", get(list).delete(empty))
         .route("/api/trash/{id}", delete(delete_forever))
         .route("/api/trash/{id}/restore", post(restore))
+}
+
+fn not_in_trash() -> AppError {
+    AppError::NotFound("Item not found in the trash".to_string())
 }
 
 /// 垃圾桶中的一個項目
@@ -41,238 +50,201 @@ struct TrashResponse {
     size: i64,
     /// 放進垃圾桶的時間（Unix 秒數）
     trashed_at: i64,
-    /// 原本的位置，由上往下的資料夾名稱；空的代表 My files
+    /// 原本的位置，由上往下的資料夾名稱；空的代表空間的最上層
     location: Vec<String>,
 }
 
-/// GET /api/trash：垃圾桶的內容，最近刪除的在前
-async fn list(
-    user: FilesUser,
-    State(pool): State<SqlitePool>,
-) -> Result<Json<Vec<TrashResponse>>, AppError> {
-    let items = files_db::list_trash(&pool, user.id).await?;
-    let mut response = Vec::with_capacity(items.len());
-    for item in items {
-        // 垃圾桶的項目通常不多，每個多查兩次可以接受
-        let size = match item.kind.as_str() {
-            "folder" => files_db::trash_size(&pool, user.id, item.id).await?,
-            _ => item.size.unwrap_or(0),
-        };
-        let location = match item.parent_id {
-            Some(parent) => files_db::folder_path(&pool, user.id, parent).await?,
-            None => Vec::new(),
-        };
-        response.push(TrashResponse {
+impl From<TrashItem> for TrashResponse {
+    fn from(item: TrashItem) -> Self {
+        let mut location: Vec<String> = item.path.split('/').map(str::to_string).collect();
+        let name = location.pop().unwrap_or_default();
+        TrashResponse {
             id: item.id,
-            name: item.name,
+            name,
             kind: item.kind,
-            size,
+            size: item.size,
             trashed_at: item.trashed_at,
             location,
-        });
+        }
     }
-    Ok(Json(response))
 }
 
-/// POST /api/trash/{id}/restore：放回原本的資料夾（不在了就放回 My files），
-/// 同名時自動改名。回傳還原後的項目
+/// GET /api/trash
+async fn list(
+    InSpace { space, .. }: InSpace,
+    State(pool): State<SqlitePool>,
+) -> Result<Json<Vec<TrashResponse>>, AppError> {
+    let place = space.trash;
+    let items = trash_db::list(&pool, place).await?;
+    Ok(Json(items.into_iter().map(TrashResponse::from).collect()))
+}
+
+#[derive(Serialize)]
+struct RestoreResponse {
+    /// 還原後的路徑（同名時可能加上了編號）
+    path: String,
+}
+
+/// POST /api/trash/{id}/restore：放回原本的位置。原本的資料夾已經不在時重新建立
 async fn restore(
-    user: FilesUser,
+    InSpace { space, .. }: InSpace,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<i64>,
-) -> Result<Json<FileResponse>, AppError> {
-    let entry = files_db::restore(&pool, user.id, id)
-        .await
-        .map_err(|e| match e {
-            RestoreError::NotFound => not_in_trash(),
-            RestoreError::NameConflict => AppError::Conflict(
-                "There is no free name to restore this item; rename the existing one first"
-                    .to_string(),
-            ),
-            RestoreError::Db(e) => AppError::internal(e),
-        })?;
-    Ok(Json(entry.into()))
-}
-
-/// DELETE /api/trash/{id}：永久刪除垃圾桶中的一個項目
-async fn delete_forever(
-    user: FilesUser,
-    State(pool): State<SqlitePool>,
-    State(data_dir): State<Arc<Path>>,
-    UrlPath(id): UrlPath<i64>,
-) -> Result<StatusCode, AppError> {
-    let root = files_root(&pool, &data_dir, user.id).await?;
-    let keys = files_db::delete_trashed(&pool, user.id, id)
+) -> Result<Json<RestoreResponse>, AppError> {
+    let place = space.trash;
+    let item = trash_db::find(&pool, place, id)
         .await?
         .ok_or_else(not_in_trash)?;
-    remove_blobs(&root, &keys).await;
-    Ok(StatusCode::NO_CONTENT)
+    let original = RelPath::parse(&item.path).map_err(|_| not_in_trash())?;
+    let name = original.name().ok_or_else(not_in_trash)?.to_string();
+    let parent = original.parent().unwrap_or_default();
+    space.check_write_in(&parent).map_err(denied)?;
+
+    let source = storage::trash_path(&space.root, id);
+    let root = space.root.clone();
+    let abs_parent = space.abs(&parent);
+    let placed = blocking(move || {
+        if std::fs::symlink_metadata(&source).is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the item is no longer in the trash",
+            ));
+        }
+        let dir = tree::create_dirs(&root, &abs_parent)?;
+        tree::place(&source, &dir, &name, OnConflict::Rename)
+    })
+    .await;
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(AppError::NotFound(_)) => {
+            // 檔案已經不在（例如被手動刪除）：紀錄也不需要了
+            trash_db::remove(&pool, id).await?;
+            return Err(not_in_trash());
+        }
+        Err(e) => return Err(e),
+    };
+    trash_db::remove(&pool, id).await?;
+    Ok(Json(RestoreResponse {
+        path: parent.child(&placed).display(),
+    }))
 }
 
-/// DELETE /api/trash：清空垃圾桶
-async fn empty(
-    user: FilesUser,
+/// 永久刪除一個項目：先刪檔案，再刪紀錄
+async fn purge(pool: &SqlitePool, space: &Space, id: i64) -> Result<(), AppError> {
+    let path = storage::trash_path(&space.root, id);
+    blocking(move || match tree::remove_path(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+    .await?;
+    trash_db::remove(pool, id).await?;
+    Ok(())
+}
+
+/// DELETE /api/trash/{id}
+async fn delete_forever(
+    InSpace { space, .. }: InSpace,
     State(pool): State<SqlitePool>,
-    State(data_dir): State<Arc<Path>>,
+    UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, AppError> {
-    let root = files_root(&pool, &data_dir, user.id).await?;
-    let keys = files_db::empty_trash(&pool, user.id).await?;
-    remove_blobs(&root, &keys).await;
+    let place = space.trash;
+    trash_db::find(&pool, place, id)
+        .await?
+        .ok_or_else(not_in_trash)?;
+    purge(&pool, &space, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn not_in_trash() -> AppError {
-    AppError::NotFound(NOT_IN_TRASH.to_string())
+/// DELETE /api/trash：清空
+async fn empty(
+    InSpace { space, .. }: InSpace,
+    State(pool): State<SqlitePool>,
+) -> Result<StatusCode, AppError> {
+    let place = space.trash;
+    for item in trash_db::list(&pool, place).await? {
+        purge(&pool, &space, item.id).await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{MIB, TestApp, empty_request, request};
-    use axum::{
-        body::{Body, Bytes},
-        http::{Method, StatusCode, header},
-    };
+    use super::super::test_support::{MIB, TestApp};
+    use axum::http::{Method, StatusCode};
     use serde_json::Value;
     use sqlx::SqlitePool;
 
-    async fn call(t: &TestApp, method: Method, uri: &str) -> (StatusCode, Bytes) {
-        let (status, _, body) = t.send(empty_request(method, uri, Some(&t.cookie))).await;
-        (status, body)
-    }
+    #[sqlx::test]
+    async fn restore_puts_it_back_and_recreates_the_folder(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let home = t.home("carol");
+        std::fs::create_dir(home.join("docs")).unwrap();
+        std::fs::write(home.join("docs/a.txt"), b"a").unwrap();
+        t.json(Method::DELETE, "/api/files?path=docs/a.txt", None)
+            .await;
+        t.json(Method::DELETE, "/api/files?path=docs", None).await;
+        // 同名的檔案已經被放回去
+        std::fs::create_dir(home.join("docs")).unwrap();
+        std::fs::write(home.join("docs/a.txt"), b"new").unwrap();
 
-    async fn trash(t: &TestApp, id: i64) {
-        let (status, _) = call(t, Method::DELETE, &format!("/api/files/{id}")).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-    }
+        let (_, list) = t.json(Method::GET, "/api/trash", None).await;
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        let file = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "a.txt")
+            .unwrap();
+        assert_eq!(file["location"], serde_json::json!(["docs"]));
 
-    async fn trash_list(t: &TestApp) -> Value {
-        let (status, body) = call(t, Method::GET, "/api/trash").await;
-        assert_eq!(status, StatusCode::OK);
-        serde_json::from_slice(&body).unwrap()
+        let id = file["id"].as_i64().unwrap();
+        let (status, body) = t
+            .json(Method::POST, &format!("/api/trash/{id}/restore"), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["path"], "docs/a (1).txt");
+        assert_eq!(std::fs::read(home.join("docs/a (1).txt")).unwrap(), b"a");
     }
 
     #[sqlx::test]
-    async fn list_shows_what_was_deleted_and_where_it_was(pool: SqlitePool) {
+    async fn emptying_removes_the_files(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
-        let photos = t.make_folder(t.user_id, None, "相片").await;
-        let trip = t.make_folder(t.user_id, Some(photos), "trip").await;
-        t.store_file(t.user_id, Some(trip), "a.jpg", b"12345").await;
-        trash(&t, trip).await;
+        let home = t.home("carol");
+        std::fs::write(home.join("a.txt"), b"a").unwrap();
+        t.json(Method::DELETE, "/api/files?path=a.txt", None).await;
 
-        let list = trash_list(&t).await;
-
-        assert_eq!(list.as_array().unwrap().len(), 1);
-        assert_eq!(list[0]["name"], "trip");
-        assert_eq!(list[0]["kind"], "folder");
-        assert_eq!(list[0]["size"], 5);
-        assert_eq!(list[0]["location"], serde_json::json!(["相片"]));
-        assert!(list[0].get("storage_key").is_none());
-    }
-
-    #[sqlx::test]
-    async fn restore_brings_the_item_back(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, _) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-        trash(&t, id).await;
-        // 原處又有了同名的檔案
-        t.store_file(t.user_id, None, "a.txt", b"y").await;
-
-        let (status, body) = call(&t, Method::POST, &format!("/api/trash/{id}/restore")).await;
-
-        assert_eq!(status, StatusCode::OK);
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["id"], id);
-        assert_eq!(body["name"], "a (1).txt");
-        assert!(trash_list(&t).await.as_array().unwrap().is_empty());
-    }
-
-    #[sqlx::test]
-    async fn delete_forever_removes_the_content(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let docs = t.make_folder(t.user_id, None, "docs").await;
-        let (_, key) = t.store_file(t.user_id, Some(docs), "a.txt", b"x").await;
-        trash(&t, docs).await;
-
-        let (status, _) = call(&t, Method::DELETE, &format!("/api/trash/{docs}")).await;
+        let (status, _) = t.json(Method::DELETE, "/api/trash", None).await;
 
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(!t.blob_exists(&key));
-        assert_eq!(t.row_count().await, 0);
+        let (_, list) = t.json(Method::GET, "/api/trash", None).await;
+        assert_eq!(list, Value::Array(vec![]));
+        assert_eq!(
+            std::fs::read_dir(t.data_dir().join(".manorcloud/trash"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[sqlx::test]
-    async fn items_outside_the_trash_cannot_be_deleted_forever(pool: SqlitePool) {
+    async fn other_trashes_are_not_reachable(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
-        let (id, key) = t.store_file(t.user_id, None, "a.txt", b"x").await;
+        let jerry = t.other_user("jerry").await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO trash (owner_id, path, kind) VALUES (?, 'x', 'file') RETURNING id",
+        )
+        .bind(jerry)
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
 
-        let (status, _) = call(&t, Method::DELETE, &format!("/api/trash/{id}")).await;
-
+        let (status, _) = t
+            .json(Method::POST, &format!("/api/trash/{id}/restore"), None)
+            .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(t.blob_exists(&key));
-    }
-
-    #[sqlx::test]
-    async fn empty_removes_everything_in_the_trash(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (a, key_a) = t.store_file(t.user_id, None, "a.txt", b"a").await;
-        let (b, key_b) = t.store_file(t.user_id, None, "b.txt", b"b").await;
-        let (_, key_c) = t.store_file(t.user_id, None, "c.txt", b"c").await;
-        trash(&t, a).await;
-        trash(&t, b).await;
-
-        let (status, _) = call(&t, Method::DELETE, "/api/trash").await;
-
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(!t.blob_exists(&key_a));
-        assert!(!t.blob_exists(&key_b));
-        assert!(t.blob_exists(&key_c));
-        assert_eq!(t.row_count().await, 1);
-    }
-
-    #[sqlx::test]
-    async fn foreign_and_missing_are_indistinguishable(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let alice = t.other_user("alice").await;
-        let (foreign, key) = t.store_file(alice, None, "secret.txt", b"x").await;
-        crate::db::files::move_to_trash(&t.pool, alice, foreign, 100)
-            .await
-            .unwrap();
-
-        for (method, suffix) in [(Method::POST, "/restore"), (Method::DELETE, "")] {
-            let foreign_res =
-                call(&t, method.clone(), &format!("/api/trash/{foreign}{suffix}")).await;
-            let missing_res = call(&t, method, &format!("/api/trash/999999{suffix}")).await;
-            assert_eq!(foreign_res.0, StatusCode::NOT_FOUND);
-            assert_eq!(foreign_res, missing_res);
-        }
-        // alice 的垃圾桶完好；清空自己的垃圾桶不會碰到她的
-        call(&t, Method::DELETE, "/api/trash").await;
-        assert!(t.blob_exists(&key));
-        assert!(trash_list(&t).await.as_array().unwrap().is_empty());
-    }
-
-    #[sqlx::test]
-    async fn cross_site_empty_is_forbidden(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-        let (id, key) = t.store_file(t.user_id, None, "a.txt", b"x").await;
-        trash(&t, id).await;
-
-        let req = request(Method::DELETE, "/api/trash", Some(&t.cookie))
-            .header(header::ORIGIN, "http://evil.example")
-            .body(Body::empty())
-            .unwrap();
-        let (status, _, _) = t.send(req).await;
-
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(t.blob_exists(&key));
-    }
-
-    #[sqlx::test]
-    async fn trash_requires_login(pool: SqlitePool) {
-        let t = TestApp::new(pool, MIB).await;
-
-        let (status, _, _) = t.send(empty_request(Method::GET, "/api/trash", None)).await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = t
+            .json(Method::DELETE, &format!("/api/trash/{id}"), None)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

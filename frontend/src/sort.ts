@@ -6,7 +6,7 @@
 import type { FileItem } from "./types.js";
 
 export type SortKey = "name" | "modified" | "size";
-export type SortDirection = "asc" | "desc";
+type SortDirection = "asc" | "desc";
 
 export interface SortOptions {
   readonly key: SortKey;
@@ -15,7 +15,7 @@ export interface SortOptions {
   readonly foldersFirst: boolean;
 }
 
-export const DEFAULT_SORT: SortOptions = { key: "name", direction: "asc", foldersFirst: true };
+const DEFAULT_SORT: SortOptions = { key: "name", direction: "asc", foldersFirst: true };
 
 const STORAGE_KEY = "manorcloud.sort";
 

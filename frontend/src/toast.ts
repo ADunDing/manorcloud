@@ -9,7 +9,7 @@ import { icon } from "./icons.js";
 /** 通知顯示多久 */
 const DURATION_MS = 8000;
 
-export interface ToastAction {
+interface ToastAction {
   readonly label: string;
   readonly onClick: () => void;
 }
@@ -58,7 +58,7 @@ export function showToast(message: string, action?: ToastAction): void {
   start();
 }
 
-export function dismissToast(): void {
+function dismissToast(): void {
   if (current === null) {
     return;
   }

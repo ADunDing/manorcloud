@@ -351,8 +351,6 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<UserSummary>, sqlx::Err
             users.created_at AS "created_at!"
         FROM users
         LEFT JOIN password_credentials ON password_credentials.user_id = users.id
-        -- 管理員在各硬碟上的檔案空間是隱藏的帳號，不是使用者
-        WHERE users.id NOT IN (SELECT user_id FROM storage_spaces)
         ORDER BY users.username
         "#
     )
@@ -379,7 +377,6 @@ pub async fn find_user_summary(
         FROM users
         LEFT JOIN password_credentials ON password_credentials.user_id = users.id
         WHERE users.id = ?
-          AND users.id NOT IN (SELECT user_id FROM storage_spaces)
         "#,
         user_id
     )
@@ -419,7 +416,7 @@ pub async fn update_user(
         r#"
         UPDATE users
         SET role = COALESCE(?, role), disabled = COALESCE(?, disabled)
-        WHERE id = ? AND id NOT IN (SELECT user_id FROM storage_spaces)
+        WHERE id = ?
         "#,
         role,
         disabled,
@@ -444,46 +441,44 @@ pub async fn update_user(
     Ok(())
 }
 
-/// 刪除使用者，以及他的所有資料：檔案與資料夾（含垃圾桶）、密碼、session、
-/// 分段上傳的紀錄、2FA、SSO 連結。全部由外鍵的 ON DELETE CASCADE 一起刪除。
+/// 刪除使用者，以及他的所有紀錄：密碼、session、分段上傳與垃圾桶的紀錄、2FA、SSO 連結。
+/// 全部由外鍵的 ON DELETE CASCADE 一起刪除。
 ///
-/// 成功時回傳**已經 commit**、被刪除的檔案的 storage_key，呼叫端必須接著刪除這些 blob
-/// （失敗則交給垃圾回收）。分段上傳的暫存檔沒有紀錄之後，同樣由垃圾回收清除。
-///
-/// 與 `files::delete_tree` 相同：先收集 key 再刪除，兩者在同一個 IMMEDIATE 交易中，
-/// 中間不會有人上傳新的檔案而漏掉它的 key。
-/// 最後一位可以用密碼登入的有效管理員由 trigger 擋下（`LastAdmin`）。
-pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<String>, AdminUpdateError> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-
-    let keys = sqlx::query_scalar!(
-        r#"
-        SELECT storage_key AS "storage_key!"
-        FROM files
-        WHERE owner_id = ? AND storage_key IS NOT NULL
-        "#,
-        user_id
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    // 管理員在各硬碟上的檔案空間不是使用者：隨著儲存位置一起刪除，不能在這裡刪
-    let deleted = sqlx::query!(
-        "DELETE FROM users WHERE id = ? AND id NOT IN (SELECT user_id FROM storage_spaces)",
-        user_id
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(last_admin_or_db)?
-    .rows_affected();
+/// 硬碟上的檔案由呼叫端接著刪除（他的資料夾）；垃圾桶與分段上傳的暫存檔沒有紀錄之後，
+/// 由垃圾回收清除。最後一位可以用密碼登入的有效管理員由 trigger 擋下（`LastAdmin`）。
+pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<(), AdminUpdateError> {
+    let deleted = sqlx::query!("DELETE FROM users WHERE id = ?", user_id)
+        .execute(pool)
+        .await
+        .map_err(last_admin_or_db)?
+        .rows_affected();
 
     if deleted == 0 {
-        // tx 在這裡被丟棄，自動 rollback
         return Err(AdminUpdateError::NotFound);
     }
+    Ok(())
+}
 
-    tx.commit().await?;
-    Ok(keys)
+/// 是否顯示以點開頭的隱藏檔
+pub async fn show_hidden(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::Error> {
+    let value: Option<bool> = sqlx::query_scalar("SELECT show_hidden FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(value.unwrap_or(false))
+}
+
+pub async fn set_show_hidden(
+    pool: &SqlitePool,
+    user_id: i64,
+    show: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET show_hidden = ? WHERE id = ?")
+        .bind(show)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
 }
 
 /// 把「至少一個管理員」trigger 的錯誤轉成 `LastAdmin`，其他錯誤原樣保留
@@ -849,18 +844,6 @@ mod tests {
 
     // ==================== 刪除 ====================
 
-    /// 合法的 storage_key（32 個小寫 hex 字元）
-    fn key(n: u32) -> String {
-        format!("{n:032x}")
-    }
-
-    async fn file_count(pool: &SqlitePool) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM files")
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
     async fn password_count(pool: &SqlitePool) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM password_credentials")
             .fetch_one(pool)
@@ -869,37 +852,36 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn deleting_user_returns_keys_and_removes_everything(pool: SqlitePool) {
-        use crate::db::files;
-
+    async fn deleting_user_removes_everything(pool: SqlitePool) {
         let carol = create_user(&pool, "carol", "x").await.unwrap();
-        let alice = create_user(&pool, "alice", "x").await.unwrap();
-        let folder = files::create_folder(&pool, carol, None, "Photos")
-            .await
-            .unwrap()
-            .id;
-        files::create_file(&pool, carol, None, "a.txt", 1, None, &key(1))
-            .await
-            .unwrap();
-        files::create_file(&pool, carol, Some(folder), "b.txt", 1, None, &key(2))
-            .await
-            .unwrap();
-        files::create_file(&pool, alice, None, "a.txt", 1, None, &key(3))
-            .await
-            .unwrap();
+        create_user(&pool, "alice", "x").await.unwrap();
         crate::db::session::create_session(&pool, carol, &[1u8; 32], 4_000_000_000)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO trash (owner_id, path, kind) VALUES (?, 'a', 'file')")
+            .bind(carol)
+            .execute(&pool)
+            .await
+            .unwrap();
 
-        let mut keys = delete_user(&pool, carol).await.unwrap();
-        keys.sort();
+        delete_user(&pool, carol).await.unwrap();
 
-        // 子資料夾裡的檔案也在清單中；別人的檔案不受影響
-        assert_eq!(keys, [key(1), key(2)]);
-        assert_eq!(file_count(&pool).await, 1);
+        let trash: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trash, 0);
         assert_eq!(session_count(&pool).await, 0);
         assert_eq!(password_count(&pool).await, 1);
         assert!(find_user_summary(&pool, carol).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    async fn hidden_files_are_off_by_default(pool: SqlitePool) {
+        let carol = create_user(&pool, "carol", "x").await.unwrap();
+        assert!(!show_hidden(&pool, carol).await.unwrap());
+        set_show_hidden(&pool, carol, true).await.unwrap();
+        assert!(show_hidden(&pool, carol).await.unwrap());
     }
 
     #[sqlx::test]

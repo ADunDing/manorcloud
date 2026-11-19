@@ -28,9 +28,9 @@ type Status = "pending" | "uploading" | "done" | "failed";
 /** 佇列中的一個檔案。畫面上的元素也存在這裡，更新進度時只改這一列 */
 interface Entry {
   readonly file: File;
-  /** 上傳的目標資料夾：使用者中途切換資料夾，檔案仍然傳到原本的地方 */
-  readonly folderId: number | null;
-  /** 目標資料夾所在的檔案空間（管理員在另一顆硬碟上的檔案），同樣在加入時就決定 */
+  /** 上傳的目標資料夾（例如 相片/2026）：使用者中途切換資料夾，檔案仍然傳到原本的地方 */
+  readonly dir: string;
+  /** 目標資料夾所在的空間（見 space.ts），同樣在加入時就決定 */
   readonly space: Space;
   /** 要續傳的伺服器上的上傳（從未完成的清單按 Resume 時） */
   readonly resume: UploadInfo | null;
@@ -87,7 +87,7 @@ export class UploadQueue {
    * @param onChunkedSettled 一個分段上傳結束時呼叫（完成、失敗或取消）：未完成的清單可能變了
    */
   constructor(
-    private readonly onUploaded: (folderId: number | null, space: Space) => void,
+    private readonly onUploaded: (dir: string, space: Space) => void,
     private readonly uploadLimit: () => Promise<number | null>,
     private readonly onChunkedSettled: () => void,
   ) {
@@ -137,9 +137,9 @@ export class UploadQueue {
   }
 
   /** 加入檔案並開始依序上傳 */
-  add(files: readonly File[], folderId: number | null, space: Space = null): void {
+  add(files: readonly File[], dir: string, space: Space = null): void {
     for (const file of files) {
-      this.entries.push(this.createEntry(file, folderId, space, null));
+      this.entries.push(this.createEntry(file, dir, space, null));
     }
     this.renderList();
     void this.run();
@@ -147,7 +147,7 @@ export class UploadQueue {
 
   /** 續傳伺服器上未完成的上傳：傳回原本的資料夾，不是目前所在的資料夾 */
   resume(file: File, info: UploadInfo, space: Space = null): void {
-    this.entries.push(this.createEntry(file, info.parent_id, space, info));
+    this.entries.push(this.createEntry(file, info.path, space, info));
     this.renderList();
     void this.run();
   }
@@ -219,7 +219,7 @@ export class UploadQueue {
       if (resume !== null) {
         entry.uploadId = resume.id;
       }
-      entry.handle = startChunkedUpload(entry.file, entry.folderId, {
+      entry.handle = startChunkedUpload(entry.file, entry.dir, {
         space: entry.space,
         onProgress,
         onNotice,
@@ -229,14 +229,14 @@ export class UploadQueue {
         ...(resume !== null ? { resume } : {}),
       });
     } else {
-      entry.handle = startUpload(entry.file, entry.folderId, onProgress, entry.space);
+      entry.handle = startUpload(entry.file, entry.dir, onProgress, entry.space);
     }
 
     try {
       await entry.handle.done;
       this.setProgress(entry, 1);
       this.setStatus(entry, "done", "Done");
-      this.onUploaded(entry.folderId, entry.space);
+      this.onUploaded(entry.dir, entry.space);
     } catch (error) {
       if (error instanceof UploadCancelled) {
         this.remove(entry);
@@ -267,7 +267,7 @@ export class UploadQueue {
       return (
         uploads.find(
           (info) =>
-            info.parent_id === entry.folderId &&
+            info.path === entry.dir &&
             !active.has(info.id) &&
             isSameFile(entry.file, info),
         ) ?? null
@@ -331,7 +331,7 @@ export class UploadQueue {
 
   private createEntry(
     file: File,
-    folderId: number | null,
+    dir: string,
     space: Space,
     resume: UploadInfo | null,
   ): Entry {
@@ -363,7 +363,7 @@ export class UploadQueue {
 
     const entry: Entry = {
       file,
-      folderId,
+      dir,
       space,
       resume,
       status: "pending",

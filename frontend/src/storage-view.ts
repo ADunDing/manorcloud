@@ -24,7 +24,9 @@ export function renderStorage(container: HTMLElement): void {
       listSlot.replaceChildren(volumeTable(overview.volumes, remove));
     } catch (error) {
       if (!isHandledGlobally(error)) {
-        listSlot.replaceChildren(h("p", { class: "error", role: "alert" }, messageOf(error)));
+        listSlot.replaceChildren(
+          h("p", { class: "error", role: "alert" }, messageOf(error)),
+        );
       }
     }
   };
@@ -70,14 +72,15 @@ export function renderStorage(container: HTMLElement): void {
             }),
         },
         icon("plus", 16),
-        "Add location",
+        "Add storage",
       ),
     ),
     h(
       "p",
       { class: "hint storage-intro" },
       "Each person's files are kept in one location. To put someone's files on another disk, ",
-      "use Change storage location in Users.",
+      "use Change storage in Users. ",
+      "To use another disk or a NAS share, mount it on this computer first, then add it here.",
     ),
     errorBox,
     listSlot,
@@ -105,7 +108,11 @@ function volumeTable(
           h("th", { scope: "col" }, "Folder"),
           h("th", { scope: "col" }, "Space"),
           h("th", { scope: "col" }, "People"),
-          h("th", { scope: "col" }, h("span", { class: "visually-hidden" }, "Actions")),
+          h(
+            "th",
+            { scope: "col" },
+            h("span", { class: "visually-hidden" }, "Actions"),
+          ),
         ),
       ),
       h(
@@ -119,7 +126,9 @@ function volumeTable(
               "td",
               {},
               volume.name,
-              volume.id === null ? h("span", { class: "muted" }, " (data directory)") : null,
+              volume.id === null
+                ? h("span", { class: "muted" }, " (data directory)")
+                : null,
             ),
             h("td", {}, h("code", { class: "path" }, volume.path)),
             h("td", { class: "space-cell" }, spaceMeter(volume)),
@@ -137,7 +146,10 @@ function spaceMeter(volume: StorageVolume): HTMLElement {
   if (volume.total_bytes === null || volume.available_bytes === null) {
     return h(
       "span",
-      { class: "error", title: "The folder can't be read. Is the disk connected?" },
+      {
+        class: "error",
+        title: "The folder can't be read. Is the disk connected?",
+      },
       "Not available",
     );
   }
@@ -183,7 +195,9 @@ function removeButton(
       type: "button",
       class: "icon-button row-menu",
       disabled: inUse,
-      title: inUse ? "Move everyone's files to another location first" : `Remove ${volume.name}`,
+      title: inUse
+        ? "Move everyone's files to another storage first"
+        : `Remove ${volume.name}`,
       "aria-label": `Remove ${volume.name}`,
       onClick: () => void remove(volume),
     },
@@ -211,9 +225,13 @@ function addLocationDialog(): Promise<boolean> {
       spellcheck: "false",
     });
     const error = h("p", { class: "error", role: "alert" });
-    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const cancel = h(
+      "button",
+      { type: "button", class: "secondary" },
+      "Cancel",
+    );
     const confirm = h("button", { type: "submit", class: "primary" }, "Add");
-    const title = "Add storage location";
+    const title = "Add storage";
     const form = h(
       "form",
       { method: "dialog", class: "dialog-form" },

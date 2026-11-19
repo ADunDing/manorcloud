@@ -7,7 +7,7 @@ import { ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
 
-export interface ConfirmOptions {
+interface ConfirmOptions {
   readonly title: string;
   readonly message: string;
   readonly confirmLabel: string;
@@ -99,7 +99,7 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
   });
 }
 
-export interface NameDialogOptions {
+interface NameDialogOptions {
   readonly title: string;
   readonly message: string;
   readonly confirmLabel: string;
@@ -212,7 +212,7 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
   });
 }
 
-export type DownloadChoice = "zip" | "separate";
+type DownloadChoice = "zip" | "separate";
 
 /**
  * 選了多個項目時，選擇下載成一個 .zip 還是分開下載。

@@ -1,21 +1,21 @@
 // 左側欄：New 選單、My files、Trash，以及目前這顆硬碟的容量。
 //
 // 管理員在 My files 與 Trash 之間多了另外每一顆硬碟（Disk2 等）：
-// 點進去是他在那一顆硬碟上的檔案，用法與 My files 相同（見 space.ts）。
+// 點進去是那一顆硬碟的最上層，用法與 My files 相同（見 space.ts）。
 
 import { api } from "./api.js";
 import { h } from "./dom.js";
 import { formatSize } from "./format.js";
 import { icon } from "./icons.js";
 import { dropdown, menuItem, menuSeparator } from "./menu.js";
-import { folderHref, TRASH_HREF, type Disk } from "./router.js";
-import { spaceOf, withSpace, type Space } from "./space.js";
+import { filesHref, MY_FILES, TRASH_HREF, type Location } from "./router.js";
+import { spaceOfLocation, withSpace, type Space } from "./space.js";
 import type { StorageInfo, StorageOverview } from "./types.js";
 
 /** 目前所在的區塊：側欄中對應的項目會反白。帳號設定、使用者管理等頁面不屬於任何一個 */
-export type Section = "files" | "trash" | null;
+type Section = "files" | "trash" | null;
 
-export interface SidebarActions {
+interface SidebarActions {
   readonly newFolder: () => void;
   readonly upload: () => void;
 }
@@ -28,13 +28,11 @@ let storage: { meter: HTMLElement; fill: HTMLElement; text: HTMLElement } | null
 /** 容量顯示的是哪一個檔案空間所在的硬碟 */
 let storageSpace: Space = null;
 
-export interface SidebarOptions {
+interface SidebarOptions {
   /** 管理員：My files 與 Trash 之間列出另外每一顆硬碟 */
   readonly admin: boolean;
-  /** 目前在哪一顆硬碟的檔案中：undefined 是 My files */
-  readonly disk?: Disk;
-  /** 正在瀏覽這位使用者的檔案：他的檔案所在的那一項反白 */
-  readonly browsing?: number;
+  /** 目前在哪一組檔案中 */
+  readonly location?: Location;
   /** 目前的使用者：判斷哪一顆硬碟是 My files */
   readonly userId?: number;
 }
@@ -52,9 +50,10 @@ export function renderSidebar(
   section: Section,
   options: SidebarOptions = { admin: false },
 ): void {
+  const location = options.location ?? MY_FILES;
   const onFiles = section === "files";
   // My files 只在自己的檔案中反白；在另一顆硬碟上時反白那一顆（硬碟清單讀回來之後）
-  const onMyFiles = onFiles && options.disk === undefined;
+  const onMyFiles = section === "files" && location.kind === "me";
   const newButton = h(
     "button",
     {
@@ -90,12 +89,12 @@ export function renderSidebar(
   );
   const text = h("p", { class: "storage-text" }, "—");
   storage = { meter, fill: meterFill, text };
-  storageSpace = options.disk === undefined ? null : spaceOf(options.disk);
+  storageSpace = spaceOfLocation(location);
 
   const myFiles = h(
     "a",
     {
-      href: folderHref(null),
+      href: filesHref(MY_FILES),
       class: "nav-link",
       "aria-current": onMyFiles ? "page" : null,
     },
@@ -103,6 +102,20 @@ export function renderSidebar(
     "My files",
   );
   const myFilesItem = h("li", {}, myFiles);
+  const trashItem = h(
+    "li",
+    {},
+    h(
+      "a",
+      {
+        href: TRASH_HREF,
+        class: "nav-link",
+        "aria-current": section === "trash" ? "page" : null,
+      },
+      icon("trash", 20),
+      "Trash",
+    ),
+  );
 
   container.replaceChildren(
     h("div", { class: "new-wrap" }, newButton, newMenu),
@@ -113,20 +126,7 @@ export function renderSidebar(
         "ul",
         { class: "nav-list" },
         myFilesItem,
-        h(
-          "li",
-          {},
-          h(
-            "a",
-            {
-              href: TRASH_HREF,
-              class: "nav-link",
-              "aria-current": section === "trash" ? "page" : null,
-            },
-            icon("trash", 20),
-            "Trash",
-          ),
-        ),
+        trashItem,
       ),
     ),
     h(
@@ -139,7 +139,7 @@ export function renderSidebar(
   );
   container.hidden = false;
   if (options.admin) {
-    void loadDisks(myFilesItem, myFiles, section, options);
+    void loadDisks(myFilesItem, myFiles, section, location, options.userId);
   }
   refreshStorage();
 }
@@ -152,25 +152,15 @@ async function loadDisks(
   myFilesItem: HTMLElement,
   myFiles: HTMLElement,
   section: Section,
-  options: SidebarOptions,
+  location: Location,
+  userId: number | undefined,
 ): Promise<void> {
   try {
     const overview = await api.get<StorageOverview>("/api/admin/storage");
-    const home = overview.users.find((user) => user.user_id === options.userId)?.volume_id ?? null;
-    // 反白哪一顆：正在瀏覽某位使用者時，是他的檔案所在的那一顆
-    // users 頁面沒有 section，但有 disk：一樣反白那一顆
-    let current: Disk | "none" =
-      section === "files" || options.disk !== undefined ? options.disk : "none";
-    if (options.browsing !== undefined) {
-      const owner = overview.users.find((user) => user.user_id === options.browsing);
-      // volume_id 是 null 代表資料目錄，不能用 ?? 判斷有沒有找到
-      current = owner === undefined ? "none" : owner.volume_id;
-    }
+    const home = overview.users.find((user) => user.user_id === userId)?.volume_id ?? null;
+    const disk = section === "files" && location.kind === "disk" ? location.disk : undefined;
     // 自己的檔案所在的那一顆就是 My files
-    if (current === home) {
-      current = undefined;
-    }
-    if (current === undefined) {
+    if (disk !== undefined && disk === home) {
       myFiles.setAttribute("aria-current", "page");
     }
     const items = overview.volumes
@@ -182,9 +172,9 @@ async function loadDisks(
           h(
             "a",
             {
-              href: folderHref(null, volume.id),
+              href: filesHref({ kind: "disk", disk: volume.id }),
               class: "nav-link",
-              "aria-current": current === volume.id ? "page" : null,
+              "aria-current": disk === volume.id ? "page" : null,
             },
             icon("disk", 20),
             volume.name,

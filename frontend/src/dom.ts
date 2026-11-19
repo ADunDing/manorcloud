@@ -9,14 +9,14 @@
 import { isSafeUrl } from "./url.js";
 
 /** 子節點：字串與數字變成文字節點；陣列會被展開；null、undefined、false 被忽略 */
-export type Child = Node | string | number | null | undefined | false | readonly Child[];
+type Child = Node | string | number | null | undefined | false | readonly Child[];
 
-export type EventHandler = (event: Event) => void;
+type EventHandler = (event: Event) => void;
 
 /** 屬性值：`onXxx` 必須是函式，其他屬性不能是函式 */
-export type PropValue = string | number | boolean | null | undefined | EventHandler;
+type PropValue = string | number | boolean | null | undefined | EventHandler;
 
-export type Props = Readonly<Record<string, PropValue>>;
+type Props = Readonly<Record<string, PropValue>>;
 
 /** 值是網址的屬性：只接受 http、https、blob */
 const URL_ATTRIBUTES: ReadonlySet<string> = new Set(["href", "src", "action", "formaction"]);

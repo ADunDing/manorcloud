@@ -19,8 +19,7 @@ use tower::ServiceExt;
 use super::{AppState, app, auth::SESSION_COOKIE};
 use crate::{
     auth::session::{generate_token, hash_token},
-    db::{files as files_db, session, user},
-    storage::{self, TempBlob},
+    db::{session, user},
 };
 
 pub const MIB: u64 = 1024 * 1024;
@@ -65,31 +64,22 @@ impl TestApp {
     }
 
     /// 使用者在資料目錄中的資料夾（`{資料目錄}/{帳號名稱}`），不存在時建立
-    pub async fn user_dir(&self, user_id: i64) -> std::path::PathBuf {
-        let folder: String = sqlx::query_scalar("SELECT storage_folder FROM users WHERE id = ?")
-            .bind(user_id)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap();
-        let dir = self.dir.path().join(folder);
-        storage::init_dirs(&dir).unwrap();
+    /// 一般使用者的 My files（不存在時建立）
+    pub fn home(&self, username: &str) -> std::path::PathBuf {
+        let dir = self.dir.path().join("users").join(username);
+        std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    /// 資料目錄底下每個使用者的資料夾
-    fn user_dirs(&self) -> Vec<std::path::PathBuf> {
-        std::fs::read_dir(self.dir.path())
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir())
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// 把目前的使用者（carol）改成管理員
+    pub async fn make_admin(&self) {
+        sqlx::query("UPDATE users SET role = 'admin' WHERE id = ?")
+            .bind(self.user_id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 
-    /// 送出請求，回傳狀態碼、header 與完整內容
     pub async fn send(&self, req: Request<Body>) -> (StatusCode, HeaderMap, Bytes) {
         let res = self.app.clone().oneshot(req).await.unwrap();
         let status = res.status();
@@ -106,60 +96,52 @@ impl TestApp {
     }
 
     /// 直接透過資料層建立資料夾，回傳 id
-    pub async fn make_folder(&self, owner: i64, parent: Option<i64>, name: &str) -> i64 {
-        files_db::create_folder(&self.pool, owner, parent, name)
-            .await
-            .unwrap()
-            .id
-    }
-
-    /// 直接透過儲存層與資料層建立檔案，回傳 (id, storage_key)
-    pub async fn store_file(
+    /// 送出 JSON，回傳狀態碼與解析過的 JSON（沒有內容時是 Null）
+    pub async fn json(
         &self,
-        owner: i64,
-        parent: Option<i64>,
-        name: &str,
-        content: &[u8],
-    ) -> (i64, String) {
-        let dir = self.user_dir(owner).await;
-        let mut blob = TempBlob::create(&dir, MIB).await.unwrap();
-        blob.write_chunk(content).await.unwrap();
-        let key = storage::generate_storage_key();
-        blob.persist(&key).await.unwrap();
-
-        let size = i64::try_from(content.len()).unwrap();
-        let entry = files_db::create_file(&self.pool, owner, parent, name, size, None, &key)
-            .await
-            .unwrap();
-        (entry.id, key)
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let builder = request(method, uri, Some(&self.cookie));
+        let req = match body {
+            Some(body) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let (status, _, bytes) = self.send(req).await;
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
     }
 
-    /// blob 是否存在於資料目錄中（任何一個使用者的資料夾）
-    pub fn blob_exists(&self, key: &str) -> bool {
-        self.user_dirs()
-            .iter()
-            .any(|dir| storage::blob_path(dir, key).unwrap().exists())
-    }
-
-    pub fn blob_count(&self) -> usize {
-        self.user_dirs()
-            .iter()
-            .map(|dir| count_files(&dir.join("blobs")))
-            .sum()
-    }
-
-    pub fn tmp_count(&self) -> usize {
-        self.user_dirs()
-            .iter()
-            .map(|dir| count_files(&dir.join("tmp")))
-            .sum()
-    }
-
-    pub async fn row_count(&self) -> i64 {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM files")
-            .fetch_one(&self.pool)
-            .await
-            .unwrap()
+    /// 一般上傳（multipart）
+    pub async fn upload(&self, query: &str, content: &[u8]) -> (StatusCode, serde_json::Value) {
+        let boundary = "BOUNDARY";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x\"\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let req = request(
+            Method::POST,
+            &format!("/api/files?{query}"),
+            Some(&self.cookie),
+        )
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+        let (status, _, bytes) = self.send(req).await;
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
     }
 }
 
