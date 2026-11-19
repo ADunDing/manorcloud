@@ -20,7 +20,7 @@ import {
 import { icon, type IconName } from "./icons.js";
 import { isInside, toFileItems } from "./listing.js";
 import { openContextMenu, type MenuEntry } from "./menu.js";
-import { chooseFolder } from "./move-dialog.js";
+import { chooseFolder, type FolderChoice, type FolderPlace } from "./move-dialog.js";
 import { PendingUploads } from "./pending-uploads.js";
 import {
   defaultDirection,
@@ -33,9 +33,10 @@ import {
 import { sortControl, type SortControl } from "./sort-menu.js";
 import { filesHref, MY_FILES, type Location } from "./router.js";
 import { refreshStorage } from "./sidebar.js";
-import { apiUrl, joinPath, spaceOfLocation, type Space } from "./space.js";
+import { apiUrl, joinPath, spaceOf, spaceOfLocation, type Space } from "./space.js";
 import { showToast } from "./toast.js";
 import type { FileItem, Listing, ServerConfig, StorageOverview } from "./types.js";
+import { TransferPanel } from "./transfers.js";
 import { UploadQueue } from "./upload-queue.js";
 
 /**
@@ -73,6 +74,10 @@ interface Place {
 
 /** 目前的檔案空間。同時只有一個資料夾畫面，下載與還原等輔助函式都以它為準 */
 let place: Place = { location: MY_FILES, space: null, rootLabel: "My files" };
+/** 複製、移動時可以選擇的目的地：管理員是 My files 與每一顆硬碟，一般使用者只有 My files */
+let places: readonly FolderPlace[] = [place];
+/** space= 的值 → 顯示的名稱，給傳輸面板使用 */
+const spaceLabels = new Map<string, string>([["me", "My files"]]);
 /** 上次的選項：畫面內部重新載入時沿用 */
 let lastOptions: BrowserOptions = { location: MY_FILES, path: [], admin: false, userId: 0 };
 
@@ -107,6 +112,17 @@ const queue = new UploadQueue(
 /** 未完成的上傳清單，與佇列一樣在整個應用程式中只有一個 */
 const pending = new PendingUploads(queue);
 
+/** 跨硬碟的複製與移動。結束時重新載入目前的資料夾 */
+const transfers = new TransferPanel(
+  (space) => spaceLabels.get(space) ?? space,
+  () => {
+    refreshStorage();
+    if (current !== null && !current.isBusy()) {
+      reload();
+    }
+  },
+);
+
 // 上傳進行中關閉分頁或重新整理，上傳會直接中斷。呼叫 preventDefault 後，瀏覽器會跳出內建的確認視窗。
 window.addEventListener("beforeunload", (event) => {
   if (queue.isBusy()) {
@@ -120,7 +136,7 @@ window.addEventListener("beforeunload", (event) => {
  * 最後一列檔案才能捲到面板上方，不會被擋住。
  */
 export function mountPanels(container: HTMLElement): void {
-  container.append(pending.element, queue.element);
+  container.append(transfers.element, pending.element, queue.element);
   const observer = new ResizeObserver(() => {
     const height = container.hidden ? 0 : container.offsetHeight;
     document.documentElement.style.setProperty("--panels-height", `${height}px`);
@@ -166,9 +182,10 @@ async function load(container: HTMLElement, options: BrowserOptions): Promise<vo
   const space = spaceOfLocation(options.location);
 
   try {
-    const [listing, rootLabel] = await Promise.all([
+    const [listing, rootLabel, choices] = await Promise.all([
       api.get<Listing>(apiUrl("/api/files", space, { path: joinPath(options.path) })),
       rootLabelOf(options),
+      placesFor(options),
     ]);
 
     // 等待期間使用者已經切換到別的資料夾：這份結果已經過時
@@ -177,10 +194,12 @@ async function load(container: HTMLElement, options: BrowserOptions): Promise<vo
     }
 
     place = { location: options.location, space, rootLabel };
+    places = choices.some((choice) => choice.space === space) ? choices : [place, ...choices];
     current = new FolderView(container, options.path, listing);
     current.mount();
     // 未完成的清單不屬於任何資料夾，但每次載入時更新，使用者總是看到最新的狀態
     pending.refresh(place.space);
+    transfers.refresh();
     refreshStorage();
   } catch (error) {
     if (token !== navigation || isHandledGlobally(error)) {
@@ -203,6 +222,28 @@ async function rootLabelOf(options: BrowserOptions): Promise<string> {
       const storage = await api.get<StorageOverview>("/api/admin/storage");
       return storage.volumes.find((volume) => volume.id === location.disk)?.name ?? "Disk";
     }
+  }
+}
+
+/** 複製、移動的目的地。一般使用者只有自己的 My files */
+async function placesFor(options: BrowserOptions): Promise<FolderPlace[]> {
+  const mine: FolderPlace = { space: null, rootLabel: "My files" };
+  if (!options.admin) {
+    return [mine];
+  }
+  try {
+    const storage = await api.get<StorageOverview>("/api/admin/storage");
+    const home = storage.users.find((user) => user.user_id === options.userId)?.volume_id ?? null;
+    const disks = storage.volumes
+      .filter((volume) => volume.id !== home)
+      .map((volume) => ({ space: spaceOf(volume.id), rootLabel: volume.name }));
+    for (const disk of disks) {
+      spaceLabels.set(disk.space, disk.rootLabel);
+    }
+    spaceLabels.set(spaceOf(home), "My files");
+    return [mine, ...disks];
+  } catch {
+    return [mine];
   }
 }
 
@@ -618,21 +659,26 @@ class FolderView {
     }
     const title =
       selected.length === 1 ? `Copy "${selected[0]?.name ?? ""}"` : `Copy ${selected.length} items`;
-    const target = await chooseFolder(
+    const choice = await chooseFolder(
       title,
       "Copy here",
       this.path,
       this.selectedFolders(selected),
       place,
+      places,
     );
-    if (target === undefined) {
+    if (choice === undefined) {
+      return;
+    }
+    if (choice.place.space !== place.space) {
+      await this.transfer("copy", selected, choice);
       return;
     }
     // 複製到同一個資料夾也可以：伺服器自動改名為「名稱 (1)」
     await this.each(selected, "Copied", (item) =>
       api.post(apiUrl("/api/files/copy", place.space), {
         path: this.itemPath(item),
-        parent: joinPath(target),
+        parent: joinPath(choice.path),
       }),
     );
   }
@@ -672,17 +718,58 @@ class FolderView {
     }
     const title =
       selected.length === 1 ? `Move "${selected[0]?.name ?? ""}"` : `Move ${selected.length} items`;
-    const target = await chooseFolder(
+    const choice = await chooseFolder(
       title,
       "Move here",
       this.path,
       this.selectedFolders(selected),
       place,
+      places,
     );
-    if (target === undefined || joinPath(target) === joinPath(this.path)) {
+    if (choice === undefined) {
       return;
     }
-    await this.moveTo(selected, target);
+    if (choice.place.space !== place.space) {
+      await this.transfer("move", selected, choice);
+      return;
+    }
+    if (joinPath(choice.path) === joinPath(this.path)) {
+      return;
+    }
+    await this.moveTo(selected, choice.path);
+  }
+
+  /**
+   * 複製或移動到另一顆硬碟：交給伺服器在背景進行，右下角的面板顯示進度。
+   * 移動時，伺服器先完整複製，確認之後才刪除這裡的項目
+   */
+  private async transfer(
+    kind: "copy" | "move",
+    items: readonly FileItem[],
+    choice: FolderChoice,
+  ): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.errorBox.textContent = "";
+    try {
+      await api.post("/api/transfers", {
+        kind,
+        from_space: place.space ?? "me",
+        from_path: joinPath(this.path),
+        names: items.map((item) => item.name),
+        to_space: choice.place.space ?? "me",
+        to_path: joinPath(choice.path),
+      });
+    } catch (error) {
+      if (!isHandledGlobally(error)) {
+        this.errorBox.textContent = messageOf(error);
+      }
+      return;
+    }
+    const what = items.length === 1 ? `"${items[0]?.name ?? ""}"` : `${items.length} items`;
+    showToast(`${kind === "move" ? "Moving" : "Copying"} ${what} to ${choice.place.rootLabel}`);
+    transfers.refresh();
   }
 
   /** 把這些項目搬到 target */

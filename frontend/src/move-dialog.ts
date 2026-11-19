@@ -11,10 +11,16 @@ import { apiUrl, joinPath, type Space } from "./space.js";
 import type { Listing } from "./types.js";
 
 /** 在哪一組檔案中選擇（見 space.ts） */
-interface FolderPlace {
+export interface FolderPlace {
   readonly space: Space;
   /** 路徑最前面的名稱：My files 或硬碟的名稱 */
   readonly rootLabel: string;
+}
+
+/** 選定的目的地 */
+export interface FolderChoice {
+  readonly place: FolderPlace;
+  readonly path: readonly string[];
 }
 
 /**
@@ -22,7 +28,8 @@ interface FolderPlace {
  *
  * @param start    一開始顯示的資料夾
  * @param excluded 不能選的資料夾：要移動的資料夾本身（不能搬進自己裡面）
- * @param place    在哪一組檔案中選擇；只能選同一組中的資料夾
+ * @param place    一開始在哪一組檔案中選擇
+ * @param places   可以選擇的每一組檔案（管理員：My files 與每一顆硬碟）；只有一組時不顯示選單
  * @returns 選定的資料夾；取消時為 undefined
  */
 export function chooseFolder(
@@ -31,10 +38,12 @@ export function chooseFolder(
   start: readonly string[],
   excluded: readonly (readonly string[])[],
   place: FolderPlace,
-): Promise<readonly string[] | undefined> {
+  places: readonly FolderPlace[] = [place],
+): Promise<FolderChoice | undefined> {
+  const origin = place;
   return new Promise((resolve) => {
     let location: readonly string[] = start;
-    let result: readonly string[] | undefined;
+    let result: FolderChoice | undefined;
     /** 載入序號：較慢回來的舊結果不能蓋掉新的 */
     let loading = 0;
 
@@ -44,10 +53,22 @@ export function chooseFolder(
     const note = h("p", { class: "hint" });
     const confirm = h("button", { type: "button", class: "primary" }, confirmLabel);
     const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const picker = h(
+      "select",
+      { class: "dialog-input", "aria-label": "Disk" },
+      places.map((option, index) =>
+        h("option", { value: String(index), selected: option.space === place.space }, option.rootLabel),
+      ),
+    );
+    picker.addEventListener("change", () => {
+      place = places[Number(picker.value)] ?? origin;
+      void open([]);
+    });
     const dialog = h(
       "dialog",
       { class: "dialog", "aria-label": title },
       h("h2", { class: "dialog-title" }, title),
+      ...(places.length > 1 ? [h("label", { class: "dialog-field" }, "Disk", picker)] : []),
       path,
       list,
       note,
@@ -57,7 +78,7 @@ export function chooseFolder(
 
     cancel.addEventListener("click", () => dialog.close());
     confirm.addEventListener("click", () => {
-      result = location;
+      result = { place, path: location };
       dialog.close();
     });
     // 不論是按鈕、Esc 還是其他方式關閉，都經過這裡
@@ -125,7 +146,8 @@ export function chooseFolder(
       list.replaceChildren(
         ...sorted.map((name) => {
           const target = [...location, name];
-          const blocked = excluded.some((item) => isInside(target, item));
+          const blocked =
+            place.space === origin.space && excluded.some((item) => isInside(target, item));
           return h(
             "li",
             {},

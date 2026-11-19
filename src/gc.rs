@@ -22,7 +22,10 @@ use sqlx::SqlitePool;
 use tokio::time::MissedTickBehavior;
 
 use crate::{
-    db::{session, storage as storage_db, trash as trash_db, uploads as uploads_db},
+    db::{
+        session, storage as storage_db, transfers as transfers_db, trash as trash_db,
+        uploads as uploads_db,
+    },
     storage, tree,
 };
 
@@ -263,7 +266,7 @@ async fn collect_parts(
     }
 }
 
-/// tmp/ 中太久沒有變動的暫存。進行中的搬移（move-{編號}）可能要好幾個小時，跳過
+/// tmp/ 中太久沒有變動的暫存。進行中的搬移與傳輸（move-、transfer-{編號}）可能要好幾個小時，跳過
 async fn collect_tmp(
     pool: &SqlitePool,
     root: &Path,
@@ -274,19 +277,27 @@ async fn collect_tmp(
     let Some(items) = list(storage::tmp_dir(root), report).await else {
         return;
     };
-    let running: HashSet<i64> = match storage_db::running_moves(pool).await {
-        Ok(ids) => ids.into_iter().collect(),
-        Err(e) => {
-            eprintln!("gc: cannot query storage moves: {e}");
+    let (moves, transfers) = match (
+        storage_db::running_moves(pool).await,
+        transfers_db::running(pool).await,
+    ) {
+        (Ok(moves), Ok(transfers)) => (
+            moves.into_iter().collect::<HashSet<i64>>(),
+            transfers.into_iter().collect::<HashSet<i64>>(),
+        ),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("gc: cannot query moves and transfers: {e}");
             report.errors += 1;
             return;
         }
     };
-    for (name, path, modified) in items {
-        let moving = name
-            .strip_prefix("move-")
+    let running = |prefix: &str, ids: &HashSet<i64>, name: &str| {
+        name.strip_prefix(prefix)
             .and_then(|id| id.parse().ok())
-            .is_some_and(|id| running.contains(&id));
+            .is_some_and(|id| ids.contains(&id))
+    };
+    for (name, path, modified) in items {
+        let moving = running("move-", &moves, &name) || running("transfer-", &transfers, &name);
         if !moving && is_expired(modified, now, policy.tmp_grace) && delete(path, report).await {
             report.deleted_tmp += 1;
         }

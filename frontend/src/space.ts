@@ -8,7 +8,7 @@ import type { Location } from "./router.js";
 export type Space = string | null;
 
 /** 儲存位置（null 是資料目錄）對應的 space= */
-function spaceOf(volumeId: number | null): string {
+export function spaceOf(volumeId: number | null): string {
   return volumeId === null ? "default" : String(volumeId);
 }
 

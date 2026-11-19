@@ -16,6 +16,8 @@
 use std::io;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -568,6 +570,97 @@ pub fn copy_into(source: &Path, target: &Path) -> io::Result<()> {
         if let Ok(time) = meta.modified() {
             set_modified(target, time);
         }
+    }
+    Ok(())
+}
+
+/// 長時間複製（換儲存位置、跨硬碟傳輸）的進度，由背景執行緒更新、另一邊讀取
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// 已經複製的位元組數
+    pub copied: AtomicU64,
+    /// 設定之後，複製在下一個區塊停下來（回傳錯誤）
+    pub stop: AtomicBool,
+    /// 略過的項目（符號連結、特殊檔案、名稱不是 UTF-8 的項目），以複製的起點為準的路徑
+    pub skipped: Mutex<Vec<String>>,
+}
+
+impl Progress {
+    fn skip(&self, path: String) {
+        if let Ok(mut skipped) = self.skipped.lock() {
+            skipped.push(path);
+        }
+    }
+}
+
+/// 複製一個檔案或資料夾到還不存在的 `to`，一邊累計位元組數；`stop` 被設定時停下來。
+/// 略過符號連結、特殊檔案與 ManorCloud 自己的資料夾（前兩者記錄在 `skipped`）
+pub fn copy_tracked(from: &Path, to: &Path, progress: &Progress) -> io::Result<()> {
+    let name = from
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    copy_tracked_into(from, to, &name, progress)
+}
+
+fn copy_tracked_into(from: &Path, to: &Path, shown: &str, progress: &Progress) -> io::Result<()> {
+    use std::io::{Read, Write};
+    use std::sync::atomic::Ordering;
+
+    let cancelled = || io::Error::new(io::ErrorKind::Interrupted, "cancelled");
+    if progress.stop.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.is_file() {
+        let mut input = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(from)?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read])?;
+            progress.copied.fetch_add(read as u64, Ordering::Relaxed);
+            if progress.stop.load(Ordering::Relaxed) {
+                return Err(cancelled());
+            }
+        }
+        output.sync_all()?;
+        if let Ok(time) = meta.modified() {
+            let _ = output.set_modified(time);
+        }
+    } else if meta.is_dir() {
+        std::fs::create_dir(to)?;
+        for item in std::fs::read_dir(from)? {
+            let item = item?;
+            let Ok(name) = item.file_name().into_string() else {
+                progress.skip(format!("{shown}/{}", item.file_name().to_string_lossy()));
+                continue;
+            };
+            if is_system_name(&name) {
+                continue;
+            }
+            let child = format!("{shown}/{name}");
+            let kind = item.file_type()?;
+            if kind.is_file() || kind.is_dir() {
+                copy_tracked_into(&item.path(), &to.join(&name), &child, progress)?;
+            } else {
+                progress.skip(child);
+            }
+        }
+        if let Ok(time) = meta.modified() {
+            set_modified(to, time);
+        }
+    } else {
+        progress.skip(shown.to_string());
     }
     Ok(())
 }

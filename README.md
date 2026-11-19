@@ -143,7 +143,10 @@ storage location) it looks like this:
 ```
 
 An administrator's **My files** is the top level of their disk; every other disk is listed in
-the sidebar under **My files**. The **users** folder holds everyone's own files: administrators
+the sidebar under **My files**. Administrators can copy or move files between disks: choose
+**Copy** or **Move** and pick the disk at the top of the dialog. It runs in the background with
+its progress in the bottom-right corner; a move deletes the originals only after everything has
+been copied, and it continues after a restart. The **users** folder holds everyone's own files: administrators
 can open and download them there, but not change them. Changes made directly on the disk (for
 example over a network share) show up in ManorCloud right away.
 `manorcloud uninstall --purge` doesn't touch storage locations; delete them yourself if you no

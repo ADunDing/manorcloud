@@ -12,6 +12,7 @@ mod rescue;
 mod space;
 mod storage;
 mod systemd;
+mod transfer;
 mod tree;
 mod uninstall;
 mod web;
@@ -239,6 +240,8 @@ async fn serve() {
 
     // 上次停止時還沒做完的儲存位置搬移：從頭再做一次
     mover::resume_all(&pool, &Arc::from(config.data_dir.as_path())).await;
+    // 上次停止時還沒做完的跨硬碟複製與移動：接著做完
+    transfer::resume_all(&pool, &Arc::from(config.data_dir.as_path())).await;
 
     // 看門狗：定期確認資料庫連線正常後回報 systemd，卡死時由 systemd 重啟
     systemd::spawn_watchdog(pool.clone());

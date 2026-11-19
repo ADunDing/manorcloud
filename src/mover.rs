@@ -11,11 +11,10 @@
 //!
 //! 搬移期間他的 My files 是唯讀的（見 `crate::space`），複製到一半時檔案不會改變。
 
-use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use sqlx::SqlitePool;
@@ -83,10 +82,9 @@ async fn run(pool: &SqlitePool, data_dir: &Path, move_id: i64) -> Result<(), Str
     let staging = storage::tmp_dir(&to_root).join(format!("move-{move_id}"));
 
     // 1. 在背景執行緒複製；這裡每隔一段時間更新進度，並確認搬移還沒被取消
-    let copied = Arc::new(AtomicU64::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(tree::Progress::default());
     let copy = tokio::task::spawn_blocking({
-        let (copied, stop) = (Arc::clone(&copied), Arc::clone(&stop));
+        let progress = Arc::clone(&progress);
         let (source, staging, from_root) = (source.clone(), staging.clone(), from_root.clone());
         let ids: Vec<i64> = trash.iter().map(|item| item.id).collect();
         move || -> io::Result<()> {
@@ -95,18 +93,17 @@ async fn run(pool: &SqlitePool, data_dir: &Path, move_id: i64) -> Result<(), Str
             }
             std::fs::create_dir_all(staging.join("trash"))?;
             if source.is_dir() {
-                copy_tree(&source, &staging.join("home"), &copied, &stop)?;
+                tree::copy_tracked(&source, &staging.join("home"), &progress)?;
             } else {
                 std::fs::create_dir(staging.join("home"))?;
             }
             for id in ids {
                 let item = storage::trash_path(&from_root, id);
                 if std::fs::symlink_metadata(&item).is_ok() {
-                    copy_tree(
+                    tree::copy_tracked(
                         &item,
                         &staging.join("trash").join(id.to_string()),
-                        &copied,
-                        &stop,
+                        &progress,
                     )?;
                 }
             }
@@ -118,14 +115,14 @@ async fn run(pool: &SqlitePool, data_dir: &Path, move_id: i64) -> Result<(), Str
         tokio::select! {
             result = &mut copy => break result.map_err(|e| e.to_string())?,
             () = tokio::time::sleep(PROGRESS_INTERVAL) => {
-                let moved = i64::try_from(copied.load(Ordering::Relaxed)).unwrap_or(i64::MAX);
+                let moved = i64::try_from(progress.copied.load(Ordering::Relaxed)).unwrap_or(i64::MAX);
                 if !storage_db::set_progress(pool, move_id, moved).await.map_err(db)? {
-                    stop.store(true, Ordering::Relaxed);
+                    progress.stop.store(true, Ordering::Relaxed);
                 }
             }
         }
     };
-    if stop.load(Ordering::Relaxed) || !still_running(pool, move_id).await? {
+    if progress.stop.load(Ordering::Relaxed) || !still_running(pool, move_id).await? {
         remove_quietly(staging).await;
         return Ok(());
     }
@@ -203,58 +200,6 @@ fn place(staging: &Path, target: &Path, to_root: &Path, trash: &[i64]) -> io::Re
         let from = staging.join("trash").join(id.to_string());
         if std::fs::symlink_metadata(&from).is_ok() {
             std::fs::rename(from, storage::trash_path(to_root, *id))?;
-        }
-    }
-    Ok(())
-}
-
-/// 複製一個檔案或資料夾，累計複製的位元組數；`stop` 被設定時停下來。
-/// 略過符號連結、特殊檔案與 ManorCloud 自己的資料夾
-fn copy_tree(from: &Path, to: &Path, copied: &AtomicU64, stop: &AtomicBool) -> io::Result<()> {
-    if stop.load(Ordering::Relaxed) {
-        return Err(io::Error::other("cancelled"));
-    }
-    let meta = std::fs::symlink_metadata(from)?;
-    if meta.is_file() {
-        let mut input = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(from)?;
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(to)?;
-        let mut buffer = vec![0u8; 256 * 1024];
-        loop {
-            let read = input.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            output.write_all(&buffer[..read])?;
-            copied.fetch_add(read as u64, Ordering::Relaxed);
-            if stop.load(Ordering::Relaxed) {
-                return Err(io::Error::other("cancelled"));
-            }
-        }
-        output.sync_all()?;
-        if let Ok(time) = meta.modified() {
-            let _ = output.set_modified(time);
-        }
-    } else if meta.is_dir() {
-        std::fs::create_dir(to)?;
-        for item in std::fs::read_dir(from)? {
-            let item = item?;
-            let name = item.file_name();
-            if tree::is_system_name(&name.to_string_lossy()) {
-                continue;
-            }
-            let kind = item.file_type()?;
-            if kind.is_file() || kind.is_dir() {
-                copy_tree(&item.path(), &to.join(&name), copied, stop)?;
-            }
-        }
-        if let Ok(time) = meta.modified() {
-            tree::set_modified(to, time);
         }
     }
     Ok(())

@@ -11,6 +11,7 @@ mod spaces;
 mod sso;
 mod state;
 mod storage;
+mod transfers;
 mod trash;
 mod two_factor;
 mod uploads;
@@ -85,6 +86,7 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
         .merge(admin::router())
         .merge(spaces::router(upload_limit))
         .merge(uploads::router())
+        .merge(transfers::router())
         .merge(trash::router())
         .merge(sso::router())
         .merge(two_factor::router())
