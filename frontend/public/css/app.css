@@ -601,6 +601,38 @@ table.files tbody tr:focus-visible {
     color: var(--muted);
 }
 
+/* 檔案種類的顏色（file-types.ts）：深淺兩種主題都看得清楚的中間色 */
+svg.type-image { color: #2da44e; }
+svg.type-video { color: #d1453b; }
+svg.type-audio { color: #a371f7; }
+svg.type-pdf { color: #e5534b; }
+svg.type-document { color: #3b82f6; }
+svg.type-spreadsheet { color: #1f9d55; }
+svg.type-presentation { color: #e8743b; }
+svg.type-code { color: #0ea5b7; }
+svg.type-archive { color: #c69026; }
+svg.type-disc { color: #8b949e; }
+
+/* 圖片的縮圖：List 中與圖示一樣大，Grid 中佔滿方塊的寬度 */
+.thumb {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    object-fit: cover;
+    background: var(--bar);
+    /* 白色的圖片也看得出邊界 */
+    outline: 1px solid var(--border);
+    outline-offset: -1px;
+}
+
+.thumb.large {
+    display: block;
+    width: 100%;
+    height: 110px;
+    border-radius: 6px;
+}
+
 .item-name {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -773,7 +805,13 @@ body.resizing * {
     left: 8px;
 }
 
+/* 圖示的區域固定高度：有縮圖、沒有縮圖的方塊一樣高，圖示置中 */
 .tile-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: stretch;
+    height: 110px;
     color: var(--muted);
 }
 
@@ -1923,3 +1961,142 @@ table.files .col-location {
     font-weight: 600;
 }
 
+/* ==================== 圖片預覽 ==================== */
+
+/* 全螢幕、固定深色背景（不跟隨主題），圖片看起來才準確 */
+.viewer {
+    box-sizing: border-box;
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: #0c0c0e;
+    color: #f2f2f2;
+}
+
+.viewer[open] {
+    display: flex;
+    flex-direction: column;
+}
+
+.viewer::backdrop {
+    background: rgb(0 0 0 / 0.6);
+}
+
+.viewer-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px 10px 16px;
+}
+
+.viewer-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.viewer-counter {
+    flex: none;
+    font-size: 0.85rem;
+    color: #b8b8b8;
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer-button,
+.viewer-nav {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.viewer-button {
+    flex: none;
+    width: 40px;
+    height: 40px;
+}
+
+.viewer-button:hover,
+.viewer-nav:hover {
+    background: rgb(255 255 255 / 0.12);
+}
+
+.viewer-button:focus-visible,
+.viewer-nav:focus-visible {
+    outline: 2px solid #8ab4ff;
+    outline-offset: 2px;
+}
+
+.viewer-stage {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: center;
+    justify-content: center;
+    padding: 0 64px 16px;
+}
+
+.viewer-image {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    box-shadow: 0 4px 24px rgb(0 0 0 / 0.5);
+}
+
+.viewer-status {
+    margin: 0;
+    padding: 0 16px;
+    text-align: center;
+    color: #b8b8b8;
+}
+
+.viewer-status:empty {
+    display: none;
+}
+
+.viewer-nav {
+    position: absolute;
+    top: 50%;
+    width: 48px;
+    height: 48px;
+    transform: translateY(-50%);
+    background: rgb(0 0 0 / 0.35);
+}
+
+.viewer-nav.previous {
+    left: 8px;
+}
+
+.viewer-nav.next {
+    right: 8px;
+}
+
+.viewer-nav[hidden] {
+    display: none;
+}
+
+@media (max-width: 600px) {
+    .viewer-stage {
+        padding: 0 0 12px;
+    }
+
+    .viewer-nav {
+        top: auto;
+        bottom: 16px;
+        transform: none;
+    }
+}

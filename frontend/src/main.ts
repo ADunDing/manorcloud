@@ -4,6 +4,7 @@ import { api, ApiError, onPasswordChangeRequired, onUnauthorized } from "./api.j
 import { renderChangeCredentials, renderLogin } from "./auth-view.js";
 import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
 import { h } from "./dom.js";
+import { loadIconMap } from "./file-types.js";
 import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
 import { adminHref, currentRoute, filesHref, MY_FILES, settingsHref } from "./router.js";
 import { renderAdministration, renderSettings } from "./settings-view.js";
@@ -319,4 +320,5 @@ window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => event.preventDefault());
 
 // void：明確表示不等待這個 Promise（refresh 內部已處理所有錯誤）
-void refresh();
+// 圖示的對應表先載入，第一次顯示列表時就有正確的圖示
+void loadIconMap().then(() => refresh());

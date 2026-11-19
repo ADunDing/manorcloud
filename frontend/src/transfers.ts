@@ -1,5 +1,6 @@
 // 跨硬碟的複製與移動：伺服器在背景進行，右下角的面板顯示進度。
-// 進行中的可以取消；結束的顯示結果（失敗原因、略過的項目），按 × 從清單移除。
+// 進行中的可以取消。順利完成或取消的幾秒後自動從清單移除；
+// 失敗或有略過項目的會留著顯示原因，按 × 移除。
 // 有進行中的項目時每兩秒更新一次；全部結束後停止更新。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
@@ -25,6 +26,8 @@ export interface Transfer {
 }
 
 const POLL_MS = 2000;
+/** 順利完成的項目顯示多久後自動移除 */
+const DISMISS_MS = 4000;
 
 export class TransferPanel {
   /** 面板，由檔案瀏覽畫面放進右下角 */
@@ -34,6 +37,8 @@ export class TransferPanel {
   /** 上一次看到的進行中項目：變成結束時通知畫面重新載入 */
   private running = new Set<number>();
   private loading = 0;
+  /** 已經排定自動移除的項目 */
+  private readonly dismissing = new Set<number>();
 
   /**
    * @param labelOf  space= 的值 → 顯示的名稱（My files、Disk2）
@@ -78,6 +83,7 @@ export class TransferPanel {
       const finished = [...this.running].some((id) => !running.has(id));
       this.running = running;
       this.render(items);
+      this.scheduleDismiss(items);
       if (finished) {
         this.onFinished();
       }
@@ -89,6 +95,23 @@ export class TransferPanel {
 
   private schedule(): void {
     this.timer = window.setTimeout(() => this.refresh(), POLL_MS);
+  }
+
+  /** 順利完成、取消的項目過幾秒自動移除；失敗或有略過的留著讓使用者看 */
+  private scheduleDismiss(items: readonly Transfer[]): void {
+    for (const t of items) {
+      const quiet = (t.state === "done" || t.state === "cancelled") && t.skipped.length === 0;
+      if (!quiet || this.dismissing.has(t.id)) {
+        continue;
+      }
+      this.dismissing.add(t.id);
+      window.setTimeout(() => {
+        void api
+          .delete(`/api/transfers/${t.id}`)
+          .catch(() => undefined)
+          .finally(() => this.refresh());
+      }, DISMISS_MS);
+    }
   }
 
   private render(items: readonly Transfer[]): void {

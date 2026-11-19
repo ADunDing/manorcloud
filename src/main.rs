@@ -12,6 +12,7 @@ mod rescue;
 mod space;
 mod storage;
 mod systemd;
+mod thumbs;
 mod transfer;
 mod tree;
 mod uninstall;

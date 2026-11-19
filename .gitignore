@@ -8,3 +8,4 @@ cookies.txt
 /fresh*.db*
 /fresh-data/
 /dist/
+/frontend/public/icons/

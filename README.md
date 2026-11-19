@@ -22,6 +22,9 @@ dependencies, and it runs comfortably on a Raspberry Pi.
   automatically when the connection drops, and can be resumed after reloading the page by
   choosing the same file again
 - **Resumable downloads** (HTTP range requests)
+- **Picture thumbnails and preview** for JPEG, PNG, GIF, WebP and BMP: open a picture to view it
+  full screen and use ← → to go through the folder. Thumbnails are made once and kept in
+  `.manorcloud/thumbs` on each disk; ones not viewed for 30 days are removed automatically
 - **Several users**, managed by an administrator; each user sees only their own files
 - **Several disks**: an administrator can keep each user's files on a different disk, and
   moves existing files there in the background

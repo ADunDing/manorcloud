@@ -1,6 +1,6 @@
 // 檔案瀏覽：路徑、工具列、檢視切換、檔案列表、右鍵選單、拖放上傳，以及右下角的上傳面板。
 //
-// 選取與列表的畫面在 file-list.ts；這裡負責「選了之後要做什麼」：改名、複製、移動、刪除、下載、上傳。
+// 選取與列表的畫面在 file-list.ts；這裡負責「選了之後要做什麼」：改名、複製、移動、刪除、下載、上傳、預覽圖片（preview.ts）。
 //
 // My files 與管理員看到的每一顆硬碟都用這個畫面，差別只在 API 的 space 參數（見 space.ts）。
 // 資料夾以路徑表示（例如 相片/2026），項目以名稱識別：名稱就是硬碟上真實的檔名。
@@ -22,6 +22,7 @@ import { isInside, toFileItems } from "./listing.js";
 import { openContextMenu, type MenuEntry } from "./menu.js";
 import { chooseFolder, type FolderChoice, type FolderPlace } from "./move-dialog.js";
 import { PendingUploads } from "./pending-uploads.js";
+import { isImage, openPreview, thumbnailUrl } from "./preview.js";
 import {
   defaultDirection,
   loadSort,
@@ -484,6 +485,8 @@ class FolderView {
       onSort: (key) => this.sortBy(key),
       sortControl: this.sorter.element,
       pinned: this.pinned,
+      thumbnail: (item) =>
+        isImage(item) ? thumbnailUrl(place.space, this.itemPath(item), item, "small") : null,
       draggable: this.readOnly === null,
       ...(this.readOnly === null
         ? {}
@@ -551,9 +554,20 @@ class FolderView {
   private open(item: FileItem): void {
     if (item.kind === "folder") {
       window.location.hash = filesHref(place.location, [...this.path, item.name]);
+    } else if (isImage(item)) {
+      this.preview(item);
     } else {
       download(this.itemPath(item), item.name);
     }
+  }
+
+  /** 預覽圖片：可以切換這個資料夾中的其他圖片，順序與列表相同 */
+  private preview(item: FileItem): void {
+    const images = sortItems(this.items, this.sort)
+      .filter(isImage)
+      .map((image) => ({ item: image, path: this.itemPath(image) }));
+    const start = images.findIndex((entry) => entry.item.name === item.name);
+    openPreview(place.space, images, start, (entry) => download(entry.path, entry.item.name));
   }
 
   // ---------- 右鍵選單 ----------
@@ -567,6 +581,8 @@ class FolderView {
     const entries: (MenuEntry | "separator")[] = [];
     if (single?.kind === "folder") {
       entries.push({ label: "Open", icon: "folder", onSelect: () => this.open(single) });
+    } else if (single !== undefined && isImage(single)) {
+      entries.push({ label: "Preview", icon: "image", onSelect: () => this.preview(single) });
     }
     if (single !== undefined && writable) {
       entries.push({

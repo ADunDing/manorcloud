@@ -1,4 +1,5 @@
-//! 垃圾回收：放棄的分段上傳、留下來的暫存檔、超過保留期限的垃圾桶項目，以及過期的 session。
+//! 垃圾回收：放棄的分段上傳、留下來的暫存檔、超過保留期限的垃圾桶項目、很久沒用到的縮圖，
+//! 以及過期的 session。
 //!
 //! 每顆有掛載的硬碟（資料目錄與儲存位置）各自檢查它的 `.manorcloud/`。
 //! **只會動 `.manorcloud/` 裡面的東西**，使用者的檔案永遠不會被這裡刪除。
@@ -26,7 +27,7 @@ use crate::{
         session, storage as storage_db, transfers as transfers_db, trash as trash_db,
         uploads as uploads_db,
     },
-    storage, tree,
+    storage, thumbs, tree,
 };
 
 /// 啟動後延遲多久才第一次執行。
@@ -48,6 +49,8 @@ pub struct GcPolicy {
     pub upload_grace: Duration,
     /// 放進垃圾桶的項目保留多久，之後永久刪除。與 Google Drive 相同的 30 天
     pub trash_retention: Duration,
+    /// 縮圖多久沒有用到就刪除（用到時會更新修改時間，見 thumbs.rs）
+    pub thumbs_unused: Duration,
 }
 
 impl Default for GcPolicy {
@@ -57,6 +60,7 @@ impl Default for GcPolicy {
             tmp_grace: Duration::from_secs(24 * 60 * 60),
             upload_grace: Duration::from_secs(24 * 60 * 60),
             trash_retention: Duration::from_secs(30 * 24 * 60 * 60),
+            thumbs_unused: Duration::from_secs(30 * 24 * 60 * 60),
         }
     }
 }
@@ -74,6 +78,7 @@ pub struct GcReport {
     pub purged_trash: u64,
     /// 垃圾桶中沒有紀錄的檔案，以及沒有檔案的紀錄
     pub orphan_trash: u64,
+    pub deleted_thumbs: u64,
     pub errors: u64,
 }
 
@@ -83,13 +88,14 @@ impl fmt::Display for GcReport {
         write!(
             f,
             "deleted {} temp items, {} upload part files; expired {} uploads, {} sessions; \
-             purged {} trash items, {} orphaned trash entries; {} errors",
+             purged {} trash items, {} orphaned trash entries; {} thumbnails; {} errors",
             self.deleted_tmp,
             self.deleted_parts,
             self.expired_uploads,
             self.expired_sessions,
             self.purged_trash,
             self.orphan_trash,
+            self.deleted_thumbs,
             self.errors
         )
     }
@@ -140,6 +146,7 @@ pub async fn run_once(
         collect_parts(pool, &root.path, now, policy, &mut report).await;
         collect_tmp(pool, &root.path, now, policy, &mut report).await;
         collect_trash(pool, root.volume, &root.path, now, policy, &mut report).await;
+        collect_thumbs(&root.path, now, policy, &mut report).await;
     }
     collect_sessions(pool, now, &mut report).await;
     report
@@ -370,6 +377,36 @@ async fn collect_trash(
     }
 }
 
+/// 很久沒有用到的縮圖：`thumbs/{兩個字元}/{32 個十六進位字元}.jpg`
+async fn collect_thumbs(root: &Path, now: SystemTime, policy: &GcPolicy, report: &mut GcReport) {
+    let Some(dirs) = list(thumbs::cache_dir(root), report).await else {
+        return;
+    };
+    let hex = |text: &str, len: usize| {
+        text.len() == len
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    for (dir_name, dir, _) in dirs {
+        if !hex(&dir_name, 2) {
+            continue;
+        }
+        let Some(files) = list(dir, report).await else {
+            continue;
+        };
+        for (name, path, modified) in files {
+            let ours = name
+                .strip_suffix(".jpg")
+                .is_some_and(|key| hex(key, 32) && key.starts_with(&dir_name));
+            if ours && is_expired(modified, now, policy.thumbs_unused) && delete(path, report).await
+            {
+                report.deleted_thumbs += 1;
+            }
+        }
+    }
+}
+
 /// 刪除過期的 session
 async fn collect_sessions(pool: &SqlitePool, now: SystemTime, report: &mut GcReport) {
     let Some(now_secs) = unix_secs(now) else {
@@ -439,11 +476,21 @@ mod tests {
         let orphan = storage::uploads_dir(root).join(format!("{:032x}.part", 1));
         std::fs::write(&orphan, b"x").unwrap();
         old(&orphan);
+        // 縮圖：很久沒用到的刪，最近用過的留
+        let thumbs = thumbs::cache_dir(root).join("ab");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        let unused = thumbs.join(format!("ab{:030x}.jpg", 1));
+        let used = thumbs.join(format!("ab{:030x}.jpg", 2));
+        std::fs::write(&unused, b"x").unwrap();
+        std::fs::write(&used, b"x").unwrap();
+        old(&unused);
 
         let report = run_once(&pool, root, SystemTime::now(), &GcPolicy::default()).await;
 
         assert_eq!(report.deleted_tmp, 1);
         assert_eq!(report.deleted_parts, 1);
+        assert_eq!(report.deleted_thumbs, 1);
+        assert!(!unused.exists() && used.exists());
         assert!(root.join("old.txt").exists());
         assert!(storage::tmp_dir(root).join("upload-b").exists());
         assert!(!orphan.exists());

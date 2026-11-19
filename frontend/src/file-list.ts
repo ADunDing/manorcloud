@@ -13,6 +13,7 @@
 
 import { h } from "./dom.js";
 import { formatSize, formatTime } from "./format.js";
+import { fileIconName, folderIconName, iconUrl } from "./file-types.js";
 import { icon } from "./icons.js";
 import type { SortKey, SortOptions } from "./sort.js";
 import type { FileItem } from "./types.js";
@@ -46,7 +47,7 @@ export const DRAG_TYPE = "application/x-manorcloud-items";
 
 interface FileListOptions {
   readonly view: ViewMode;
-  /** 雙擊或按 Enter：資料夾進入、檔案下載 */
+  /** 雙擊或按 Enter：資料夾進入；圖片預覽；其他檔案下載 */
   readonly onOpen: (item: FileItem) => void;
   /** 選取改變時呼叫：工具列依此啟用或停用按鈕 */
   readonly onSelectionChange: () => void;
@@ -78,6 +79,8 @@ interface FileListOptions {
    * 只是一個連結：不能選取、拖曳、改名，也不參與排序
    */
   readonly pinned?: readonly PinnedFolder[];
+  /** 有縮圖的項目回傳縮圖的網址，取代圖示；載入失敗時改回一般的圖示 */
+  readonly thumbnail?: (item: FileItem) => string | null;
 }
 
 /** 固定在列表最前面的資料夾連結 */
@@ -340,7 +343,7 @@ export class FileList {
         h(
           "a",
           { href: pinned.href, class: "name-cell pinned-link" },
-          icon("folder"),
+          fileIcon(folderIconName(pinned.name), 18),
           h("span", { class: "item-name", title: pinned.name }, pinned.name),
         ),
       ),
@@ -359,7 +362,7 @@ export class FileList {
       h(
         "a",
         { href: pinned.href, class: "pinned-link" },
-        h("span", { class: "tile-icon" }, icon("folder", 48)),
+        h("span", { class: "tile-icon" }, fileIcon(folderIconName(pinned.name), 48)),
         h("span", { class: "item-name", title: pinned.name }, pinned.name),
         h("span", { class: "tile-meta" }, pinned.note),
       ),
@@ -400,7 +403,7 @@ export class FileList {
     const handle = h(
       "span",
       { class: "name-cell", draggable: this.canDrag() ? "true" : null },
-      icon(item.kind === "folder" ? "folder" : "file"),
+      this.itemIcon(item, 18),
       name,
     );
     const location = this.options.location?.(item);
@@ -460,12 +463,31 @@ export class FileList {
         tabindex: "-1",
       },
       box,
-      h("span", { class: "tile-icon" }, icon(isFolder ? "folder" : "file", 48)),
+      h("span", { class: "tile-icon" }, this.itemIcon(item, 48)),
       name,
       h("span", { class: "tile-meta" }, isFolder ? "Folder" : formatSize(item.size)),
     );
     this.bind(item, tile, box, name, tile);
     return tile;
+  }
+
+  /** 項目的圖示，或圖片的縮圖 */
+  private itemIcon(item: FileItem, size: number): Node {
+    const plain = (): Node => fileIcon(item.kind === "folder" ? folderIconName(item.name) : fileIconName(item.name), size);
+    const src = this.options.thumbnail?.(item) ?? null;
+    if (src === null) {
+      return plain();
+    }
+    const image = h("img", {
+      class: size > 24 ? "thumb large" : "thumb",
+      src,
+      alt: "",
+      loading: "lazy",
+      decoding: "async",
+      draggable: "false",
+    });
+    image.addEventListener("error", () => image.replaceWith(plain()), { once: true });
+    return image;
   }
 
   private canDrag(): boolean {
@@ -935,4 +957,16 @@ function saveColumns(columns: Columns): void {
   } catch {
     // 無法儲存只代表下次回到預設寬度
   }
+}
+
+/** 檔案或資料夾的圖示（Material Icon Theme 的 SVG，見 file-types.ts） */
+function fileIcon(name: string, size: number): HTMLImageElement {
+  return h("img", {
+    class: "file-icon",
+    src: iconUrl(name),
+    alt: "",
+    width: size,
+    height: size,
+    draggable: "false",
+  });
 }
