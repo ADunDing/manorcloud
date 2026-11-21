@@ -1,5 +1,6 @@
 // 登入畫面，以及修改帳號名稱與密碼的畫面。
 
+import { t } from "./i18n.js";
 import { api, ApiError } from "./api.js";
 import { h } from "./dom.js";
 import { ssoInfo, startSso } from "./sso.js";
@@ -14,7 +15,7 @@ import type { User } from "./types.js";
 const USERNAME_MIN = 3;
 const USERNAME_MAX = 32;
 const USERNAME_PATTERN = "[a-z0-9_\\-]+"; // pattern 屬性會自動比對整個字串
-const USERNAME_HINT = `${USERNAME_MIN}–${USERNAME_MAX} characters: lowercase letters, digits, underscores and hyphens`;
+const USERNAME_HINT = t("{min}–{max} characters: lowercase letters, digits, underscores and hyphens", { min: USERNAME_MIN, max: USERNAME_MAX });
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 128;
 
@@ -49,17 +50,17 @@ export function renderLogin(
     maxlength: PASSWORD_MAX,
   });
   const errorBox = errorContainer();
-  const submitButton = h("button", { type: "submit" }, "Log in");
+  const submitButton = h("button", { type: "submit" }, t("Log in"));
 
   // method="post"：萬一 JS 沒有載入、瀏覽器以原生方式送出表單，
   // 密碼也不會出現在網址裡（預設的 GET 會把它放進網址、瀏覽紀錄與伺服器 log）
   const form = h(
     "form",
     { method: "post", class: "auth-form" },
-    h("h1", {}, "Log in to ManorCloud"),
+    h("h1", {}, t("Log in to ManorCloud")),
     notice ? h("p", { class: "notice", role: "status" }, notice) : null,
-    labeled("Username", usernameInput),
-    labeled("Password", passwordInput),
+    labeled(t("Username"), usernameInput),
+    labeled(t("Password"), passwordInput),
     errorBox,
     submitButton,
   );
@@ -107,29 +108,29 @@ export function renderLogin(
 function renderTwoFactorStep(container: HTMLElement, onLoggedIn: (user: User) => void): void {
   const code = codeInput();
   const errorBox = errorContainer();
-  const submitButton = h("button", { type: "submit" }, "Verify");
-  const hint = h("p", {}, "Enter the 6-digit code from your authenticator app.");
+  const submitButton = h("button", { type: "submit" }, t("Verify"));
+  const hint = h("p", {}, t("Enter the 6-digit code from your authenticator app."));
   let recovery = false;
-  const toggle = h("button", { type: "button", class: "link" }, "Use a recovery code instead");
+  const toggle = h("button", { type: "button", class: "link" }, t("Use a recovery code instead"));
   toggle.addEventListener("click", () => {
     recovery = !recovery;
     hint.textContent = recovery
-      ? "Enter one of your recovery codes, like abcd-efgh. Each code works once."
-      : "Enter the 6-digit code from your authenticator app.";
-    toggle.textContent = recovery ? "Use the authenticator app instead" : "Use a recovery code instead";
+      ? t("Enter one of your recovery codes, like abcd-efgh. Each code works once.")
+      : t("Enter the 6-digit code from your authenticator app.");
+    toggle.textContent = recovery ? t("Use the authenticator app instead") : t("Use a recovery code instead");
     code.inputMode = recovery ? "text" : "numeric";
     code.value = "";
     code.focus();
   });
-  const back = h("button", { type: "button", class: "link" }, "Back");
+  const back = h("button", { type: "button", class: "link" }, t("Back"));
   back.addEventListener("click", () => renderLogin(container, onLoggedIn));
 
   const form = h(
     "form",
     { method: "post", class: "auth-form" },
-    h("h1", {}, "Two-factor authentication"),
+    h("h1", {}, t("Two-factor authentication")),
     hint,
-    labeled("Code", code),
+    labeled(t("Code"), code),
     errorBox,
     submitButton,
     h("div", { class: "auth-links" }, toggle, back),
@@ -179,7 +180,7 @@ async function addSsoButton(form: HTMLElement, errorBox: HTMLElement): Promise<v
   const button = h(
     "button",
     { type: "button", class: "secondary sso-button" },
-    `Sign in with ${info.display_name ?? "single sign-on"}`,
+    info.display_name === null ? t("Sign in with single sign-on") : t("Sign in with {name}", { name: info.display_name }),
   );
   button.addEventListener("click", () => {
     button.disabled = true;
@@ -248,7 +249,7 @@ export function renderChangeCredentials(
     autocomplete: "new-password",
     minlength: PASSWORD_MIN,
     maxlength: PASSWORD_MAX,
-    placeholder: forced ? undefined : "Leave empty to keep your password",
+    placeholder: forced ? undefined : t("Leave empty to keep your password"),
   });
   const confirmInput = h("input", {
     name: "confirm_password",
@@ -258,36 +259,36 @@ export function renderChangeCredentials(
     maxlength: PASSWORD_MAX,
   });
   const errorBox = errorContainer();
-  const submitButton = h("button", { type: "submit" }, forced ? "Finish setup" : "Save changes");
+  const submitButton = h("button", { type: "submit" }, forced ? t("Finish setup") : t("Save changes"));
 
   const form = h(
     "form",
     { method: "post", class: embedded ? "auth-form embedded" : "auth-form" },
     embedded
-      ? h("h2", { class: "section-title" }, "Account")
-      : h("h1", {}, forced ? "Set up your account" : "Account settings"),
+      ? h("h2", { class: "section-title" }, t("Account"))
+      : h("h1", {}, forced ? t("Set up your account") : t("Account settings")),
     forced
       ? h(
           "p",
           { class: "notice", role: "status" },
-          "You're using a temporary password. Choose your own password; you can also change your username. The temporary password stops working afterwards.",
+          t("You're using a temporary password. Choose your own password; you can also change your username. The temporary password stops working afterwards."),
         )
       : null,
-    labeled("Username", usernameInput, h("span", { class: "hint" }, USERNAME_HINT)),
-    labeled(forced ? "Current password (the temporary one)" : "Current password", currentInput),
+    labeled(t("Username"), usernameInput, h("span", { class: "hint" }, USERNAME_HINT)),
+    labeled(forced ? t("Current password (the temporary one)") : t("Current password"), currentInput),
     labeled(
-      "New password",
+      t("New password"),
       newInput,
-      h("span", { class: "hint" }, `${PASSWORD_MIN}–${PASSWORD_MAX} characters`),
+      h("span", { class: "hint" }, t("{min}–{max} characters", { min: PASSWORD_MIN, max: PASSWORD_MAX })),
     ),
-    labeled("Confirm new password", confirmInput),
+    labeled(t("Confirm new password"), confirmInput),
     errorBox,
     h(
       "div",
       { class: "actions" },
       submitButton,
       onCancel && !forced
-        ? h("button", { type: "button", class: "secondary", onClick: onCancel }, "Cancel")
+        ? h("button", { type: "button", class: "secondary", onClick: onCancel }, t("Cancel"))
         : null,
     ),
   );
@@ -301,7 +302,7 @@ export function renderChangeCredentials(
       const newPassword = textField(data, "new_password");
 
       if (newPassword !== textField(data, "confirm_password")) {
-        throw new FormError("The new passwords don't match", confirmInput);
+        throw new FormError(t("The new passwords don't match"), confirmInput);
       }
 
       // 只送出有改變的欄位
@@ -315,7 +316,7 @@ export function renderChangeCredentials(
         body.new_password = newPassword;
       }
       if (!("new_username" in body) && !("new_password" in body)) {
-        throw new FormError("Nothing to change", usernameInput);
+        throw new FormError(t("Nothing to change"), usernameInput);
       }
 
       const updated = await api.post<User>("/api/me/credentials", body);
@@ -383,7 +384,7 @@ function bindSubmit(
 
     busy = true;
     button.disabled = true;
-    button.textContent = "Working…";
+    button.textContent = t("Working…");
 
     void (async () => {
       try {
@@ -414,7 +415,7 @@ function messageOf(error: unknown): string {
   if (error instanceof ApiError || error instanceof FormError) {
     return error.message;
   }
-  return "Something went wrong";
+  return t("Something went wrong");
 }
 
 /**

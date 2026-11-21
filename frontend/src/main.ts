@@ -1,5 +1,6 @@
 // 進入點：依登入狀態與網址決定要顯示哪個畫面。
 
+import { t } from "./i18n.js";
 import { api, ApiError, onPasswordChangeRequired, onUnauthorized } from "./api.js";
 import { renderChangeCredentials, renderLogin } from "./auth-view.js";
 import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
@@ -85,11 +86,11 @@ function showScreen(user: User): void {
       h(
         "div",
         { class: "auth-form" },
-        h("h1", {}, "Set up two-factor authentication"),
+        h("h1", {}, t("Set up two-factor authentication")),
         h(
           "p",
           { class: "notice", role: "status" },
-          "Your administrator requires two-factor authentication. Set it up to continue.",
+          t("Your administrator requires two-factor authentication. Set it up to continue."),
         ),
         steps,
       ),
@@ -179,7 +180,7 @@ function showAccount(user: User, { navigation }: { navigation: boolean }): void 
     {
       type: "button",
       class: "avatar",
-      "aria-label": `Account menu for ${user.username}`,
+      "aria-label": t("Account menu for {name}", { name: user.username }),
       title: user.username,
     },
     // 帳號名稱只能是小寫英文、數字、底線與連字號，第一個字一定能顯示
@@ -191,25 +192,25 @@ function showAccount(user: User, { navigation }: { navigation: boolean }): void 
       "div",
       { class: "menu-header" },
       h("strong", {}, user.username),
-      h("span", { class: "muted" }, user.role === "admin" ? "Administrator" : "Member"),
+      h("span", { class: "muted" }, user.role === "admin" ? t("Administrator") : t("Member")),
     ),
   ];
   if (navigation) {
     items.push(
-      menuItem({ label: "Settings", icon: "user", onSelect: () => go(user, settingsHref()) }),
+      menuItem({ label: t("Settings"), icon: "user", onSelect: () => go(user, settingsHref()) }),
     );
     if (user.role === "admin") {
       items.push(
-        menuItem({ label: "Administration", icon: "users", onSelect: () => go(user, adminHref()) }),
+        menuItem({ label: t("Administration"), icon: "users", onSelect: () => go(user, adminHref()) }),
       );
     }
     items.push(menuSeparator());
   }
-  items.push(menuItem({ label: "Log out", icon: "logout", onSelect: () => void logout() }));
+  items.push(menuItem({ label: t("Log out"), icon: "logout", onSelect: () => void logout() }));
 
   const menu = h(
     "div",
-    { class: "menu dropdown-menu account-menu", role: "menu", "aria-label": "Account" },
+    { class: "menu dropdown-menu account-menu", role: "menu", "aria-label": t("Account") },
     items,
   );
   dropdown(avatar, menu);
@@ -241,7 +242,7 @@ async function logout(): Promise<void> {
     await api.post("/api/logout");
   } catch (error) {
     // 登出失敗（例如連不到伺服器）時，Cookie 仍然有效，不能假裝已經登出
-    showError(error instanceof ApiError ? error.message : "Couldn't log out");
+    showError(error instanceof ApiError ? error.message : t("Couldn't log out"));
     return;
   }
   showLoggedOut();
@@ -269,7 +270,7 @@ async function refresh(): Promise<void> {
       h(
         "p",
         { class: "error", role: "alert" },
-        error instanceof ApiError ? error.message : "Something went wrong",
+        error instanceof ApiError ? error.message : t("Something went wrong"),
       ),
     );
   }

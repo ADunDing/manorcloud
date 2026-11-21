@@ -4,6 +4,7 @@
 // 重新整理之後，使用者選擇同一個檔案，也能接著伺服器上未完成的上傳繼續（見 isSameFile）。
 // 對外的介面與單次上傳相同（UploadHandle），佇列不需要知道是哪一種。
 
+import { t } from "./i18n.js";
 import { api, ApiError, errorFromResponse } from "./api.js";
 import { withSpace, type Space } from "./space.js";
 import { readBody, UploadCancelled, type UploadHandle } from "./upload.js";
@@ -205,10 +206,11 @@ function retryDelay(failures: number): number {
 function retryNotice(error: unknown, delay: number): string {
   const seconds = Math.round(delay / 1000);
   if (error instanceof ApiError && error.code === "upload_busy") {
-    return `The server is still finishing the previous attempt. Retrying in ${seconds} s…`;
+    return t("The server is still finishing the previous attempt. Retrying in {seconds} s…", { seconds });
   }
-  const status = error instanceof ApiError && error.status !== 0 ? ` (${error.status})` : "";
-  return `Connection lost${status}. Retrying in ${seconds} s…`;
+  return error instanceof ApiError && error.status !== 0
+    ? t("Connection lost ({status}). Retrying in {seconds} s…", { status: error.status, seconds })
+    : t("Connection lost. Retrying in {seconds} s…", { seconds });
 }
 
 // ==================== 流程 ====================
@@ -311,7 +313,7 @@ async function complete(
 ): Promise<void> {
   control.check();
   control.completing = true;
-  onNotice("Finishing…");
+  onNotice(t("Finishing…"));
 
   let failures = 0;
   for (;;) {
@@ -342,7 +344,7 @@ function interrupted(error: unknown): unknown {
   if (error instanceof ApiError && error.status === 0) {
     return new ApiError(
       0,
-      "Connection lost. The upload is paused: choose the same file again to continue where it stopped",
+      t("Connection lost. The upload is paused: choose the same file again to continue where it stopped"),
     );
   }
   return error;
@@ -378,7 +380,7 @@ function putChunk(
         if (typeof received === "number") {
           resolve(received);
         } else {
-          reject(new ApiError(xhr.status, "The server sent an unexpected response"));
+          reject(new ApiError(xhr.status, t("The server sent an unexpected response")));
         }
       } else {
         // 與 fetch 一樣觸發 401 與「必須修改密碼」的全域處理
@@ -387,11 +389,11 @@ function putChunk(
     });
     xhr.addEventListener("error", () => {
       control.track(null);
-      reject(new ApiError(0, "Can't reach the server"));
+      reject(new ApiError(0, t("Can't reach the server")));
     });
     xhr.addEventListener("timeout", () => {
       control.track(null);
-      reject(new ApiError(0, "The connection timed out"));
+      reject(new ApiError(0, t("The connection timed out")));
     });
     xhr.addEventListener("abort", () => {
       control.track(null);

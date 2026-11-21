@@ -3,6 +3,7 @@
 // 在瀏覽器中排序：伺服器一次回傳整個資料夾的內容，不需要另外向伺服器請求。
 // 使用者的選擇記在瀏覽器中，下次打開維持一樣的排序。
 
+import { t } from "./i18n.js";
 import type { FileItem } from "./types.js";
 
 export type SortKey = "name" | "modified" | "size";
@@ -59,9 +60,9 @@ export function defaultDirection(key: SortKey): SortDirection {
 /** 選單中「方向」的文字，依欄位而不同 */
 export function directionLabel(key: SortKey, direction: SortDirection): string {
   const labels: Record<SortKey, [string, string]> = {
-    name: ["A to Z", "Z to A"],
-    modified: ["Oldest first", "Newest first"],
-    size: ["Smallest first", "Largest first"],
+    name: [t("A to Z"), t("Z to A")],
+    modified: [t("Oldest first"), t("Newest first")],
+    size: [t("Smallest first"), t("Largest first")],
   };
   const [ascending, descending] = labels[key];
   return direction === "asc" ? ascending : descending;

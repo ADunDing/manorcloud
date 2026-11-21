@@ -86,9 +86,10 @@ pub(super) async fn file_response(
 /// 新增回應類型時不可能漏掉任何一個。
 fn base_response(name: &str, etag: &str) -> Builder {
     Response::builder()
-        // 這個端點的目的就是下載，一律宣告成不明的二進位資料，不使用資料庫裡的 MIME。
-        // 就算 attachment 因故被忽略，瀏覽器也沒有理由把它當成 HTML 顯示。
-        .header(header::CONTENT_TYPE, "application/octet-stream")
+        // 宣告成不明的二進位資料，就算 attachment 因故被忽略，瀏覽器也沒有理由把它當成 HTML 顯示。
+        // 唯一的例外是影音：預覽時 <video>、<audio> 直接播放這個網址，Safari 需要正確的類型。
+        // 影音的類型不會被當成網頁或腳本執行
+        .header(header::CONTENT_TYPE, media_type(name))
         // 主要防線：讓瀏覽器存檔，而不是在本站 origin 開啟
         .header(header::CONTENT_DISPOSITION, content_disposition(name))
         // 禁止瀏覽器無視 Content-Type、自行猜測內容類型
@@ -103,6 +104,24 @@ fn base_response(name: &str, etag: &str) -> Builder {
         // 告訴客戶端這個端點支援 Range，可以斷點續傳
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, etag)
+}
+
+/// 影音檔依副檔名回傳類型，其他一律是 application/octet-stream
+fn media_type(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("mkv") => "video/x-matroska",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a" | "aac") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("ogg" | "oga") => "audio/ogg",
+        Some("opus") => "audio/opus",
+        _ => "application/octet-stream",
+    }
 }
 
 /// 把非同步讀取器包成串流回應本體：一次只讀一小塊
@@ -276,6 +295,15 @@ fn is_attr_char(b: u8) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn only_audio_and_video_get_their_own_type() {
+        assert_eq!(media_type("影片.MP4"), "video/mp4");
+        assert_eq!(media_type("a.mp3"), "audio/mpeg");
+        for name in ["a.html", "a.svg", "a.pdf", "mp4", "a.js", ""] {
+            assert_eq!(media_type(name), "application/octet-stream", "{name}");
+        }
+    }
 
     // ==================== content_disposition ====================
 

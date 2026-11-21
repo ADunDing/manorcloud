@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "rm -rf public/js && node scripts/icons.mjs && tsc",
+    "build": "rm -rf public/js && node scripts/icons.mjs && node scripts/pdfjs.mjs && tsc",
     "watch": "tsc --watch",
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "material-icon-theme": "5.40.0",
+    "pdfjs-dist": "6.5.438",
     "typescript": "^7.0.2"
   }
 }

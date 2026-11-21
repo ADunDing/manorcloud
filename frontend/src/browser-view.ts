@@ -1,11 +1,12 @@
 // 檔案瀏覽：路徑、工具列、檢視切換、檔案列表、右鍵選單、拖放上傳，以及右下角的上傳面板。
 //
-// 選取與列表的畫面在 file-list.ts；這裡負責「選了之後要做什麼」：改名、複製、移動、刪除、下載、上傳、預覽圖片（preview.ts）。
+// 選取與列表的畫面在 file-list.ts；這裡負責「選了之後要做什麼」：改名、複製、移動、刪除、下載、上傳、預覽（preview.ts）。
 //
 // My files 與管理員看到的每一顆硬碟都用這個畫面，差別只在 API 的 space 參數（見 space.ts）。
 // 資料夾以路徑表示（例如 相片/2026），項目以名稱識別：名稱就是硬碟上真實的檔名。
 // 硬碟的最上層有一個 users 資料夾（每個人的 My files），固定在列表最前面。
 
+import { t, tNodes } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { chooseDownload, nameDialog } from "./dialogs.js";
@@ -22,7 +23,7 @@ import { isInside, toFileItems } from "./listing.js";
 import { openContextMenu, type MenuEntry } from "./menu.js";
 import { chooseFolder, type FolderChoice, type FolderPlace } from "./move-dialog.js";
 import { PendingUploads } from "./pending-uploads.js";
-import { isImage, openPreview, thumbnailUrl } from "./preview.js";
+import { isImage, openPreview, previewKind, thumbnailUrl } from "./preview.js";
 import {
   defaultDirection,
   loadSort,
@@ -74,11 +75,11 @@ interface Place {
 }
 
 /** 目前的檔案空間。同時只有一個資料夾畫面，下載與還原等輔助函式都以它為準 */
-let place: Place = { location: MY_FILES, space: null, rootLabel: "My files" };
+let place: Place = { location: MY_FILES, space: null, rootLabel: t("My files") };
 /** 複製、移動時可以選擇的目的地：管理員是 My files 與每一顆硬碟，一般使用者只有 My files */
 let places: readonly FolderPlace[] = [place];
 /** space= 的值 → 顯示的名稱，給傳輸面板使用 */
-const spaceLabels = new Map<string, string>([["me", "My files"]]);
+const spaceLabels = new Map<string, string>([["me", t("My files")]]);
 /** 上次的選項：畫面內部重新載入時沿用 */
 let lastOptions: BrowserOptions = { location: MY_FILES, path: [], admin: false, userId: 0 };
 
@@ -179,7 +180,7 @@ export function chooseFiles(): void {
 
 async function load(container: HTMLElement, options: BrowserOptions): Promise<void> {
   const token = ++navigation;
-  container.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+  container.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   const space = spaceOfLocation(options.location);
 
   try {
@@ -208,7 +209,7 @@ async function load(container: HTMLElement, options: BrowserOptions): Promise<vo
     }
     container.replaceChildren(
       h("p", { class: "error", role: "alert" }, messageOf(error)),
-      h("p", {}, h("a", { href: filesHref(MY_FILES) }, "Back to My files")),
+      h("p", {}, h("a", { href: filesHref(MY_FILES) }, t("Back to My files"))),
     );
   }
 }
@@ -218,17 +219,17 @@ async function rootLabelOf(options: BrowserOptions): Promise<string> {
   const location = options.location;
   switch (location.kind) {
     case "me":
-      return "My files";
+      return t("My files");
     case "disk": {
       const storage = await api.get<StorageOverview>("/api/admin/storage");
-      return storage.volumes.find((volume) => volume.id === location.disk)?.name ?? "Disk";
+      return storage.volumes.find((volume) => volume.id === location.disk)?.name ?? t("Disk");
     }
   }
 }
 
 /** 複製、移動的目的地。一般使用者只有自己的 My files */
 async function placesFor(options: BrowserOptions): Promise<FolderPlace[]> {
-  const mine: FolderPlace = { space: null, rootLabel: "My files" };
+  const mine: FolderPlace = { space: null, rootLabel: t("My files") };
   if (!options.admin) {
     return [mine];
   }
@@ -241,7 +242,7 @@ async function placesFor(options: BrowserOptions): Promise<FolderPlace[]> {
     for (const disk of disks) {
       spaceLabels.set(disk.space, disk.rootLabel);
     }
-    spaceLabels.set(spaceOf(home), "My files");
+    spaceLabels.set(spaceOf(home), t("My files"));
     return [mine, ...disks];
   } catch {
     return [mine];
@@ -249,7 +250,7 @@ async function placesFor(options: BrowserOptions): Promise<FolderPlace[]> {
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong";
+  return error instanceof ApiError ? error.message : t("Something went wrong");
 }
 
 // ==================== 路徑 ====================
@@ -259,7 +260,7 @@ function breadcrumbs(path: readonly string[]): HTMLElement {
   const all = [place.rootLabel, ...path];
   return h(
     "nav",
-    { class: "breadcrumbs", "aria-label": "Current location" },
+    { class: "breadcrumbs", "aria-label": t("Current location") },
     h(
       "ol",
       {},
@@ -330,7 +331,7 @@ class FolderView {
       .map((item) => ({
         name: item.name,
         href: filesHref(place.location, [...path, item.name]),
-        note: "People's files",
+        note: t("People's files"),
       }));
 
     // 隱藏的檔案選擇器，由 Upload 按鈕與左側欄的 New 觸發
@@ -344,16 +345,16 @@ class FolderView {
     });
 
     this.buttons = {
-      rename: toolButton("Rename (F2)", "rename", () => this.list.startRename()),
-      copy: toolButton("Copy", "copy", () => void this.copySelected()),
-      move: toolButton("Move", "move", () => void this.moveSelected()),
-      remove: toolButton("Delete", "trash", () => void this.deleteSelected()),
-      download: toolButton("Download", "download", () => void this.downloadSelected()),
-      upload: toolButton("Upload files", "upload", () => this.chooseFiles()),
+      rename: toolButton(t("Rename (F2)"), "rename", () => this.list.startRename()),
+      copy: toolButton(t("Copy"), "copy", () => void this.copySelected()),
+      move: toolButton(t("Move"), "move", () => void this.moveSelected()),
+      remove: toolButton(t("Delete"), "trash", () => void this.deleteSelected()),
+      download: toolButton(t("Download"), "download", () => void this.downloadSelected()),
+      upload: toolButton(t("Upload files"), "upload", () => this.chooseFiles()),
     };
     this.viewButtons = {
-      list: viewButton("List view", "list", () => this.setView("list")),
-      grid: viewButton("Grid view", "grid", () => this.setView("grid")),
+      list: viewButton(t("List view"), "list", () => this.setView("list")),
+      grid: viewButton(t("Grid view"), "grid", () => this.setView("grid")),
     };
 
     this.overlayTarget = h("strong", {}, this.locationName());
@@ -364,7 +365,7 @@ class FolderView {
         "div",
         { class: "drop-label" },
         icon("upload", 22),
-        h("span", {}, "Drop files to upload to ", this.overlayTarget),
+        h("span", {}, tNodes("Drop files to upload to {folder}", { folder: this.overlayTarget })),
       ),
     );
 
@@ -393,10 +394,10 @@ class FolderView {
         "div",
         { class: "folder-header" },
         breadcrumbs(this.path),
-        h("div", { class: "toolbar", role: "toolbar", "aria-label": "File actions" }, tools),
+        h("div", { class: "toolbar", role: "toolbar", "aria-label": t("File actions") }, tools),
         h(
           "div",
-          { class: "view-switch", role: "group", "aria-label": "View" },
+          { class: "view-switch", role: "group", "aria-label": t("View") },
           this.viewButtons.list,
           this.viewButtons.grid,
         ),
@@ -446,9 +447,9 @@ class FolderView {
     }
     void (async () => {
       const created = await nameDialog({
-        title: "New folder",
-        message: "Name your new folder.",
-        confirmLabel: "Create",
+        title: t("New folder"),
+        message: t("Name your new folder."),
+        confirmLabel: t("Create"),
         location: [place.rootLabel, ...this.path],
         submit: async (name) => {
           await api.post(apiUrl("/api/folders", place.space), {
@@ -490,7 +491,7 @@ class FolderView {
       draggable: this.readOnly === null,
       ...(this.readOnly === null
         ? {}
-        : { emptyMessage: "This folder is empty." }),
+        : { emptyMessage: t("This folder is empty.") }),
     });
   }
 
@@ -554,20 +555,20 @@ class FolderView {
   private open(item: FileItem): void {
     if (item.kind === "folder") {
       window.location.hash = filesHref(place.location, [...this.path, item.name]);
-    } else if (isImage(item)) {
+    } else if (previewKind(item) !== null) {
       this.preview(item);
     } else {
       download(this.itemPath(item), item.name);
     }
   }
 
-  /** 預覽圖片：可以切換這個資料夾中的其他圖片，順序與列表相同 */
+  /** 預覽：可以切換這個資料夾中其他可以預覽的檔案，順序與列表相同 */
   private preview(item: FileItem): void {
-    const images = sortItems(this.items, this.sort)
-      .filter(isImage)
-      .map((image) => ({ item: image, path: this.itemPath(image) }));
-    const start = images.findIndex((entry) => entry.item.name === item.name);
-    openPreview(place.space, images, start, (entry) => download(entry.path, entry.item.name));
+    const files = sortItems(this.items, this.sort)
+      .filter((file) => previewKind(file) !== null)
+      .map((file) => ({ item: file, path: this.itemPath(file) }));
+    const start = files.findIndex((entry) => entry.item.name === item.name);
+    openPreview(place.space, files, start, (entry) => download(entry.path, entry.item.name));
   }
 
   // ---------- 右鍵選單 ----------
@@ -575,35 +576,35 @@ class FolderView {
   private showContextMenu(x: number, y: number): void {
     const selected = this.list.selectedItems();
     const single = selected.length === 1 ? selected[0] : undefined;
-    const title = single?.name ?? `${selected.length} items selected`;
+    const title = single?.name ?? t("{count} items selected", { count: selected.length });
     const writable = this.readOnly === null;
 
     const entries: (MenuEntry | "separator")[] = [];
     if (single?.kind === "folder") {
-      entries.push({ label: "Open", icon: "folder", onSelect: () => this.open(single) });
-    } else if (single !== undefined && isImage(single)) {
-      entries.push({ label: "Preview", icon: "image", onSelect: () => this.preview(single) });
+      entries.push({ label: t("Open"), icon: "folder", onSelect: () => this.open(single) });
+    } else if (single !== undefined && previewKind(single) !== null) {
+      entries.push({ label: t("Preview"), icon: "image", onSelect: () => this.preview(single) });
     }
     if (single !== undefined && writable) {
       entries.push({
-        label: "Rename",
+        label: t("Rename"),
         icon: "rename",
         shortcut: "F2",
         onSelect: () => this.list.startRename(single),
       });
     }
-    entries.push({ label: "Copy…", icon: "copy", onSelect: () => void this.copySelected() });
+    entries.push({ label: t("Copy…"), icon: "copy", onSelect: () => void this.copySelected() });
     if (writable) {
-      entries.push({ label: "Move…", icon: "move", onSelect: () => void this.moveSelected() });
+      entries.push({ label: t("Move…"), icon: "move", onSelect: () => void this.moveSelected() });
     }
     entries.push({
-      label: "Download",
+      label: t("Download"),
       icon: "download",
       onSelect: () => void this.downloadSelected(),
     });
     if (writable) {
       entries.push("separator", {
-        label: "Delete",
+        label: t("Delete"),
         icon: "trash",
         danger: true,
         onSelect: () => void this.deleteSelected(),
@@ -674,10 +675,10 @@ class FolderView {
       return;
     }
     const title =
-      selected.length === 1 ? `Copy "${selected[0]?.name ?? ""}"` : `Copy ${selected.length} items`;
+      selected.length === 1 ? t("Copy \"{name}\"", { name: selected[0]?.name ?? "" }) : t("Copy {count} items", { count: selected.length });
     const choice = await chooseFolder(
       title,
-      "Copy here",
+      t("Copy here"),
       this.path,
       this.selectedFolders(selected),
       place,
@@ -691,7 +692,7 @@ class FolderView {
       return;
     }
     // 複製到同一個資料夾也可以：伺服器自動改名為「名稱 (1)」
-    await this.each(selected, "Copied", (item) =>
+    await this.each(selected, (done, total) => t("Copied {done} of {total} items.", { done, total }), (item) =>
       api.post(apiUrl("/api/files/copy", place.space), {
         path: this.itemPath(item),
         parent: joinPath(choice.path),
@@ -710,7 +711,7 @@ class FolderView {
       return;
     }
     const trashed: number[] = [];
-    await this.each(selected, "Deleted", async (item) => {
+    await this.each(selected, (done, total) => t("Deleted {done} of {total} items.", { done, total }), async (item) => {
       const result = await api.delete<{ trash_id: number }>(
         apiUrl("/api/files", place.space, { path: this.itemPath(item) }),
       );
@@ -722,9 +723,9 @@ class FolderView {
     }
     const message =
       trashed.length === 1
-        ? `"${first.name}" moved to trash`
-        : `${trashed.length} items moved to trash`;
-    showToast(message, { label: "Undo", onClick: () => void restoreItems(trashed) });
+        ? t("\"{name}\" moved to trash", { name: first.name })
+        : t("{count} items moved to trash", { count: trashed.length });
+    showToast(message, { label: t("Undo"), onClick: () => void restoreItems(trashed) });
   }
 
   private async moveSelected(): Promise<void> {
@@ -733,10 +734,10 @@ class FolderView {
       return;
     }
     const title =
-      selected.length === 1 ? `Move "${selected[0]?.name ?? ""}"` : `Move ${selected.length} items`;
+      selected.length === 1 ? t("Move \"{name}\"", { name: selected[0]?.name ?? "" }) : t("Move {count} items", { count: selected.length });
     const choice = await chooseFolder(
       title,
-      "Move here",
+      t("Move here"),
       this.path,
       this.selectedFolders(selected),
       place,
@@ -783,14 +784,22 @@ class FolderView {
       }
       return;
     }
-    const what = items.length === 1 ? `"${items[0]?.name ?? ""}"` : `${items.length} items`;
-    showToast(`${kind === "move" ? "Moving" : "Copying"} ${what} to ${choice.place.rootLabel}`);
+    const params = { name: items[0]?.name ?? "", count: items.length, target: choice.place.rootLabel };
+    showToast(
+      kind === "move"
+        ? items.length === 1
+          ? t("Moving \"{name}\" to {target}", params)
+          : t("Moving {count} items to {target}", params)
+        : items.length === 1
+          ? t("Copying \"{name}\" to {target}", params)
+          : t("Copying {count} items to {target}", params),
+    );
     transfers.refresh();
   }
 
   /** 把這些項目搬到 target */
   private async moveTo(items: readonly FileItem[], target: readonly string[]): Promise<void> {
-    await this.each(items, "Moved", (item) =>
+    await this.each(items, (done, total) => t("Moved {done} of {total} items.", { done, total }), (item) =>
       api.patch(apiUrl("/api/files", place.space), {
         path: this.itemPath(item),
         parent: joinPath(target),
@@ -804,7 +813,7 @@ class FolderView {
    */
   private async each(
     items: readonly FileItem[],
-    verb: string,
+    summary: (done: number, total: number) => string,
     action: (item: FileItem) => Promise<unknown>,
   ): Promise<void> {
     if (this.busy) {
@@ -832,7 +841,7 @@ class FolderView {
     if (firstError !== null) {
       errorAfterReload =
         items.length > 1
-          ? `${verb} ${succeeded} of ${items.length} items. ${messageOf(firstError)}`
+          ? `${summary(succeeded, items.length)} ${messageOf(firstError)}`
           : messageOf(firstError);
     }
     refreshStorage();
@@ -1038,7 +1047,7 @@ class FolderView {
     }
 
     this.errorBox.textContent =
-      folders.length > 0 ? `Uploading folders isn't supported yet: ${folders.join(", ")}` : "";
+      folders.length > 0 ? t("Uploading folders isn't supported yet: {names}", { names: folders.join(", ") }) : "";
     if (files.length > 0) {
       queue.add(files, joinPath(folder), place.space);
     }
@@ -1069,7 +1078,7 @@ async function restoreItems(ids: readonly number[]): Promise<void> {
     }
   }
   if (failed > 0) {
-    errorAfterReload = `${failed} of ${ids.length} items could not be restored. They are still in the trash.`;
+    errorAfterReload = t("{failed} of {total} items could not be restored. They are still in the trash.", { failed, total: ids.length });
   }
   reload();
 }
@@ -1122,7 +1131,7 @@ function isInternal(event: DragEvent): boolean {
 }
 
 function hasFiles(event: DragEvent): boolean {
-  return event.dataTransfer?.types.includes("Files") ?? false;
+  return event.dataTransfer?.types.includes(t("Files")) ?? false;
 }
 
 function isTyping(target: EventTarget | null): boolean {

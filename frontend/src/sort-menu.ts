@@ -1,6 +1,7 @@
 // 排序按鈕與選單（與 Google Drive 相同）：Sort by、Order、Folders 三個區塊。
 // My files 與 Trash 共用；列表把它放在最右邊那一欄的標題（Grid 時放在方塊上方）。
 
+import { t } from "./i18n.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
 import { dropdown, menuSeparator } from "./menu.js";
@@ -19,14 +20,14 @@ export interface SortControl {
 export function sortControl(
   initial: SortOptions,
   onChange: (sort: SortOptions) => void,
-  modifiedLabel = "Modified",
+  modifiedLabel = t("Modified"),
 ): SortControl {
-  const menu = h("div", { class: "menu dropdown-menu", role: "menu", "aria-label": "Sort" });
+  const menu = h("div", { class: "menu dropdown-menu", role: "menu", "aria-label": t("Sort") });
   const button = h(
     "button",
-    { type: "button", class: "sort-menu-button", title: "Sort" },
+    { type: "button", class: "sort-menu-button", title: t("Sort") },
     icon("sort"),
-    "Sort",
+    t("Sort"),
   );
   // 選單相對於視窗定位：放在可以左右捲動的列表裡，選單不會被裁切
   dropdown(button, menu, { fixed: true });
@@ -47,13 +48,13 @@ export function sortControl(
       );
     const section = (label: string): HTMLElement => h("div", { class: "menu-section" }, label);
     const keys: [SortKey, string][] = [
-      ["name", "Name"],
+      ["name", t("Name")],
       ["modified", modifiedLabel],
-      ["size", "Size"],
+      ["size", t("Size")],
     ];
 
     menu.replaceChildren(
-      section("Sort by"),
+      section(t("Sort by")),
       ...keys.map(([key, label]) =>
         option(
           label,
@@ -62,16 +63,16 @@ export function sortControl(
         ),
       ),
       menuSeparator(),
-      section("Order"),
+      section(t("Order")),
       option(directionLabel(sort.key, "asc"), sort.direction === "asc", { ...sort, direction: "asc" }),
       option(directionLabel(sort.key, "desc"), sort.direction === "desc", {
         ...sort,
         direction: "desc",
       }),
       menuSeparator(),
-      section("Folders"),
-      option("On top", sort.foldersFirst, { ...sort, foldersFirst: true }),
-      option("Mixed with files", !sort.foldersFirst, { ...sort, foldersFirst: false }),
+      section(t("Folders")),
+      option(t("On top"), sort.foldersFirst, { ...sort, foldersFirst: true }),
+      option(t("Mixed with files"), !sort.foldersFirst, { ...sort, foldersFirst: false }),
     );
   };
   render(initial);

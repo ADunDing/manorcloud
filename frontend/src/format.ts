@@ -1,5 +1,7 @@
 // 顯示用的格式化函式
 
+import { t } from "./i18n.js";
+
 const UNITS = ["B", "KB", "MB", "GB", "TB"];
 
 /** 位元組數轉成人看得懂的大小，以 1024 為單位。null（資料夾）顯示為破折號 */
@@ -48,11 +50,11 @@ export function formatUtcText(text: string): string {
 export function formatDuration(seconds: number): string {
   const total = Math.max(1, Math.round(seconds));
   if (total < 60) {
-    return `${total} s`;
+    return t("{s} s", { s: total });
   }
   const minutes = Math.floor(total / 60);
   if (minutes < 60) {
-    return `${minutes} min ${total % 60} s`;
+    return t("{m} min {s} s", { m: minutes, s: total % 60 });
   }
-  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  return t("{h} h {m} min", { h: Math.floor(minutes / 60), m: minutes % 60 });
 }

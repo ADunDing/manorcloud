@@ -3,6 +3,7 @@
 // 每個人的檔案放在其中一個位置，在 Users 的「⋯」選單中更換。
 // 「Default」是設定中的資料目錄，永遠存在、不能刪除。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
@@ -16,7 +17,7 @@ const ALMOST_FULL = 0.9;
 
 export function renderStorage(container: HTMLElement): void {
   const errorBox = h("p", { class: "error", role: "alert" });
-  const listSlot = h("div", {}, h("p", { class: "muted" }, "Loading…"));
+  const listSlot = h("div", {}, h("p", { class: "muted" }, t("Loading…")));
 
   const reload = async (): Promise<void> => {
     try {
@@ -24,19 +25,17 @@ export function renderStorage(container: HTMLElement): void {
       listSlot.replaceChildren(volumeTable(overview.volumes, remove));
     } catch (error) {
       if (!isHandledGlobally(error)) {
-        listSlot.replaceChildren(
-          h("p", { class: "error", role: "alert" }, messageOf(error)),
-        );
+        listSlot.replaceChildren(h("p", { class: "error", role: "alert" }, messageOf(error)));
       }
     }
   };
 
   const remove = async (volume: StorageVolume): Promise<void> => {
     const confirmed = await confirmDialog({
-      title: `Remove ${volume.name}?`,
+      title: t("Remove {name}?", { name: volume.name }),
       message:
-        "ManorCloud will stop using this folder. Nothing on the disk is deleted, and nobody's files are there.",
-      confirmLabel: "Remove",
+        t("ManorCloud will stop using this folder. Nothing on the disk is deleted, and nobody's files are there."),
+      confirmLabel: t("Remove"),
       danger: true,
     });
     if (!confirmed) {
@@ -45,7 +44,7 @@ export function renderStorage(container: HTMLElement): void {
     errorBox.textContent = "";
     try {
       await api.delete(`/api/admin/storage/${volume.id}`);
-      showToast(`Removed ${volume.name}`);
+      showToast(t("Removed {name}", { name: volume.name }));
     } catch (error) {
       if (!isHandledGlobally(error)) {
         errorBox.textContent = messageOf(error);
@@ -58,7 +57,7 @@ export function renderStorage(container: HTMLElement): void {
     h(
       "div",
       { class: "admin-head" },
-      h("h2", { class: "section-title" }, "Storage"),
+      h("h2", { class: "section-title" }, t("Storage")),
       h(
         "button",
         {
@@ -72,15 +71,15 @@ export function renderStorage(container: HTMLElement): void {
             }),
         },
         icon("plus", 16),
-        "Add storage",
+        t("Add storage"),
       ),
     ),
     h(
       "p",
       { class: "hint storage-intro" },
-      "Each person's files are kept in one location. To put someone's files on another disk, ",
-      "use Change storage in Users. ",
-      "To use another disk or a NAS share, mount it on this computer first, then add it here.",
+      t(
+        "Each person's files are kept in one location. To put someone's files on another disk, use Change storage in Users. To use another disk or a NAS share, mount it on this computer first, then add it here.",
+      ),
     ),
     errorBox,
     listSlot,
@@ -104,15 +103,11 @@ function volumeTable(
         h(
           "tr",
           {},
-          h("th", { scope: "col" }, "Name"),
-          h("th", { scope: "col" }, "Folder"),
-          h("th", { scope: "col" }, "Space"),
-          h("th", { scope: "col" }, "People"),
-          h(
-            "th",
-            { scope: "col" },
-            h("span", { class: "visually-hidden" }, "Actions"),
-          ),
+          h("th", { scope: "col" }, t("Name")),
+          h("th", { scope: "col" }, t("Folder")),
+          h("th", { scope: "col" }, t("Space")),
+          h("th", { scope: "col" }, t("People")),
+          h("th", { scope: "col" }, h("span", { class: "visually-hidden" }, t("Actions"))),
         ),
       ),
       h(
@@ -126,9 +121,7 @@ function volumeTable(
               "td",
               {},
               volume.name,
-              volume.id === null
-                ? h("span", { class: "muted" }, " (data directory)")
-                : null,
+              volume.id === null ? h("span", { class: "muted" }, ` ${t("(data directory)")}`) : null,
             ),
             h("td", {}, h("code", { class: "path" }, volume.path)),
             h("td", { class: "space-cell" }, spaceMeter(volume)),
@@ -146,11 +139,8 @@ function spaceMeter(volume: StorageVolume): HTMLElement {
   if (volume.total_bytes === null || volume.available_bytes === null) {
     return h(
       "span",
-      {
-        class: "error",
-        title: "The folder can't be read. Is the disk connected?",
-      },
-      "Not available",
+      { class: "error", title: t("The folder can't be read. Is the disk connected?") },
+      t("Not available"),
     );
   }
   const used = Math.max(0, volume.total_bytes - volume.available_bytes);
@@ -168,14 +158,14 @@ function spaceMeter(volume: StorageVolume): HTMLElement {
         "aria-valuemin": "0",
         "aria-valuemax": "100",
         "aria-valuenow": String(Math.round(fraction * 100)),
-        "aria-label": `${volume.name} usage`,
+        "aria-label": t("{name} usage", { name: volume.name }),
       },
       fill,
     ),
     h(
       "span",
       { class: "muted" },
-      `${formatSize(volume.available_bytes)} free of ${formatSize(volume.total_bytes)}`,
+      t("{free} free of {total}", { free: formatSize(volume.available_bytes), total: formatSize(volume.total_bytes) }),
     ),
   );
 }
@@ -195,10 +185,8 @@ function removeButton(
       type: "button",
       class: "icon-button row-menu",
       disabled: inUse,
-      title: inUse
-        ? "Move everyone's files to another storage first"
-        : `Remove ${volume.name}`,
-      "aria-label": `Remove ${volume.name}`,
+      title: inUse ? t("Move everyone's files to another storage first") : t("Remove {name}", { name: volume.name }),
+      "aria-label": t("Remove {name}", { name: volume.name }),
       onClick: () => void remove(volume),
     },
     icon("trash", 18),
@@ -213,7 +201,7 @@ function addLocationDialog(): Promise<boolean> {
       type: "text",
       class: "dialog-input",
       maxlength: 40,
-      placeholder: "Disk 2",
+      placeholder: t("Disk 2"),
       autocomplete: "off",
     });
     const path = h("input", {
@@ -225,13 +213,9 @@ function addLocationDialog(): Promise<boolean> {
       spellcheck: "false",
     });
     const error = h("p", { class: "error", role: "alert" });
-    const cancel = h(
-      "button",
-      { type: "button", class: "secondary" },
-      "Cancel",
-    );
-    const confirm = h("button", { type: "submit", class: "primary" }, "Add");
-    const title = "Add storage";
+    const cancel = h("button", { type: "button", class: "secondary" }, t("Cancel"));
+    const confirm = h("button", { type: "submit", class: "primary" }, t("Add"));
+    const title = t("Add storage");
     const form = h(
       "form",
       { method: "dialog", class: "dialog-form" },
@@ -239,10 +223,10 @@ function addLocationDialog(): Promise<boolean> {
       h(
         "p",
         { class: "dialog-message" },
-        "A folder on a disk connected to this server. It must already exist, and ManorCloud must be allowed to write to it.",
+        t("A folder on a disk connected to this server. It must already exist, and ManorCloud must be allowed to write to it."),
       ),
-      h("label", { class: "dialog-field" }, "Name", name),
-      h("label", { class: "dialog-field" }, "Folder", path),
+      h("label", { class: "dialog-field" }, t("Name"), name),
+      h("label", { class: "dialog-field" }, t("Folder"), path),
       error,
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
@@ -256,7 +240,7 @@ function addLocationDialog(): Promise<boolean> {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (name.value.trim() === "" || path.value.trim() === "") {
-        error.textContent = "Enter a name and a folder";
+        error.textContent = t("Enter a name and a folder");
         return;
       }
       confirm.disabled = true;
@@ -268,7 +252,7 @@ function addLocationDialog(): Promise<boolean> {
             path: path.value.trim(),
           });
           added = true;
-          showToast(`Added ${name.value.trim()}`);
+          showToast(t("Added {name}", { name: name.value.trim() }));
           dialog.close();
         } catch (failure) {
           if (isHandledGlobally(failure)) {
@@ -288,5 +272,5 @@ function addLocationDialog(): Promise<boolean> {
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong";
+  return error instanceof ApiError ? error.message : t("Something went wrong");
 }

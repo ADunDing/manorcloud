@@ -3,6 +3,7 @@
 // 管理員在 My files 與 Trash 之間多了另外每一顆硬碟（Disk2 等）：
 // 點進去是那一顆硬碟的最上層，用法與 My files 相同（見 space.ts）。
 
+import { t } from "./i18n.js";
 import { api } from "./api.js";
 import { h } from "./dom.js";
 import { formatSize } from "./format.js";
@@ -60,17 +61,17 @@ export function renderSidebar(
       type: "button",
       class: "new-button",
       disabled: !onFiles,
-      title: onFiles ? undefined : "Open My files to add files or folders",
+      title: onFiles ? undefined : t("Open My files to add files or folders"),
     },
     icon("plus", 22),
-    "New",
+    t("New"),
   );
   const newMenu = h(
     "div",
-    { class: "menu dropdown-menu", role: "menu", "aria-label": "New" },
-    menuItem({ label: "New folder", icon: "newFolder", onSelect: actions.newFolder }),
+    { class: "menu dropdown-menu", role: "menu", "aria-label": t("New") },
+    menuItem({ label: t("New folder"), icon: "newFolder", onSelect: actions.newFolder }),
     menuSeparator(),
-    menuItem({ label: "Upload files", icon: "upload", onSelect: actions.upload }),
+    menuItem({ label: t("Upload files"), icon: "upload", onSelect: actions.upload }),
   );
   dropdown(newButton, newMenu);
 
@@ -80,7 +81,7 @@ export function renderSidebar(
     {
       class: "meter",
       role: "meter",
-      "aria-label": "Disk space used",
+      "aria-label": t("Disk space used"),
       "aria-valuemin": "0",
       "aria-valuemax": "100",
       "aria-valuenow": "0",
@@ -99,7 +100,7 @@ export function renderSidebar(
       "aria-current": onMyFiles ? "page" : null,
     },
     icon("folder", 20),
-    "My files",
+    t("My files"),
   );
   const myFilesItem = h("li", {}, myFiles);
   const trashItem = h(
@@ -113,7 +114,7 @@ export function renderSidebar(
         "aria-current": section === "trash" ? "page" : null,
       },
       icon("trash", 20),
-      "Trash",
+      t("Trash"),
     ),
   );
 
@@ -121,7 +122,7 @@ export function renderSidebar(
     h("div", { class: "new-wrap" }, newButton, newMenu),
     h(
       "nav",
-      { "aria-label": "Sections" },
+      { "aria-label": t("Sections") },
       h(
         "ul",
         { class: "nav-list" },
@@ -131,8 +132,8 @@ export function renderSidebar(
     ),
     h(
       "section",
-      { class: "storage", "aria-label": "Storage" },
-      h("div", { class: "storage-title" }, icon("disk", 20), "Storage"),
+      { class: "storage", "aria-label": t("Storage") },
+      h("div", { class: "storage-title" }, icon("disk", 20), t("Storage")),
       meter,
       text,
     ),
@@ -211,7 +212,7 @@ export function refreshStorage(): void {
       storage.fill.style.width = `${(fraction * 100).toFixed(1)}%`;
       storage.meter.classList.toggle("almost-full", fraction >= ALMOST_FULL);
       storage.meter.setAttribute("aria-valuenow", String(Math.round(fraction * 100)));
-      storage.text.textContent = `${formatSize(used)} of ${formatSize(info.total_bytes)} used`;
+      storage.text.textContent = t("{used} of {total} used", { used: formatSize(used), total: formatSize(info.total_bytes) });
     } catch {
       // 維持原本的顯示
     }

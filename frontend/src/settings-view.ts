@@ -3,6 +3,7 @@
 // 新的區塊（例如儲存位置的 Storage）：在 router.ts 的清單加上名稱，
 // 再在這裡的清單與 switch 各加一項。
 
+import { languageSetting, setLanguage, t, tNodes, type LanguageSetting } from "./i18n.js";
 import { renderAdmin } from "./admin-view.js";
 import { renderStorage } from "./storage-view.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
@@ -38,9 +39,9 @@ interface NavItem {
 // ==================== Settings ====================
 
 const SETTINGS: readonly { section: SettingsSection; label: string; icon: IconName }[] = [
-  { section: "account", label: "Account", icon: "user" },
-  { section: "sign-in", label: "Sign-in", icon: "lock" },
-  { section: "appearance", label: "Appearance", icon: "grid" },
+  { section: "account", label: t("Account"), icon: "user" },
+  { section: "sign-in", label: t("Sign-in"), icon: "lock" },
+  { section: "appearance", label: t("Appearance"), icon: "grid" },
 ];
 
 /**
@@ -54,7 +55,7 @@ export function renderSettings(
 ): void {
   const panel = layout(
     container,
-    "Settings",
+    t("Settings"),
     SETTINGS.map((item) => ({
       href: settingsHref(item.section),
       label: item.label,
@@ -85,7 +86,7 @@ function renderAccount(
   user: User,
   onAccountChanged: (user: User) => void,
 ): void {
-  panel.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+  panel.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let status: MySso | null = null;
     try {
@@ -100,15 +101,15 @@ function renderAccount(
     if (status !== null && !status.has_password) {
       const name = status.display_name ?? "single sign-on";
       panel.replaceChildren(
-        h("h2", { class: "section-title" }, "Account"),
+        h("h2", { class: "section-title" }, t("Account")),
         h(
           "div",
           { class: "settings-group" },
-          h("p", {}, "Username: ", h("strong", {}, user.username)),
+          h("p", {}, tNodes("Username: {name}", { name: h("strong", {}, user.username) })),
           h(
             "p",
             { class: "hint" },
-            `You sign in with ${name}. This account has no password, so there is nothing to change here.`,
+            t("You sign in with {name}. This account has no password, so there is nothing to change here.", { name }),
           ),
         ),
       );
@@ -131,15 +132,15 @@ function renderAccount(
 function renderMySignIn(panel: HTMLElement): void {
   const twoFactor = h("section", { class: "settings-group" });
   const sso = h("section", { class: "settings-group" });
-  panel.replaceChildren(h("h2", { class: "section-title" }, "Sign-in"), twoFactor, sso);
+  panel.replaceChildren(h("h2", { class: "section-title" }, t("Sign-in")), twoFactor, sso);
   renderTwoFactorSection(twoFactor);
   renderSsoLink(sso);
 }
 
 /** 兩步驟驗證：狀態、開啟、換備用碼、關閉 */
 function renderTwoFactorSection(section: HTMLElement): void {
-  const title = h("h3", { class: "group-title" }, "Two-factor authentication");
-  section.replaceChildren(title, h("p", { class: "muted" }, "Loading…"));
+  const title = h("h3", { class: "group-title" }, t("Two-factor authentication"));
+  section.replaceChildren(title, h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let status: TwoFactorStatus;
     try {
@@ -160,14 +161,14 @@ function renderTwoFactorSection(section: HTMLElement): void {
         h(
           "p",
           { class: "hint" },
-          "Your account signs in with single sign-on, so two-factor authentication is handled by your sign-in provider.",
+          t("Your account signs in with single sign-on, so two-factor authentication is handled by your sign-in provider."),
         ),
       );
       return;
     }
 
     if (!status.enabled) {
-      const turnOn = h("button", { type: "button", class: "primary" }, "Turn on");
+      const turnOn = h("button", { type: "button", class: "primary" }, t("Turn on"));
       turnOn.addEventListener("click", () =>
         renderTwoFactorSetup(body, {
           onDone: () => {
@@ -184,18 +185,18 @@ function renderTwoFactorSection(section: HTMLElement): void {
           "p",
           {},
           status.required
-            ? "Your administrator requires two-factor authentication."
-            : "Protect your account with a code from your phone in addition to your password.",
+            ? t("Your administrator requires two-factor authentication.")
+            : t("Protect your account with a code from your phone in addition to your password."),
         ),
         body,
       );
       return;
     }
 
-    const newCodes = h("button", { type: "button", class: "secondary" }, "New recovery codes");
+    const newCodes = h("button", { type: "button", class: "secondary" }, t("New recovery codes"));
     newCodes.addEventListener("click", () => {
       const password = passwordInput();
-      inlineForm(body, [["Current password", password]], "Create new codes", false, reload, async () => {
+      inlineForm(body, [[t("Current password"), password]], t("Create new codes"), false, reload, async () => {
         const result = await api.post<{ recovery_codes: string[] }>(
           "/api/me/two-factor/recovery-codes",
           { current_password: password.value },
@@ -204,17 +205,17 @@ function renderTwoFactorSection(section: HTMLElement): void {
       });
     });
 
-    const turnOff = h("button", { type: "button", class: "secondary" }, "Turn off");
+    const turnOff = h("button", { type: "button", class: "secondary" }, t("Turn off"));
     turnOff.addEventListener("click", () => {
       const password = passwordInput();
       const code = codeInput();
       inlineForm(
         body,
         [
-          ["Current password", password],
-          ["Code from your app, or a recovery code", code],
+          [t("Current password"), password],
+          [t("Code from your app, or a recovery code"), code],
         ],
-        "Turn off",
+        t("Turn off"),
         true,
         reload,
         async () => {
@@ -233,13 +234,13 @@ function renderTwoFactorSection(section: HTMLElement): void {
     );
     section.replaceChildren(
       title,
-      h("p", {}, "On. When you log in, you'll also enter a code from your authenticator app."),
+      h("p", {}, t("On. When you log in, you'll also enter a code from your authenticator app.")),
       h(
         "p",
         { class: "hint" },
-        `${status.recovery_codes_left} of 10 recovery codes left.`,
+        t("{count} of 10 recovery codes left.", { count: status.recovery_codes_left }),
         status.required
-          ? " Your administrator requires two-factor authentication, so it can't be turned off."
+          ? ` ${t("Your administrator requires two-factor authentication, so it can't be turned off.")}`
           : "",
       ),
       body,
@@ -262,7 +263,7 @@ function inlineForm(
     { type: "submit", class: danger ? "primary danger" : "primary" },
     confirmLabel,
   );
-  const cancel = h("button", { type: "button", class: "secondary", onClick: onCancel }, "Cancel");
+  const cancel = h("button", { type: "button", class: "secondary", onClick: onCancel }, t("Cancel"));
   const form = h(
     "form",
     { method: "post", class: "auth-form embedded" },
@@ -291,7 +292,7 @@ function passwordInput(): HTMLInputElement {
 
 /** 自己的 SSO 連結：連結、取消連結，或說明還沒有設定 */
 function renderSsoLink(panel: HTMLElement): void {
-  panel.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+  panel.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let status: MySso;
     try {
@@ -313,25 +314,25 @@ function renderSsoLink(panel: HTMLElement): void {
           "p",
           {},
           status.has_password
-            ? `Your account is linked with ${name}. You can sign in with ${name} or with your password.`
-            : `Your account is linked with ${name}, and that's how you sign in.`,
+            ? t("Your account is linked with {name}. You can sign in with {name} or with your password.", { name })
+            : t("Your account is linked with {name}, and that's how you sign in.", { name }),
         ),
       );
       if (status.has_password) {
-        const unlink = h("button", { type: "button", class: "secondary" }, `Unlink ${name}`);
+        const unlink = h("button", { type: "button", class: "secondary" }, t("Unlink {name}", { name }));
         unlink.addEventListener("click", () => {
           void (async () => {
             const confirmed = await confirmDialog({
-              title: `Unlink ${name}?`,
-              message: `You'll sign in with your password only. You can link your ${name} account again at any time.`,
-              confirmLabel: "Unlink",
+              title: t("Unlink {name}?", { name }),
+              message: t("You'll sign in with your password only. You can link your {name} account again at any time.", { name }),
+              confirmLabel: t("Unlink"),
             });
             if (!confirmed) {
               return;
             }
             try {
               await api.delete("/api/me/sso");
-              showToast(`${name} unlinked`);
+              showToast(t("{name} unlinked", { name }));
               renderSsoLink(panel);
             } catch (error) {
               if (!isHandledGlobally(error)) {
@@ -343,11 +344,11 @@ function renderSsoLink(panel: HTMLElement): void {
         content.push(h("div", { class: "actions" }, unlink));
       } else {
         content.push(
-          h("p", { class: "hint" }, "Your account has no password, so it can't be unlinked."),
+          h("p", { class: "hint" }, t("Your account has no password, so it can't be unlinked.")),
         );
       }
     } else if (status.enabled) {
-      const link = h("button", { type: "button", class: "primary" }, `Link ${name} account`);
+      const link = h("button", { type: "button", class: "primary" }, t("Link {name} account", { name }));
       link.addEventListener("click", () => {
         link.disabled = true;
         errorBox.textContent = "";
@@ -359,7 +360,7 @@ function renderSsoLink(panel: HTMLElement): void {
         });
       });
       content.push(
-        h("p", {}, `Link your ${name} account to sign in without typing your password.`),
+        h("p", {}, t("Link your {name} account to sign in without typing your password.", { name })),
         h("div", { class: "actions" }, link),
       );
     } else {
@@ -367,24 +368,24 @@ function renderSsoLink(panel: HTMLElement): void {
         h(
           "p",
           { class: "hint" },
-          "Single sign-on isn't set up. An administrator can turn it on in Administration → Sign-in.",
+          t("Single sign-on isn't set up. An administrator can turn it on in Administration → Sign-in."),
         ),
       );
     }
 
-    panel.replaceChildren(h("h3", { class: "group-title" }, "Single sign-on"), ...content, errorBox);
+    panel.replaceChildren(h("h3", { class: "group-title" }, t("Single sign-on")), ...content, errorBox);
   })();
 }
 
 function renderAppearance(panel: HTMLElement): void {
   const themes: [Theme, string, string][] = [
-    ["system", "Match my device", "Light or dark, following your computer's setting"],
-    ["light", "Light", "Always light"],
-    ["dark", "Dark", "Always dark"],
+    ["system", t("Match my device"), t("Light or dark, following your computer's setting")],
+    ["light", t("Light"), t("Always light")],
+    ["dark", t("Dark"), t("Always dark")],
   ];
   const current = loadTheme();
   const themeGroup = group(
-    "Theme",
+    t("Theme"),
     themes.map(([value, label, hint]) =>
       choice("theme", value === current, label, hint, () => {
         saveTheme(value);
@@ -394,16 +395,31 @@ function renderAppearance(panel: HTMLElement): void {
   );
 
   const views: [ViewMode, string, string][] = [
-    ["list", "List", "Names, sizes and dates in rows"],
-    ["grid", "Grid", "Large icons in a grid"],
+    ["list", t("List"), t("Names, sizes and dates in rows")],
+    ["grid", t("Grid"), t("Large icons in a grid")],
   ];
   const view = loadView();
   const viewGroup = group(
-    "File view",
+    t("File view"),
     views.map(([value, label, hint]) =>
       choice("view", value === view, label, hint, () => saveView(value)),
     ),
-    "You can also switch with the buttons at the top right of My files.",
+    t("You can also switch with the buttons at the top right of My files."),
+  );
+
+  // 語言：存在這台裝置。語言的名稱用各自的語言寫，不翻譯
+  const languages: [LanguageSetting, string][] = [
+    ["auto", t("Match my browser")],
+    ["en", "English"],
+    ["zh-TW", "繁體中文"],
+  ];
+  const currentLanguage = languageSetting();
+  const languageGroup = group(
+    t("Language"),
+    languages.map(([value, label]) =>
+      choice("language", value === currentLanguage, label, "", () => setLanguage(value)),
+    ),
+    t("Saved on this device. The page reloads when you change it."),
   );
 
   // 隱藏檔：存在伺服器上，每台裝置都一樣
@@ -412,14 +428,14 @@ function renderAppearance(panel: HTMLElement): void {
   const hiddenGroup = h(
     "fieldset",
     { class: "settings-group" },
-    h("legend", {}, "Hidden files"),
+    h("legend", {}, t("Hidden files")),
     h(
       "div",
       { class: "choices" },
       choiceLabel(
         hidden,
-        "Show hidden files",
-        "Files whose names start with a dot, such as .DS_Store from a Mac",
+        t("Show hidden files"),
+        t("Files whose names start with a dot, such as .DS_Store from a Mac"),
       ),
     ),
     hiddenError,
@@ -446,8 +462,9 @@ function renderAppearance(panel: HTMLElement): void {
   });
 
   panel.replaceChildren(
-    h("h2", { class: "section-title" }, "Appearance"),
+    h("h2", { class: "section-title" }, t("Appearance")),
     themeGroup,
+    languageGroup,
     viewGroup,
     hiddenGroup,
   );
@@ -456,9 +473,9 @@ function renderAppearance(panel: HTMLElement): void {
 // ==================== Administration ====================
 
 const ADMIN: readonly { section: AdminSection; label: string; icon: IconName }[] = [
-  { section: "users", label: "Users", icon: "users" },
-  { section: "storage", label: "Storage", icon: "disk" },
-  { section: "sign-in", label: "Sign-in", icon: "lock" },
+  { section: "users", label: t("Users"), icon: "users" },
+  { section: "storage", label: t("Storage"), icon: "disk" },
+  { section: "sign-in", label: t("Sign-in"), icon: "lock" },
 ];
 
 /**
@@ -472,7 +489,7 @@ export function renderAdministration(
 ): void {
   const panel = layout(
     container,
-    "Administration",
+    t("Administration"),
     ADMIN.map((item) => ({
       href: adminHref(item.section),
       label: item.label,
@@ -498,9 +515,9 @@ export function renderAdministration(
 function renderSsoSettings(page: HTMLElement): void {
   const requirement = h("section", { class: "settings-group" });
   const panel = h("div", {});
-  page.replaceChildren(h("h2", { class: "section-title" }, "Sign-in"), requirement, panel);
+  page.replaceChildren(h("h2", { class: "section-title" }, t("Sign-in")), requirement, panel);
   renderRequirement(requirement);
-  panel.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+  panel.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let current: AdminSso;
     try {
@@ -520,7 +537,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const displayName = h("input", {
     type: "text",
     value: current.display_name,
-    placeholder: "Authentik",
+    placeholder: t("Authentik"),
     maxlength: 40,
   });
   const issuer = h("input", {
@@ -533,7 +550,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const clientSecret = h("input", {
     type: "password",
     autocomplete: "off",
-    placeholder: current.has_secret ? "Saved. Leave empty to keep it" : "",
+    placeholder: current.has_secret ? t("Saved. Leave empty to keep it") : "",
   });
   // 還沒設定時，預先填入目前開啟 ManorCloud 的網址
   const publicUrl = h("input", {
@@ -546,7 +563,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const refuse = h("input", { type: "radio", name: "new-users", checked: !current.auto_create });
   const testResult = h("p", { class: "hint", role: "status" });
   const errorBox = h("p", { class: "error", role: "alert" });
-  const save = h("button", { type: "submit", class: "primary" }, "Save");
+  const save = h("button", { type: "submit", class: "primary" }, t("Save"));
 
   // Redirect URI 跟著 ManorCloud 的網址即時更新（與伺服器的組法相同：去掉結尾的斜線）
   const updateRedirect = (): void => {
@@ -556,7 +573,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   publicUrl.addEventListener("input", updateRedirect);
   updateRedirect();
 
-  const copy = h("button", { type: "button", class: "secondary" }, "Copy");
+  const copy = h("button", { type: "button", class: "secondary" }, t("Copy"));
   copy.addEventListener("click", () => {
     void copyText(redirect).then((copied) => {
       if (copied) {
@@ -565,15 +582,15 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
     });
   });
 
-  const test = h("button", { type: "button", class: "secondary" }, "Test connection");
+  const test = h("button", { type: "button", class: "secondary" }, t("Test connection"));
   test.addEventListener("click", () => {
     test.disabled = true;
-    testResult.textContent = "Connecting…";
+    testResult.textContent = t("Connecting…");
     testResult.classList.remove("error");
     void (async () => {
       try {
         await api.post("/api/admin/sso/test", { issuer_url: issuer.value.trim() });
-        testResult.textContent = "Connected: the provider's settings were read successfully.";
+        testResult.textContent = t("Connected: the provider's settings were read successfully.");
       } catch (error) {
         if (isHandledGlobally(error)) {
           return;
@@ -589,42 +606,42 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const form = h(
     "form",
     { method: "post", class: "auth-form embedded settings-form" },
-    h("h3", { class: "group-title" }, "Single sign-on"),
+    h("h3", { class: "group-title" }, t("Single sign-on")),
     h(
       "p",
       { class: "hint" },
-      "Let people sign in with an OpenID Connect provider such as Authentik. ",
-      "Create an OAuth2/OpenID provider there, then copy its values here.",
+      t("Let people sign in with an OpenID Connect provider such as Authentik. "),
+      t("Create an OAuth2/OpenID provider there, then copy its values here."),
     ),
-    h("label", { class: "inline" }, enabled, "Turn on single sign-on"),
-    field("Button label", displayName, "Shown on the login page as \"Sign in with …\""),
+    h("label", { class: "inline" }, enabled, t("Turn on single sign-on")),
+    field(t("Button label"), displayName, t("Shown on the login page as \"Sign in with …\"")),
     field(
-      "Issuer URL",
+      t("Issuer URL"),
       h("div", { class: "field-row" }, issuer, test),
-      "The provider's OpenID configuration issuer. Must start with https://",
+      t("The provider's OpenID configuration issuer. Must start with https://"),
     ),
     testResult,
-    field("Client ID", clientId),
-    field("Client secret", clientSecret),
+    field(t("Client ID"), clientId),
+    field(t("Client secret"), clientSecret),
     field(
-      "ManorCloud address",
+      t("ManorCloud address"),
       publicUrl,
-      "The address people use to open ManorCloud, for example https://cloud.example.com",
+      t("The address people use to open ManorCloud, for example https://cloud.example.com"),
     ),
     field(
-      "Redirect URI",
+      t("Redirect URI"),
       h("div", { class: "field-row" }, redirect, copy),
-      "Paste this into the provider's settings as the redirect URI",
+      t("Paste this into the provider's settings as the redirect URI"),
     ),
     h(
       "fieldset",
       { class: "settings-group" },
-      h("legend", {}, "People without a ManorCloud account"),
+      h("legend", {}, t("People without a ManorCloud account")),
       h(
         "div",
         { class: "choices" },
-        choiceLabel(autoCreate, "Create an account", "They become a member on their first sign-in"),
-        choiceLabel(refuse, "Don't let them in", "An administrator creates their account first"),
+        choiceLabel(autoCreate, t("Create an account"), t("They become a member on their first sign-in")),
+        choiceLabel(refuse, t("Don't let them in"), t("An administrator creates their account first")),
       ),
     ),
     errorBox,
@@ -664,8 +681,8 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
 
 /** 是否強制每個用密碼登入的人開啟 2FA */
 function renderRequirement(section: HTMLElement): void {
-  const title = h("h3", { class: "group-title" }, "Two-factor authentication");
-  section.replaceChildren(title, h("p", { class: "muted" }, "Loading…"));
+  const title = h("h3", { class: "group-title" }, t("Two-factor authentication"));
+  section.replaceChildren(title, h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let current: { require_two_factor: boolean };
     try {
@@ -678,17 +695,17 @@ function renderRequirement(section: HTMLElement): void {
     }
     const required = h("input", { type: "checkbox", checked: current.require_two_factor });
     const errorBox = h("p", { class: "error", role: "alert" });
-    const save = h("button", { type: "submit", class: "primary" }, "Save");
+    const save = h("button", { type: "submit", class: "primary" }, t("Save"));
     const form = h(
       "form",
       { method: "post", class: "auth-form embedded settings-form" },
-      h("label", { class: "inline" }, required, "Require two-factor authentication"),
+      h("label", { class: "inline" }, required, t("Require two-factor authentication")),
       h(
         "p",
         { class: "hint" },
-        "Everyone who logs in with a password must set it up before they can use ManorCloud. ",
-        "If you haven't set it up yourself, you'll be asked to right away. ",
-        "People who use single sign-on aren't affected.",
+        t("Everyone who logs in with a password must set it up before they can use ManorCloud. "),
+        t("If you haven't set it up yourself, you'll be asked to right away. "),
+        t("People who use single sign-on aren't affected."),
       ),
       errorBox,
       h("div", { class: "actions" }, save),
@@ -749,7 +766,7 @@ function choiceLabel(input: HTMLInputElement, label: string, hint: string): HTML
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong";
+  return error instanceof ApiError ? error.message : t("Something went wrong");
 }
 
 // ==================== 共用的版面 ====================

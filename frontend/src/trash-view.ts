@@ -5,6 +5,7 @@
 // 只列出使用者刪除的「那一個」項目；資料夾裡面的內容隨著資料夾一起還原或刪除。
 // 超過 30 天的項目由伺服器的垃圾回收永久刪除。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { MY_FILES, trashHref, type Location } from "./router.js";
 import { spaceOfLocation, withSpace, type Space } from "./space.js";
@@ -54,7 +55,7 @@ interface TrashPlace {
   readonly tabs: readonly { readonly label: string; readonly href: string; readonly current: boolean }[];
 }
 
-let place: TrashPlace = { space: null, rootLabel: "My files", tabs: [] };
+let place: TrashPlace = { space: null, rootLabel: t("My files"), tabs: [] };
 /** 上次的選項：畫面內部重新載入時沿用 */
 let lastOptions: TrashOptions = { location: MY_FILES, admin: false, userId: 0 };
 
@@ -71,7 +72,7 @@ export function renderTrash(
   current?.unmount();
   current = null;
   const token = ++loading;
-  container.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+  container.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   const space = spaceOfLocation(options.location);
 
   void (async () => {
@@ -105,7 +106,7 @@ function trashPlace(
   storage: StorageOverview | null,
 ): TrashPlace {
   if (storage === null) {
-    return { space, rootLabel: "My files", tabs: [] };
+    return { space, rootLabel: t("My files"), tabs: [] };
   }
   const home = storage.users.find((user) => user.user_id === options.userId)?.volume_id ?? null;
   const disk = options.location.kind === "disk" ? options.location.disk : undefined;
@@ -114,7 +115,7 @@ function trashPlace(
     others.length === 0
       ? []
       : [
-          { label: "My files", href: trashHref(MY_FILES), current: disk === undefined },
+          { label: t("My files"), href: trashHref(MY_FILES), current: disk === undefined },
           ...others.map((volume) => ({
             label: volume.name,
             href: trashHref({ kind: "disk", disk: volume.id }),
@@ -123,8 +124,8 @@ function trashPlace(
         ];
   const rootLabel =
     disk === undefined
-      ? "My files"
-      : (storage.volumes.find((volume) => volume.id === disk)?.name ?? "Unknown");
+      ? t("My files")
+      : (storage.volumes.find((volume) => volume.id === disk)?.name ?? t("Unknown"));
   return { space, rootLabel, tabs };
 }
 
@@ -176,8 +177,8 @@ class TrashView {
     this.errorBox = h("p", { class: "error", role: "alert" }, notice);
 
     this.buttons = {
-      restore: toolButton("Restore", "restore", () => void this.restoreSelected()),
-      remove: toolButton("Delete forever", "trash", () => void this.deleteSelected()),
+      restore: toolButton(t("Restore"), "restore", () => void this.restoreSelected()),
+      remove: toolButton(t("Delete forever"), "trash", () => void this.deleteSelected()),
       // 放在標題旁邊，與右邊的 Delete forever 分開，避免誤觸。垃圾桶是空的時候不顯示
       empty: h(
         "button",
@@ -188,16 +189,16 @@ class TrashView {
           onClick: () => void this.emptyTrash(),
         },
         icon("trash", 16),
-        "Empty trash",
+        t("Empty trash"),
       ),
     };
     this.buttons.remove.classList.add("danger");
     this.viewButtons = {
-      list: viewButton("List view", "list", () => this.setView("list")),
-      grid: viewButton("Grid view", "grid", () => this.setView("grid")),
+      list: viewButton(t("List view"), "list", () => this.setView("list")),
+      grid: viewButton(t("Grid view"), "grid", () => this.setView("grid")),
     };
 
-    this.sorter = sortControl(this.sort, (sort) => this.setSort(sort), "Deleted");
+    this.sorter = sortControl(this.sort, (sort) => this.setSort(sort), t("Deleted"));
     this.list = this.createList();
   }
 
@@ -205,7 +206,7 @@ class TrashView {
   private tabs(): HTMLElement {
     return h(
       "nav",
-      { class: "trash-tabs", "aria-label": "Trash of each disk" },
+      { class: "trash-tabs", "aria-label": t("Trash of each disk") },
       place.tabs.map((tab) =>
         h(
           "a",
@@ -227,21 +228,21 @@ class TrashView {
           { class: "trash-title" },
           h(
             "nav",
-            { class: "breadcrumbs", "aria-label": "Current location" },
-            h("ol", {}, h("li", {}, h("span", { "aria-current": "page" }, "Trash"))),
+            { class: "breadcrumbs", "aria-label": t("Current location") },
+            h("ol", {}, h("li", {}, h("span", { "aria-current": "page" }, t("Trash")))),
           ),
           this.buttons.empty,
         ),
         // 右邊：與 My files 相同的位置
         h(
           "div",
-          { class: "toolbar", role: "toolbar", "aria-label": "Trash actions" },
+          { class: "toolbar", role: "toolbar", "aria-label": t("Trash actions") },
           this.buttons.restore,
           this.buttons.remove,
         ),
         h(
           "div",
-          { class: "view-switch", role: "group", "aria-label": "View" },
+          { class: "view-switch", role: "group", "aria-label": t("View") },
           this.viewButtons.list,
           this.viewButtons.grid,
         ),
@@ -251,7 +252,7 @@ class TrashView {
         "div",
         { class: "trash-banner" },
         icon("info", 18),
-        h("span", {}, "Items in the trash are deleted forever after 30 days."),
+        h("span", {}, t("Items in the trash are deleted forever after 30 days.")),
       ),
       this.errorBox,
       this.list.element,
@@ -286,8 +287,8 @@ class TrashView {
       sortControl: this.sorter.element,
       draggable: false,
       location: (item) => this.locations.get(item.id) ?? place.rootLabel,
-      timeLabel: "Deleted",
-      emptyMessage: "The trash is empty.",
+      timeLabel: t("Deleted"),
+      emptyMessage: t("The trash is empty."),
     });
   }
 
@@ -338,12 +339,12 @@ class TrashView {
 
   private showContextMenu(x: number, y: number): void {
     const selected = this.list.selectedItems();
-    const title = selected.length === 1 ? (selected[0]?.name ?? "") : `${selected.length} items selected`;
+    const title = selected.length === 1 ? (selected[0]?.name ?? "") : t("{count} items selected", { count: selected.length });
     openContextMenu(x, y, title, [
-      { label: "Restore", icon: "restore", onSelect: () => void this.restoreSelected() },
+      { label: t("Restore"), icon: "restore", onSelect: () => void this.restoreSelected() },
       "separator",
       {
-        label: "Delete forever",
+        label: t("Delete forever"),
         icon: "trash",
         danger: true,
         onSelect: () => void this.deleteSelected(),
@@ -354,7 +355,7 @@ class TrashView {
   // ---------- 操作 ----------
 
   private async restoreSelected(): Promise<void> {
-    await this.each(this.list.selectedItems(), "Restored", false, (item) =>
+    await this.each(this.list.selectedItems(), (done, total) => t("Restored {done} of {total} items.", { done, total }), false, (item) =>
       api.post(withSpace(`/api/trash/${item.id}/restore`, place.space), {}),
     );
   }
@@ -367,26 +368,26 @@ class TrashView {
     }
     const message =
       selected.length > 1
-        ? `${selected.length} items will be deleted forever. Folders are deleted with everything in them. This can't be undone.`
+        ? t("{count} items will be deleted forever. Folders are deleted with everything in them. This can't be undone.", { count: selected.length })
         : first.kind === "folder"
-          ? `"${first.name}" and everything in it will be deleted forever. This can't be undone.`
-          : `"${first.name}" will be deleted forever. This can't be undone.`;
+          ? t("\"{name}\" and everything in it will be deleted forever. This can't be undone.", { name: first.name })
+          : t("\"{name}\" will be deleted forever. This can't be undone.", { name: first.name });
     const confirmed = await confirmDialog({
-      title: "Delete forever?",
+      title: t("Delete forever?"),
       message,
-      confirmLabel: "Delete forever",
+      confirmLabel: t("Delete forever"),
       danger: true,
     });
     if (confirmed) {
-      await this.each(selected, "Deleted", true, (item) => api.delete(withSpace(`/api/trash/${item.id}`, place.space)));
+      await this.each(selected, (done, total) => t("Deleted {done} of {total} items.", { done, total }), true, (item) => api.delete(withSpace(`/api/trash/${item.id}`, place.space)));
     }
   }
 
   private async emptyTrash(): Promise<void> {
     const confirmed = await confirmDialog({
-      title: "Empty trash?",
-      message: "Everything in the trash will be deleted forever. This can't be undone.",
-      confirmLabel: "Empty trash",
+      title: t("Empty trash?"),
+      message: t("Everything in the trash will be deleted forever. This can't be undone."),
+      confirmLabel: t("Empty trash"),
       danger: true,
     });
     if (!confirmed || this.busy) {
@@ -412,7 +413,7 @@ class TrashView {
    */
   private async each(
     items: readonly FileItem[],
-    verb: string,
+    summary: (done: number, total: number) => string,
     changesStorage: boolean,
     action: (item: FileItem) => Promise<unknown>,
   ): Promise<void> {
@@ -438,7 +439,7 @@ class TrashView {
     if (firstError !== null) {
       message =
         items.length > 1
-          ? `${verb} ${succeeded} of ${items.length} items. ${messageOf(firstError)}`
+          ? `${summary(succeeded, items.length)} ${messageOf(firstError)}`
           : messageOf(firstError);
     }
     if (changesStorage) {
@@ -499,5 +500,5 @@ function dialogOpen(): boolean {
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong";
+  return error instanceof ApiError ? error.message : t("Something went wrong");
 }

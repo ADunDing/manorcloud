@@ -3,6 +3,7 @@
 // 用瀏覽器內建的 <dialog>：showModal() 會把背景變成不能操作，Esc 自動關閉，
 // 焦點也會留在對話框裡，不必自己處理這些細節。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
@@ -47,15 +48,15 @@ export function chooseFolder(
     /** 載入序號：較慢回來的舊結果不能蓋掉新的 */
     let loading = 0;
 
-    const path = h("nav", { class: "dialog-path", "aria-label": "Location" });
-    const list = h("ul", { class: "folder-list", "aria-label": "Folders" });
+    const path = h("nav", { class: "dialog-path", "aria-label": t("Location") });
+    const list = h("ul", { class: "folder-list", "aria-label": t("Folders") });
     const error = h("p", { class: "error", role: "alert" });
     const note = h("p", { class: "hint" });
     const confirm = h("button", { type: "button", class: "primary" }, confirmLabel);
-    const cancel = h("button", { type: "button", class: "secondary" }, "Cancel");
+    const cancel = h("button", { type: "button", class: "secondary" }, t("Cancel"));
     const picker = h(
       "select",
-      { class: "dialog-input", "aria-label": "Disk" },
+      { class: "dialog-input", "aria-label": t("Disk") },
       places.map((option, index) =>
         h("option", { value: String(index), selected: option.space === place.space }, option.rootLabel),
       ),
@@ -68,7 +69,7 @@ export function chooseFolder(
       "dialog",
       { class: "dialog", "aria-label": title },
       h("h2", { class: "dialog-title" }, title),
-      ...(places.length > 1 ? [h("label", { class: "dialog-field" }, "Disk", picker)] : []),
+      ...(places.length > 1 ? [h("label", { class: "dialog-field" }, t("Disk"), picker)] : []),
       path,
       list,
       note,
@@ -93,7 +94,7 @@ export function chooseFolder(
       confirm.disabled = true;
       error.textContent = "";
       note.textContent = "";
-      list.replaceChildren(h("li", {}, h("p", { class: "folder-empty" }, "Loading…")));
+      list.replaceChildren(h("li", {}, h("p", { class: "folder-empty" }, t("Loading…"))));
       renderPath();
 
       try {
@@ -117,7 +118,7 @@ export function chooseFolder(
         }
         list.replaceChildren();
         error.textContent =
-          failure instanceof ApiError ? failure.message : "Couldn't load the folders";
+          failure instanceof ApiError ? failure.message : t("Couldn't load the folders");
       }
     }
 
@@ -139,7 +140,7 @@ export function chooseFolder(
 
     function renderFolders(names: readonly string[]): void {
       if (names.length === 0) {
-        list.replaceChildren(h("li", {}, h("p", { class: "folder-empty" }, "No folders here")));
+        list.replaceChildren(h("li", {}, h("p", { class: "folder-empty" }, t("No folders here"))));
         return;
       }
       const sorted = [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
@@ -157,7 +158,7 @@ export function chooseFolder(
                 type: "button",
                 class: "folder-button",
                 disabled: blocked,
-                title: blocked ? "A folder can't be moved into itself" : undefined,
+                title: blocked ? t("A folder can't be moved into itself") : undefined,
                 onClick: () => void open(target),
               },
               icon("folder"),

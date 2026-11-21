@@ -3,13 +3,14 @@
 // 用 XMLHttpRequest 而不是 fetch：fetch 無法回報「已經上傳了多少」，
 // XHR 有 upload.onprogress。XHR 同樣是同源請求，會自動帶上 Cookie 與 Origin，CSRF 防護照常運作。
 
+import { t } from "./i18n.js";
 import { ApiError, errorFromResponse } from "./api.js";
 import type { Space } from "./space.js";
 
 /** 使用者取消了上傳 */
 export class UploadCancelled extends Error {
   constructor() {
-    super("Cancelled");
+    super(t("Cancelled"));
     this.name = "UploadCancelled";
   }
 }
@@ -59,7 +60,7 @@ export function startUpload(
       }
     });
 
-    xhr.addEventListener("error", () => reject(new ApiError(0, "Can't reach the server")));
+    xhr.addEventListener("error", () => reject(new ApiError(0, t("Can't reach the server"))));
     // 伺服器端會刪除寫到一半的暫存檔
     xhr.addEventListener("abort", () => reject(new UploadCancelled()));
   });

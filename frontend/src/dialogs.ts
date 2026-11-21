@@ -3,6 +3,7 @@
 //
 // 用瀏覽器內建的 <dialog>：showModal() 讓背景不能操作，Esc 自動關閉，焦點留在對話框裡。
 
+import { t, tNodes } from "./i18n.js";
 import { ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
@@ -27,7 +28,7 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
     const cancel = h(
       "button",
       { type: "button", class: "secondary" },
-      "Cancel",
+      t("Cancel"),
     );
     const confirm = h(
       "button",
@@ -57,7 +58,7 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
       typedField = h(
         "label",
         { class: "dialog-type-confirm" },
-        h("span", {}, "Type ", h("strong", {}, expected), " to confirm"),
+        h("span", {}, tNodes("Type {text} to confirm", { text: h("strong", {}, expected) })),
         input,
       );
     }
@@ -132,7 +133,7 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
     const cancel = h(
       "button",
       { type: "button", class: "secondary" },
-      "Cancel",
+      t("Cancel"),
     );
     const confirm = h(
       "button",
@@ -174,7 +175,7 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
       event.preventDefault();
       const name = input.value.trim();
       if (name === "") {
-        error.textContent = "Enter a name";
+        error.textContent = t("Enter a name");
         input.focus();
         return;
       }
@@ -196,7 +197,7 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
           error.textContent =
             failure instanceof ApiError
               ? failure.message
-              : "Something went wrong";
+              : t("Something went wrong");
           input.disabled = false;
           confirm.disabled = false;
           input.focus();
@@ -240,14 +241,14 @@ export function chooseDownload(
     const cancel = h(
       "button",
       { type: "button", class: "secondary" },
-      "Cancel",
+      t("Cancel"),
     );
     const confirm = h(
       "button",
       { type: "submit", class: "primary" },
-      "Download",
+      t("Download"),
     );
-    const title = `Download ${count} items`;
+    const title = t("Download {count} items", { count });
 
     const form = h(
       "form",
@@ -256,18 +257,18 @@ export function chooseDownload(
       h(
         "fieldset",
         { class: "choices" },
-        h("legend", { class: "visually-hidden" }, "How to download"),
+        h("legend", { class: "visually-hidden" }, t("How to download")),
         choice(
           zip,
-          "As one .zip file",
-          "The files are packed together, not compressed",
+          t("As one .zip file"),
+          t("The files are packed together, not compressed"),
         ),
         choice(
           separate,
-          "As separate files",
+          t("As separate files"),
           hasFolders
-            ? "Not available when folders are selected"
-            : "Your browser may ask you to allow several downloads",
+            ? t("Not available when folders are selected")
+            : t("Your browser may ask you to allow several downloads"),
         ),
       ),
       h("div", { class: "dialog-actions" }, cancel, confirm),

@@ -11,6 +11,7 @@
 // My files 與 Trash 共用：垃圾桶不能拖曳、多一欄原本的位置、時間那一欄是刪除時間。
 // Ctrl／⌘＋A、Esc、F2 是整個頁面的快捷鍵，由檔案瀏覽畫面處理，再呼叫這裡的方法。
 
+import { t } from "./i18n.js";
 import { h } from "./dom.js";
 import { formatSize, formatTime } from "./format.js";
 import { fileIconName, folderIconName, iconUrl } from "./file-types.js";
@@ -155,7 +156,7 @@ export class FileList {
         h(
           "p",
           { class: "empty-state" },
-          options.emptyMessage ?? "This folder is empty. Drop files here or use Upload to add some.",
+          options.emptyMessage ?? t("This folder is empty. Drop files here or use Upload to add some."),
         ),
       );
     } else if (options.view === "grid") {
@@ -228,7 +229,7 @@ export class FileList {
       type: "text",
       class: "rename-input",
       value: item.name,
-      "aria-label": `New name for ${item.name}`,
+      "aria-label": t("New name for {name}", { name: item.name }),
       spellcheck: "false",
       autocomplete: "off",
     });
@@ -276,21 +277,21 @@ export class FileList {
   // ==================== 建立畫面 ====================
 
   private table(): HTMLElement {
-    const box = h("input", { type: "checkbox", class: "select-box", "aria-label": "Select all" });
+    const box = h("input", { type: "checkbox", class: "select-box", "aria-label": t("Select all") });
     box.addEventListener("change", () => (box.checked ? this.selectAll() : this.clear()));
     this.selectAllBox = box;
 
     const name = h(
       "th",
       { scope: "col", class: "col-name", "aria-sort": this.ariaSort("name") },
-      this.sortButton("name", "Name"),
-      this.resizer("name", "Name"),
+      this.sortButton("name", t("Name")),
+      this.resizer("name", t("Name")),
     );
     const size = h(
       "th",
       { scope: "col", class: "col-size num", "aria-sort": this.ariaSort("size") },
-      this.sortButton("size", "Size"),
-      this.resizer("size", "Size"),
+      this.sortButton("size", t("Size")),
+      this.resizer("size", t("Size")),
     );
     this.headers.set("name", name);
     this.headers.set("size", size);
@@ -308,12 +309,12 @@ export class FileList {
           name,
           this.options.location === undefined
             ? null
-            : h("th", { scope: "col", class: "col-location" }, "Original location"),
+            : h("th", { scope: "col", class: "col-location" }, t("Original location")),
           size,
           h(
             "th",
             { scope: "col", class: "num", "aria-sort": this.ariaSort("modified") },
-            this.sortButton("modified", this.options.timeLabel ?? "Modified"),
+            this.sortButton("modified", this.options.timeLabel ?? t("Modified")),
           ),
           h(
             "th",
@@ -378,7 +379,7 @@ export class FileList {
       {
         type: "button",
         class: active ? "sort-button active" : "sort-button",
-        title: `Sort by ${label.toLowerCase()}`,
+        title: t("Sort by {column}", { column: label }),
         onClick: () => this.options.onSort(key),
       },
       label,
@@ -438,7 +439,7 @@ export class FileList {
       h("div", { class: "grid-header" }, this.options.sortControl),
       h(
         "ul",
-        { class: "tiles", role: "listbox", "aria-label": "Files", "aria-multiselectable": "true" },
+        { class: "tiles", role: "listbox", "aria-label": t("Files"), "aria-multiselectable": "true" },
         (this.options.pinned ?? []).map((pinned) => this.pinnedTile(pinned)),
         this.items.map((item) => this.tile(item)),
       ),
@@ -465,7 +466,7 @@ export class FileList {
       box,
       h("span", { class: "tile-icon" }, this.itemIcon(item, 48)),
       name,
-      h("span", { class: "tile-meta" }, isFolder ? "Folder" : formatSize(item.size)),
+      h("span", { class: "tile-meta" }, isFolder ? t("Folder") : formatSize(item.size)),
     );
     this.bind(item, tile, box, name, tile);
     return tile;
@@ -503,7 +504,7 @@ export class FileList {
     return h("input", {
       type: "checkbox",
       class: "select-box",
-      "aria-label": `Select ${item.name}`,
+      "aria-label": t("Select {name}", { name: item.name }),
     });
   }
 
@@ -731,7 +732,7 @@ export class FileList {
     transfer.effectAllowed = "move";
     transfer.setData(DRAG_TYPE, ids.join(","));
 
-    const label = ids.length === 1 ? item.name : `${ids.length} items`;
+    const label = ids.length === 1 ? item.name : t("{count} items", { count: ids.length });
     const ghost = h("div", { class: "drag-ghost" }, label);
     document.body.append(ghost);
     transfer.setDragImage(ghost, 14, 14);
@@ -841,8 +842,8 @@ export class FileList {
       "data-resize": column,
       role: "separator",
       "aria-orientation": "vertical",
-      "aria-label": `Resize the ${label} column`,
-      title: "Drag to resize",
+      "aria-label": t("Resize the {column} column", { column: label }),
+      title: t("Drag to resize"),
       tabindex: "0",
     });
 

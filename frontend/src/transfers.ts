@@ -3,6 +3,7 @@
 // 失敗或有略過項目的會留著顯示原因，按 × 移除。
 // 有進行中的項目時每兩秒更新一次；全部結束後停止更新。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 import { formatSize } from "./format.js";
@@ -50,11 +51,11 @@ export class TransferPanel {
   ) {
     this.element = h(
       "section",
-      { class: "panel", "aria-label": "Copying and moving", hidden: true },
+      { class: "panel", "aria-label": t("Copying and moving"), hidden: true },
       h(
         "div",
         { class: "panel-header" },
-        h("div", { class: "panel-heading" }, h("strong", { class: "panel-title" }, "Copy and move")),
+        h("div", { class: "panel-heading" }, h("strong", { class: "panel-title" }, t("Copy and move"))),
       ),
       h("div", { class: "panel-body" }, this.list),
     );
@@ -79,7 +80,7 @@ export class TransferPanel {
       if (token !== this.loading) {
         return;
       }
-      const running = new Set(items.filter((t) => t.state === "running").map((t) => t.id));
+      const running = new Set(items.filter((job) => job.state === "running").map((job) => job.id));
       const finished = [...this.running].some((id) => !running.has(id));
       this.running = running;
       this.render(items);
@@ -99,15 +100,15 @@ export class TransferPanel {
 
   /** 順利完成、取消的項目過幾秒自動移除；失敗或有略過的留著讓使用者看 */
   private scheduleDismiss(items: readonly Transfer[]): void {
-    for (const t of items) {
-      const quiet = (t.state === "done" || t.state === "cancelled") && t.skipped.length === 0;
-      if (!quiet || this.dismissing.has(t.id)) {
+    for (const job of items) {
+      const quiet = (job.state === "done" || job.state === "cancelled") && job.skipped.length === 0;
+      if (!quiet || this.dismissing.has(job.id)) {
         continue;
       }
-      this.dismissing.add(t.id);
+      this.dismissing.add(job.id);
       window.setTimeout(() => {
         void api
-          .delete(`/api/transfers/${t.id}`)
+          .delete(`/api/transfers/${job.id}`)
           .catch(() => undefined)
           .finally(() => this.refresh());
       }, DISMISS_MS);
@@ -116,33 +117,43 @@ export class TransferPanel {
 
   private render(items: readonly Transfer[]): void {
     this.element.hidden = items.length === 0;
-    this.list.replaceChildren(...items.map((t) => this.row(t)));
+    this.list.replaceChildren(...items.map((job) => this.row(job)));
   }
 
-  private row(t: Transfer): HTMLElement {
-    const what = t.names.length === 1 ? `"${t.names[0] ?? ""}"` : `${t.names.length} items`;
-    const target = [this.labelOf(t.to_space), ...t.to_path.split("/").filter((p) => p !== "")].join(" / ");
-    const verb = {
-      running: t.kind === "move" ? "Moving" : "Copying",
-      done: t.kind === "move" ? "Moved" : "Copied",
-      failed: t.kind === "move" ? "Couldn't move" : "Couldn't copy",
-      cancelled: "Cancelled",
-    }[t.state];
-    const fraction = t.total_bytes > 0 ? Math.min(1, t.done_bytes / t.total_bytes) : t.state === "done" ? 1 : 0;
+  private row(job: Transfer): HTMLElement {
+    const target = [this.labelOf(job.to_space), ...job.to_path.split("/").filter((p) => p !== "")].join(" / ");
+    const one = job.names.length === 1;
+    const params = { name: job.names[0] ?? "", count: job.names.length, target };
+    const move = job.kind === "move";
+    const heading = {
+      running: move
+        ? one ? t("Moving \"{name}\" to {target}", params) : t("Moving {count} items to {target}", params)
+        : one ? t("Copying \"{name}\" to {target}", params) : t("Copying {count} items to {target}", params),
+      done: move
+        ? one ? t("Moved \"{name}\" to {target}", params) : t("Moved {count} items to {target}", params)
+        : one ? t("Copied \"{name}\" to {target}", params) : t("Copied {count} items to {target}", params),
+      failed: move
+        ? one ? t("Couldn't move \"{name}\" to {target}", params) : t("Couldn't move {count} items to {target}", params)
+        : one ? t("Couldn't copy \"{name}\" to {target}", params) : t("Couldn't copy {count} items to {target}", params),
+      cancelled: one
+        ? t("Cancelled: \"{name}\" to {target}", params)
+        : t("Cancelled: {count} items to {target}", params),
+    }[job.state];
+    const fraction = job.total_bytes > 0 ? Math.min(1, job.done_bytes / job.total_bytes) : job.state === "done" ? 1 : 0;
     const fill = h("div", {
-      class: `bar-fill${t.state === "done" ? " done" : t.state === "failed" ? " failed" : ""}`,
+      class: `bar-fill${job.state === "done" ? " done" : job.state === "failed" ? " failed" : ""}`,
     });
     fill.style.width = `${(fraction * 100).toFixed(1)}%`;
     const message = h("span", { class: "pending-message", role: "status" });
 
     const detail =
-      t.state === "running"
-        ? `${formatSize(t.done_bytes)} of ${formatSize(t.total_bytes)}`
-        : t.state === "failed"
-          ? (t.error ?? "Something went wrong")
-          : t.state === "cancelled"
-            ? `${t.done_items} of ${t.total_items} finished before cancelling`
-            : `${formatSize(t.total_bytes)}`;
+      job.state === "running"
+        ? t("{done} of {total}", { done: formatSize(job.done_bytes), total: formatSize(job.total_bytes) })
+        : job.state === "failed"
+          ? (job.error ?? t("Something went wrong"))
+          : job.state === "cancelled"
+            ? t("{done} of {total} finished before cancelling", { done: job.done_items, total: job.total_items })
+            : `${formatSize(job.total_bytes)}`;
 
     return h(
       "li",
@@ -150,30 +161,30 @@ export class TransferPanel {
       h(
         "div",
         { class: "pending-text" },
-        h("span", { class: "item-name", title: `${verb} ${what} to ${target}` }, `${verb} ${what} to ${target}`),
+        h("span", { class: "item-name", title: heading }, heading),
         h("span", { class: "pending-progress" }, detail),
-        ...(t.state === "running" || t.state === "done" ? [h("div", { class: "bar" }, fill)] : []),
-        ...(t.skipped.length > 0
+        ...(job.state === "running" || job.state === "done" ? [h("div", { class: "bar" }, fill)] : []),
+        ...(job.skipped.length > 0
           ? [
               h(
                 "details",
                 { class: "pending-progress" },
-                h("summary", {}, `${t.skipped.length} skipped`),
-                h("ul", {}, t.skipped.map((s) => h("li", {}, s))),
+                h("summary", {}, t("{count} skipped", { count: job.skipped.length })),
+                h("ul", {}, job.skipped.map((s) => h("li", {}, s))),
               ),
             ]
           : []),
       ),
-      t.state === "running"
-        ? h("button", { type: "button", class: "link", onClick: () => void this.remove(t, message) }, "Cancel")
+      job.state === "running"
+        ? h("button", { type: "button", class: "link", onClick: () => void this.remove(job, message) }, t("Cancel"))
         : h(
             "button",
             {
               type: "button",
               class: "round-button",
-              "aria-label": "Remove from the list",
-              title: "Remove from the list",
-              onClick: () => void this.remove(t, message),
+              "aria-label": t("Remove from the list"),
+              title: t("Remove from the list"),
+              onClick: () => void this.remove(job, message),
             },
             icon("close"),
           ),
@@ -182,12 +193,12 @@ export class TransferPanel {
   }
 
   /** 進行中：取消；已經結束：從清單移除 */
-  private async remove(t: Transfer, message: HTMLElement): Promise<void> {
+  private async remove(job: Transfer, message: HTMLElement): Promise<void> {
     try {
-      await api.delete(`/api/transfers/${t.id}`);
+      await api.delete(`/api/transfers/${job.id}`);
     } catch (error) {
       if (!isHandledGlobally(error)) {
-        message.textContent = error instanceof ApiError ? error.message : "Something went wrong";
+        message.textContent = error instanceof ApiError ? error.message : t("Something went wrong");
       }
       return;
     }

@@ -1,6 +1,7 @@
 // 所有 API 呼叫的唯一入口：JSON 請求與解析、錯誤處理、401 與「必須修改密碼」的通知都只寫一次。
 // 上傳用的 XHR（upload.ts）不經過 request，但同樣透過 errorFromResponse 建立錯誤並觸發通知。
 
+import { t } from "./i18n.js";
 import type { ErrorCode } from "./types.js";
 
 /**
@@ -104,7 +105,7 @@ async function request<T>(
     response = await fetch(path, init);
   } catch {
     // fetch 只有在網路層失敗時才會拋出（伺服器沒開、斷線），HTTP 錯誤不會
-    throw new ApiError(0, "Can't reach the server");
+    throw new ApiError(0, t("Can't reach the server"));
   }
 
   const body = await readBody(response);
@@ -141,15 +142,15 @@ async function readBody(response: Response): Promise<unknown> {
 function parseError(status: number, body: unknown): { message: string; code: ErrorCode | null } {
   if (typeof body === "object" && body !== null) {
     const message =
-      "error" in body && typeof body.error === "string" ? body.error : `Request failed (${status})`;
+      "error" in body && typeof body.error === "string" ? t(body.error) : t("Request failed ({status})", { status });
     // 代碼的型別相信伺服器；未知的代碼仍會原樣保留，判斷時比對不到而已
     const code = "code" in body && typeof body.code === "string" ? (body.code as ErrorCode) : null;
     return { message, code };
   }
   if (typeof body === "string" && body.trim() !== "") {
-    return { message: body.trim(), code: null };
+    return { message: t(body.trim()), code: null };
   }
-  return { message: `Request failed (${status})`, code: null };
+  return { message: t("Request failed ({status})", { status }), code: null };
 }
 
 export const api = {

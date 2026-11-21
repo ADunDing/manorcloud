@@ -5,6 +5,7 @@
 // 臨時密碼只存在顯示它的面板元素裡，不放進任何變數或狀態；
 // 關閉面板時先清空值再移除元素，不會殘留在 DOM 中。
 
+import { t, tNodes } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { confirmDialog, nameDialog } from "./dialogs.js";
 import { showToast } from "./toast.js";
@@ -28,7 +29,7 @@ const MOVE_POLL_MS = 2000;
 // 與後端 src/web/auth.rs 的帳號規則一致（同 auth-view.ts）。只用來提示，後端才是唯一的權威：
 // 不符合時，後端的錯誤訊息會顯示在對話框裡
 const USERNAME_HINT =
-  "3–32 characters: lowercase letters, digits, underscores and hyphens.";
+  t("3–32 characters: lowercase letters, digits, underscores and hyphens.");
 
 /**
  * 在 container 中顯示使用者管理頁。
@@ -69,7 +70,7 @@ class AdminView {
       h(
         "div",
         { class: "admin-head" },
-        h("h2", { class: "section-title" }, "Users"),
+        h("h2", { class: "section-title" }, t("Users")),
         h(
           "button",
           {
@@ -78,7 +79,7 @@ class AdminView {
             onClick: () => void this.createUser(),
           },
           icon("plus", 16),
-          "Create user",
+          t("Create user"),
         ),
       ),
       this.noticeSlot,
@@ -98,7 +99,7 @@ class AdminView {
     window.clearTimeout(this.pollTimer);
     // 第一次載入才顯示 Loading：之後的重新讀取直接換掉，畫面不會閃
     if (this.tableSlot.childElementCount === 0) {
-      this.tableSlot.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+      this.tableSlot.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
     }
     try {
       const [users, twoFactor, storage] = await Promise.all([
@@ -147,16 +148,16 @@ class AdminView {
         h(
           "tr",
           {},
-          h("th", { scope: "col" }, "Username"),
-          h("th", { scope: "col" }, "Role"),
-          h("th", { scope: "col" }, "Status"),
-          h("th", { scope: "col" }, "2FA"),
-          h("th", { scope: "col" }, "Storage"),
-          h("th", { scope: "col" }, "Created"),
+          h("th", { scope: "col" }, t("Username")),
+          h("th", { scope: "col" }, t("Role")),
+          h("th", { scope: "col" }, t("Status")),
+          h("th", { scope: "col" }, t("2FA")),
+          h("th", { scope: "col" }, t("Storage")),
+          h("th", { scope: "col" }, t("Created")),
           h(
             "th",
             { scope: "col" },
-            h("span", { class: "visually-hidden" }, "Actions"),
+            h("span", { class: "visually-hidden" }, t("Actions")),
           ),
         ),
       ),
@@ -171,10 +172,10 @@ class AdminView {
   private row(user: ManagedUser): HTMLElement {
     const isSelf = user.id === this.me.id;
     const status = user.disabled
-      ? "Disabled"
+      ? t("Disabled")
       : user.must_change_password
-        ? "Waiting for first login"
-        : "Active";
+        ? t("Waiting for first login")
+        : t("Active");
 
     return h(
       "tr",
@@ -183,7 +184,7 @@ class AdminView {
         "td",
         {},
         user.username,
-        isSelf ? h("span", { class: "muted" }, " (you)") : null,
+        isSelf ? h("span", { class: "muted" }, ` ${t("(you)")}`) : null,
       ),
       h(
         "td",
@@ -191,7 +192,7 @@ class AdminView {
         h(
           "span",
           { class: `badge ${user.role}` },
-          user.role === "admin" ? "Administrator" : "Member",
+          user.role === "admin" ? t("Administrator") : t("Member"),
         ),
       ),
       h("td", {}, status),
@@ -199,8 +200,8 @@ class AdminView {
         "td",
         {},
         this.twoFactor.has(user.id)
-          ? "On"
-          : h("span", { class: "muted" }, "Off"),
+          ? t("On")
+          : h("span", { class: "muted" }, t("Off")),
       ),
       h("td", {}, this.storageCell(user)),
       h("td", { class: "nowrap" }, formatUtcText(user.created_at)),
@@ -219,7 +220,7 @@ class AdminView {
       return h(
         "span",
         { class: "error", title: move.error },
-        `Couldn't move to ${target}`,
+        t("Couldn't move to {target}", { target }),
       );
     }
     const fraction =
@@ -230,9 +231,9 @@ class AdminView {
       "div",
       {
         class: "move-progress",
-        title: `${formatSize(move.moved_bytes)} of ${formatSize(move.total_bytes)}`,
+        title: t("{done} of {total}", { done: formatSize(move.moved_bytes), total: formatSize(move.total_bytes) }),
       },
-      h("span", {}, `Moving to ${target}… ${Math.floor(fraction * 100)}%`),
+      h("span", {}, t("Moving to {target}… {percent}%", { target, percent: Math.floor(fraction * 100) })),
       h("div", { class: "meter" }, fill),
     );
   }
@@ -250,7 +251,8 @@ class AdminView {
 
   private volumeName(id: number | null): string {
     return (
-      this.storage.volumes.find((volume) => volume.id === id)?.name ?? "Unknown"
+      this.storage.volumes.find((volume) => volume.id === id)?.name ??
+      t("Unknown")
     );
   }
 
@@ -259,7 +261,7 @@ class AdminView {
     const entries: (MenuEntry | "separator")[] = [
       {
         label:
-          user.role === "admin" ? "Remove administrator" : "Make administrator",
+          user.role === "admin" ? t("Remove administrator") : t("Make administrator"),
         icon: "users",
         onSelect: () => void this.toggleRole(user, isSelf),
       },
@@ -269,19 +271,19 @@ class AdminView {
     if (!isSelf) {
       entries.push(
         {
-          label: user.disabled ? "Enable" : "Disable",
+          label: user.disabled ? t("Enable") : t("Disable"),
           icon: "lock",
           onSelect: () => void this.toggleDisabled(user),
         },
         {
-          label: "Reset password",
+          label: t("Reset password"),
           icon: "key",
           onSelect: () => void this.resetPassword(user),
         },
       );
       if (this.twoFactor.has(user.id)) {
         entries.push({
-          label: "Turn off 2FA",
+          label: t("Turn off 2FA"),
           icon: "shield",
           onSelect: () => void this.resetTwoFactor(user),
         });
@@ -293,7 +295,7 @@ class AdminView {
 
     if (!isSelf) {
       entries.push("separator", {
-        label: "Delete user",
+        label: t("Delete user"),
         icon: "trash",
         danger: true,
         onSelect: () => void this.deleteUser(user),
@@ -305,8 +307,8 @@ class AdminView {
       {
         type: "button",
         class: "icon-button row-menu",
-        title: "Actions",
-        "aria-label": `Actions for ${user.username}`,
+        title: t("Actions"),
+        "aria-label": t("Actions for {name}", { name: user.username }),
       },
       icon("more", 18),
     );
@@ -315,7 +317,7 @@ class AdminView {
       {
         class: "menu dropdown-menu",
         role: "menu",
-        "aria-label": `Actions for ${user.username}`,
+        "aria-label": t("Actions for {name}", { name: user.username }),
       },
       entries.map((entry) =>
         entry === "separator" ? menuSeparator() : menuItem(entry),
@@ -333,11 +335,11 @@ class AdminView {
       const onlyOne = this.storage.volumes.length < 2;
       return [
         {
-          label: "Change storage",
+          label: t("Change storage"),
           icon: "disk",
           disabled: onlyOne,
           title: onlyOne
-            ? "Add another storage in Administration → Storage first"
+            ? t("Add another storage in Administration → Storage first")
             : undefined,
           onSelect: () => void this.changeStorage(user),
         },
@@ -346,7 +348,7 @@ class AdminView {
     const entries: MenuEntry[] = [];
     if (move.error !== null) {
       entries.push({
-        label: "Retry moving files",
+        label: t("Retry moving files"),
         icon: "restore",
         onSelect: () =>
           this.perform(() =>
@@ -355,7 +357,7 @@ class AdminView {
       });
     }
     entries.push({
-      label: "Stop moving files",
+      label: t("Stop moving files"),
       icon: "close",
       onSelect: () => void this.cancelMove(user),
     });
@@ -379,30 +381,22 @@ class AdminView {
             "select",
             { class: "dialog-input" },
             volumes.map((volume) =>
-              h(
-                "option",
-                { value: volume.id === null ? "" : String(volume.id) },
-                volume.name,
-              ),
+              h("option", { value: volume.id === null ? "" : String(volume.id) }, volume.name),
             ),
           );
     await nameDialog({
-      title: "Create user",
-      message: `The new member gets a temporary password and must change it when they first log in. ${USERNAME_HINT}`,
-      confirmLabel: "Create",
+      title: t("Create user"),
+      message: `${t("The new member gets a temporary password and must change it when they first log in.")} ${USERNAME_HINT}`,
+      confirmLabel: t("Create"),
       extra:
         disk === null
           ? undefined
           : h(
               "label",
               { class: "dialog-field" },
-              "Keep their files on",
+              t("Keep their files on"),
               disk,
-              h(
-                "span",
-                { class: "hint" },
-                "A folder with their username is created there.",
-              ),
+              h("span", { class: "hint" }, t("A folder with their username is created there.")),
             ),
       submit: async (username) => {
         created = await api.post<CreatedUser>("/api/admin/users", { username });
@@ -416,12 +410,10 @@ class AdminView {
     // 新帳號還沒有任何檔案：換位置會立刻完成，不需要搬移
     if (disk !== null && disk.value !== "") {
       try {
-        await api.put(`/api/admin/users/${user.id}/storage`, {
-          volume_id: Number(disk.value),
-        });
+        await api.put(`/api/admin/users/${user.id}/storage`, { volume_id: Number(disk.value) });
       } catch (error) {
         if (!isHandledGlobally(error)) {
-          this.errorBox.textContent = `${user.username} was created, but their files are kept on Default: ${messageOf(error)}`;
+          this.errorBox.textContent = t("{name} was created, but their files are kept on Default: {error}", { name: user.username, error: messageOf(error) });
         }
       }
     }
@@ -435,16 +427,16 @@ class AdminView {
     const confirmed = await confirmDialog(
       promote
         ? {
-            title: "Make administrator?",
-            message: `${user.username} will be able to create and disable accounts and reset anyone's password.`,
-            confirmLabel: "Make administrator",
+            title: t("Make administrator?"),
+            message: t("{name} will be able to create and disable accounts and reset anyone's password.", { name: user.username }),
+            confirmLabel: t("Make administrator"),
           }
         : {
-            title: "Remove administrator rights?",
+            title: t("Remove administrator rights?"),
             message: isSelf
-              ? "You won't be able to open this page afterwards."
-              : `${user.username} will become a regular member.`,
-            confirmLabel: "Remove rights",
+              ? t("You won't be able to open this page afterwards.")
+              : t("{name} will become a regular member.", { name: user.username }),
+            confirmLabel: t("Remove rights"),
             danger: isSelf,
           },
     );
@@ -469,10 +461,10 @@ class AdminView {
     if (
       !user.disabled &&
       !(await confirmDialog({
-        title: `Disable ${user.username}?`,
+        title: t("Disable {name}?", { name: user.username }),
         message:
-          "They'll be logged out on every device and won't be able to log in.",
-        confirmLabel: "Disable",
+          t("They'll be logged out on every device and won't be able to log in."),
+        confirmLabel: t("Disable"),
         danger: true,
       }))
     ) {
@@ -486,10 +478,10 @@ class AdminView {
   /** 手機與備用碼都遺失時：關閉這個人的 2FA，同時登出他所有的裝置 */
   private async resetTwoFactor(user: ManagedUser): Promise<void> {
     const confirmed = await confirmDialog({
-      title: `Turn off two-factor authentication for ${user.username}?`,
+      title: t("Turn off two-factor authentication for {name}?", { name: user.username }),
       message:
-        "They'll be logged out on every device and can log in with just their password. Use this when they've lost their phone and their recovery codes.",
-      confirmLabel: "Turn off 2FA",
+        t("They'll be logged out on every device and can log in with just their password. Use this when they've lost their phone and their recovery codes."),
+      confirmLabel: t("Turn off 2FA"),
       danger: true,
     });
     if (!confirmed) {
@@ -497,7 +489,7 @@ class AdminView {
     }
     this.perform(async () => {
       await api.post(`/api/admin/users/${user.id}/reset-two-factor`);
-      showToast(`Two-factor authentication turned off for ${user.username}`);
+      showToast(t("Two-factor authentication turned off for {name}", { name: user.username }));
     });
   }
 
@@ -520,31 +512,33 @@ class AdminView {
       );
       showToast(
         result.moving
-          ? `Moving ${user.username}'s files to ${this.volumeName(target)}`
-          : `${user.username}'s files are now kept in ${this.volumeName(target)}`,
+          ? t("Moving {name}'s files to {target}", { name: user.username, target: this.volumeName(target) })
+          : t("{name}'s files are now kept in {target}", { name: user.username, target: this.volumeName(target) }),
       );
     });
   }
 
   private async cancelMove(user: ManagedUser): Promise<void> {
     const confirmed = await confirmDialog({
-      title: "Stop moving files?",
-      message: `${user.username}'s files stay where they are now. Anything already copied to the new location is cleaned up later.`,
-      confirmLabel: "Stop moving",
+      title: t("Stop moving files?"),
+      message: t("{name}'s files stay where they are now. Anything already copied to the new location is cleaned up later.", { name: user.username }),
+      confirmLabel: t("Stop moving"),
     });
     if (!confirmed) {
       return;
     }
-    this.perform(() => api.delete(`/api/admin/users/${user.id}/storage/move`));
+    this.perform(() =>
+      api.delete(`/api/admin/users/${user.id}/storage/move`),
+    );
   }
 
   /** 刪除使用者與他所有的檔案。必須輸入帳號名稱才能確認 */
   private async deleteUser(user: ManagedUser): Promise<void> {
     const confirmed = await confirmDialog({
-      title: `Delete ${user.username}?`,
+      title: t("Delete {name}?", { name: user.username }),
       message:
-        "Their account and all of their files, including items in their trash, will be deleted permanently. This can't be undone.",
-      confirmLabel: "Delete user",
+        t("Their account and all of their files, including items in their trash, will be deleted permanently. This can't be undone."),
+      confirmLabel: t("Delete user"),
       danger: true,
       typeToConfirm: user.username,
     });
@@ -553,17 +547,17 @@ class AdminView {
     }
     this.perform(async () => {
       await api.delete(`/api/admin/users/${user.id}`);
-      showToast(`Deleted ${user.username}`);
+      showToast(t("Deleted {name}", { name: user.username }));
     });
   }
 
   private async resetPassword(user: ManagedUser): Promise<void> {
     if (
       !(await confirmDialog({
-        title: `Reset the password of ${user.username}?`,
+        title: t("Reset the password of {name}?", { name: user.username }),
         message:
-          "They'll be logged out on every device and need a new temporary password to log in.",
-        confirmLabel: "Reset password",
+          t("They'll be logged out on every device and need a new temporary password to log in."),
+        confirmLabel: t("Reset password"),
         danger: true,
       }))
     ) {
@@ -620,7 +614,7 @@ class AdminView {
       readonly: true,
       value: password,
       class: "temp-password",
-      "aria-label": `Temporary password for ${username}`,
+      "aria-label": t("Temporary password for {name}", { name: username }),
       // 不讓密碼管理器把它當成自己的密碼儲存
       autocomplete: "off",
       spellcheck: "false",
@@ -632,14 +626,20 @@ class AdminView {
       {
         class: "notice temp-panel",
         role: "region",
-        "aria-label": "Temporary password",
+        "aria-label": t("Temporary password"),
       },
       h(
         "p",
         {},
-        action === "created" ? "Created " : "Reset the password of ",
-        h("strong", {}, username),
-        ". This temporary password is shown only once: write it down and pass it on. They must change it when they first log in.",
+        action === "created"
+          ? tNodes(
+              "Created {name}. This temporary password is shown only once: write it down and pass it on. They must change it when they first log in.",
+              { name: h("strong", {}, username) },
+            )
+          : tNodes(
+              "Reset the password of {name}. This temporary password is shown only once: write it down and pass it on. They must change it when they first log in.",
+              { name: h("strong", {}, username) },
+            ),
       ),
       h(
         "div",
@@ -651,7 +651,7 @@ class AdminView {
             type: "button",
             onClick: () => void copyPassword(field, copyStatus),
           },
-          "Copy",
+          t("Copy"),
         ),
         copyStatus,
       ),
@@ -666,7 +666,7 @@ class AdminView {
             panel.remove();
           },
         },
-        "I've noted it, close",
+        t("I've noted it, close"),
       ),
     );
 
@@ -689,13 +689,13 @@ async function copyPassword(
   if (window.isSecureContext && "clipboard" in navigator) {
     try {
       await navigator.clipboard.writeText(field.value);
-      status.textContent = "Copied";
+      status.textContent = t("Copied");
       return;
     } catch {
       // 使用者拒絕權限等情況：退回手動複製
     }
   }
-  status.textContent = "Selected. Press Ctrl+C (⌘C on a Mac) to copy";
+  status.textContent = t("Selected. Press Ctrl+C (⌘C on a Mac) to copy");
 }
 
 /**
@@ -711,8 +711,8 @@ function chooseVolume(
     const options = volumes.map((volume) => {
       const free =
         volume.available_bytes === null
-          ? "not available"
-          : `${formatSize(volume.available_bytes)} free`;
+          ? t("not available")
+          : t("{size} free", { size: formatSize(volume.available_bytes) });
       return h(
         "option",
         {
@@ -720,7 +720,7 @@ function chooseVolume(
           selected: volume.id === current,
           disabled: volume.id === current || volume.available_bytes === null,
         },
-        `${volume.name} (${free})${volume.id === current ? ", current" : ""}`,
+        volume.id === current ? t("{name} ({free}, current)", { name: volume.name, free }) : `${volume.name} (${free})`,
       );
     });
     const select = h("select", { class: "dialog-input" }, options);
@@ -729,17 +729,13 @@ function chooseVolume(
     if (firstFree !== undefined) {
       firstFree.selected = true;
     }
-    const cancel = h(
-      "button",
-      { type: "button", class: "secondary" },
-      "Cancel",
-    );
+    const cancel = h("button", { type: "button", class: "secondary" }, t("Cancel"));
     const confirm = h(
       "button",
       { type: "submit", class: "primary", disabled: firstFree === undefined },
-      "Move files",
+      t("Move files"),
     );
-    const title = `Change where ${username}'s files are kept`;
+    const title = t("Change where {name}'s files are kept", { name: username });
     const form = h(
       "form",
       { method: "dialog", class: "dialog-form" },
@@ -747,9 +743,9 @@ function chooseVolume(
       h(
         "p",
         { class: "dialog-message" },
-        "Their files are copied to the new storage in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.",
+        t("Their files are copied to the new storage in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled."),
       ),
-      h("label", { class: "dialog-field" }, "Storage", select),
+      h("label", { class: "dialog-field" }, t("Storage"), select),
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
     const dialog = h("dialog", { class: "dialog", "aria-label": title }, form);
@@ -772,5 +768,5 @@ function chooseVolume(
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong";
+  return error instanceof ApiError ? error.message : t("Something went wrong");
 }

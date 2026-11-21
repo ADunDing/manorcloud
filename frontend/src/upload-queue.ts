@@ -9,6 +9,7 @@
 //
 // 佇列是獨立存在的物件，自己持有面板的元素，切換資料夾時面板與進度都保留。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { withSpace, type Space } from "./space.js";
 import {
@@ -123,7 +124,7 @@ export class UploadQueue {
 
     this.element = h(
       "section",
-      { class: "panel", "aria-label": "Uploads", hidden: true },
+      { class: "panel", "aria-label": t("Uploads"), hidden: true },
       h(
         "div",
         { class: "panel-header" },
@@ -196,11 +197,11 @@ export class UploadQueue {
     // 送出前先檢查大小：不必傳到一半才收到 413。後端的檢查仍是唯一的權威
     const limit = await this.uploadLimit();
     if (limit !== null && entry.file.size > limit) {
-      this.setStatus(entry, "failed", `Larger than the ${formatSize(limit)} limit`);
+      this.setStatus(entry, "failed", t("Larger than the {limit} limit", { limit: formatSize(limit) }));
       return;
     }
 
-    this.setStatus(entry, "uploading", "Uploading 0%");
+    this.setStatus(entry, "uploading", t("Uploading 0%"));
     const onProgress = (fraction: number): void => this.setProgress(entry, fraction);
     // 重試等提示暫時取代進度文字；清除時恢復顯示目前的百分比
     const onNotice = (message: string | null): void => {
@@ -235,14 +236,14 @@ export class UploadQueue {
     try {
       await entry.handle.done;
       this.setProgress(entry, 1);
-      this.setStatus(entry, "done", "Done");
+      this.setStatus(entry, "done", t("Done"));
       this.onUploaded(entry.dir, entry.space);
     } catch (error) {
       if (error instanceof UploadCancelled) {
         this.remove(entry);
         this.hideUntilDiscarded(entry.uploadId);
       } else {
-        this.setStatus(entry, "failed", error instanceof ApiError ? error.message : "Upload failed");
+        this.setStatus(entry, "failed", error instanceof ApiError ? error.message : t("Upload failed"));
         // 登入失效或必須修改密碼：後面的檔案也一定會失敗，全部取消
         if (isHandledGlobally(error)) {
           this.cancelPending();
@@ -336,15 +337,15 @@ export class UploadQueue {
     resume: UploadInfo | null,
   ): Entry {
     const fill = h("div", { class: "bar-fill" });
-    const statusText = h("span", { class: "item-status" }, "Waiting");
+    const statusText = h("span", { class: "item-status" }, t("Waiting"));
     const sizeText = h("span", { class: "item-size" }, formatSize(file.size));
     const cancelButton = h(
       "button",
       {
         type: "button",
         class: "icon-button small",
-        "aria-label": `Cancel ${file.name}`,
-        title: "Cancel",
+        "aria-label": t("Cancel {name}", { name: file.name }),
+        title: t("Cancel"),
       },
       icon("close", 16),
     );
@@ -424,16 +425,16 @@ export class UploadQueue {
     this.summary.hidden = !active;
 
     if (active) {
-      this.title.textContent = "Uploading…";
-      this.setButton("Cancel all uploads");
+      this.title.textContent = t("Uploading…");
+      this.setButton(t("Cancel all uploads"));
       this.startTicker();
     } else if (failed > 0) {
-      this.title.textContent = failed === 1 ? "1 upload failed" : `${failed} uploads failed`;
+      this.title.textContent = failed === 1 ? t("1 upload failed") : t("{count} uploads failed", { count: failed });
       this.count.textContent = "";
-      this.setButton("Close");
+      this.setButton(t("Close"));
       this.stopTicker();
     } else {
-      this.title.textContent = "Uploads complete";
+      this.title.textContent = t("Uploads complete");
       this.count.textContent = "";
       this.closeButton.hidden = true;
       this.stopTicker();
@@ -510,7 +511,7 @@ export class UploadQueue {
 
     if (this.speed > 0) {
       this.statSpeed.textContent = `${formatSize(this.speed)}/s`;
-      this.statLeft.textContent = `About ${formatDuration((total - done) / this.speed)} left`;
+      this.statLeft.textContent = t("About {time} left", { time: formatDuration((total - done) / this.speed) });
     } else {
       this.statSpeed.textContent = "";
       this.statLeft.textContent = "";
@@ -527,7 +528,7 @@ export class UploadQueue {
 
   private applyMinimized(): void {
     this.body.hidden = this.minimized;
-    const label = this.minimized ? "Show uploads" : "Minimize uploads";
+    const label = this.minimized ? t("Show uploads") : t("Minimize uploads");
     this.toggleButton.setAttribute("aria-expanded", String(!this.minimized));
     this.toggleButton.setAttribute("aria-label", label);
     this.toggleButton.title = label;
@@ -539,7 +540,7 @@ function isActive(entry: Entry): boolean {
 }
 
 function progressText(fraction: number): string {
-  return `Uploading ${Math.floor(fraction * 100)}%`;
+  return t("Uploading {percent}%", { percent: Math.floor(fraction * 100) });
 }
 
 /** 讀取記在瀏覽器中的開關；無法使用 localStorage 時視為關閉 */

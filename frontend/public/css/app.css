@@ -596,22 +596,11 @@ table.files tbody tr:focus-visible {
     vertical-align: middle;
 }
 
-.name-cell svg {
+.name-cell svg,
+.name-cell .file-icon {
     flex: none;
     color: var(--muted);
 }
-
-/* 檔案種類的顏色（file-types.ts）：深淺兩種主題都看得清楚的中間色 */
-svg.type-image { color: #2da44e; }
-svg.type-video { color: #d1453b; }
-svg.type-audio { color: #a371f7; }
-svg.type-pdf { color: #e5534b; }
-svg.type-document { color: #3b82f6; }
-svg.type-spreadsheet { color: #1f9d55; }
-svg.type-presentation { color: #e8743b; }
-svg.type-code { color: #0ea5b7; }
-svg.type-archive { color: #c69026; }
-svg.type-disc { color: #8b949e; }
 
 /* 圖片的縮圖：List 中與圖示一樣大，Grid 中佔滿方塊的寬度 */
 .thumb {
@@ -2040,21 +2029,90 @@ table.files .col-location {
     outline-offset: 2px;
 }
 
-.viewer-stage {
+.viewer-body {
     position: relative;
     display: flex;
     flex: 1 1 auto;
     min-height: 0;
+}
+
+.viewer-stage {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
     align-items: center;
     justify-content: center;
     padding: 0 64px 16px;
 }
 
-.viewer-image {
+.viewer-image,
+.viewer-video {
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
     box-shadow: 0 4px 24px rgb(0 0 0 / 0.5);
+}
+
+.viewer-audio {
+    width: min(480px, 100%);
+}
+
+/* PDF 與文字檔：可以捲動的區域佔滿整個範圍 */
+.viewer-stage.pdf,
+.viewer-stage.text {
+    align-items: stretch;
+}
+
+.viewer-pdf {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    overflow: auto;
+    padding: 8px 0 24px;
+}
+
+.viewer-pdf-page {
+    flex: none;
+    max-width: 100%;
+    background: #fff;
+    box-shadow: 0 2px 12px rgb(0 0 0 / 0.5);
+}
+
+.viewer-pdf-page canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+}
+
+.viewer-text-wrap {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.viewer-text {
+    flex: 1 1 auto;
+    margin: 0;
+    padding: 16px;
+    overflow: auto;
+    border-radius: 8px;
+    background: #16181d;
+    color: #e6e6e6;
+    font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+}
+
+.viewer-note {
+    margin: 8px 0 0;
+    font-size: 0.8rem;
+    color: #b8b8b8;
 }
 
 .viewer-status {
@@ -2091,7 +2149,7 @@ table.files .col-location {
 
 @media (max-width: 600px) {
     .viewer-stage {
-        padding: 0 0 12px;
+        padding: 0 0 72px;
     }
 
     .viewer-nav {

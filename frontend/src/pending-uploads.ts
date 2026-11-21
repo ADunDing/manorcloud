@@ -4,6 +4,7 @@
 // 瀏覽器重新整理後不會記得使用者選過哪個檔案，所以 Resume 需要使用者再選一次同一個檔案，
 // 比對相符（見 isSameFile）才從中斷處繼續。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { withSpace, type Space } from "./space.js";
 import { isSameFile, type UploadInfo } from "./chunked-upload.js";
@@ -48,20 +49,20 @@ export class PendingUploads {
       h(
         "p",
         { class: "panel-hint" },
-        "Choose the same file again to continue where it stopped. Uploads with no progress for 24 hours are deleted automatically.",
+        t("Choose the same file again to continue where it stopped. Uploads with no progress for 24 hours are deleted automatically."),
       ),
       this.list,
     );
     this.element = h(
       "section",
-      { class: "panel", "aria-label": "Unfinished uploads", hidden: true },
+      { class: "panel", "aria-label": t("Unfinished uploads"), hidden: true },
       h(
         "div",
         { class: "panel-header" },
         h(
           "div",
           { class: "panel-heading" },
-          h("strong", { class: "panel-title" }, "Unfinished uploads"),
+          h("strong", { class: "panel-title" }, t("Unfinished uploads")),
           " ",
           this.count,
         ),
@@ -126,7 +127,7 @@ export class PendingUploads {
         return;
       }
       if (!isSameFile(file, info)) {
-        message.textContent = "This isn't the same file: its name, size or modification time differs";
+        message.textContent = t("This isn't the same file: its name, size or modification time differs");
         return;
       }
       this.queue.resume(file, info, this.space);
@@ -145,14 +146,14 @@ export class PendingUploads {
         h(
           "span",
           { class: "pending-progress" },
-          `${formatSize(info.received)} of ${formatSize(info.size)} (${percent}%)`,
+          t("{done} of {total} ({percent}%)", { done: formatSize(info.received), total: formatSize(info.size), percent }),
         ),
       ),
-      h("button", { type: "button", class: "primary", onClick: () => picker.click() }, "Resume"),
+      h("button", { type: "button", class: "primary", onClick: () => picker.click() }, t("Resume")),
       h(
         "button",
         { type: "button", class: "link", onClick: () => this.cancel(info, message) },
-        "Cancel",
+        t("Cancel"),
       ),
       message,
       picker,
@@ -162,9 +163,9 @@ export class PendingUploads {
   private cancel(info: UploadInfo, message: HTMLElement): void {
     void (async () => {
       const confirmed = await confirmDialog({
-        title: "Cancel this upload?",
-        message: `The part of "${info.name}" already uploaded will be deleted.`,
-        confirmLabel: "Cancel upload",
+        title: t("Cancel this upload?"),
+        message: t("The part of \"{name}\" already uploaded will be deleted.", { name: info.name }),
+        confirmLabel: t("Cancel upload"),
         danger: true,
       });
       if (!confirmed) {
@@ -182,7 +183,7 @@ export class PendingUploads {
           this.refresh();
           return;
         }
-        message.textContent = error instanceof ApiError ? error.message : "Couldn't cancel the upload";
+        message.textContent = error instanceof ApiError ? error.message : t("Couldn't cancel the upload");
       }
     })();
   }
@@ -195,7 +196,7 @@ export class PendingUploads {
 
   private applyMinimized(): void {
     this.body.hidden = this.minimized;
-    const label = this.minimized ? "Show unfinished uploads" : "Minimize unfinished uploads";
+    const label = this.minimized ? t("Show unfinished uploads") : t("Minimize unfinished uploads");
     this.toggleButton.setAttribute("aria-expanded", String(!this.minimized));
     this.toggleButton.setAttribute("aria-label", label);
     this.toggleButton.title = label;

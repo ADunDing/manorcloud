@@ -4,6 +4,7 @@
 // 然後把整個頁面送到身分提供者。登入完成後，身分提供者把瀏覽器帶回伺服器，
 // 伺服器再跳轉回 ManorCloud：成功時網址中有 ?sso=linked（連結），失敗時有 ?sso_error=原因。
 
+import { t } from "./i18n.js";
 import { api } from "./api.js";
 
 /** 登入畫面需要的資訊（GET /api/auth/sso） */
@@ -76,22 +77,22 @@ export function takeSsoResult(): SsoResult {
 function ssoErrorMessage(code: string): string {
   switch (code) {
     case "expired":
-      return "The sign-in took too long or was started in another browser. Try again.";
+      return t("The sign-in took too long or was started in another browser. Try again.");
     case "cancelled":
-      return "Single sign-on was cancelled.";
+      return t("Single sign-on was cancelled.");
     case "no_account":
-      return "There's no ManorCloud account for you yet. Ask your administrator to create one.";
+      return t("There's no ManorCloud account for you yet. Ask your administrator to create one.");
     case "disabled":
-      return "This account is disabled. Contact your administrator.";
+      return t("This account is disabled. Contact your administrator.");
     case "not_configured":
-      return "Single sign-on isn't set up.";
+      return t("Single sign-on isn't set up.");
     case "identity_taken":
-      return "That account is already linked to another ManorCloud user.";
+      return t("That account is already linked to another ManorCloud user.");
     case "already_linked":
-      return "Your account is already linked.";
+      return t("Your account is already linked.");
     case "session_changed":
-      return "You were logged out before linking finished. Log in and try again.";
+      return t("You were logged out before linking finished. Log in and try again.");
     default:
-      return "Single sign-on didn't work. Try again, or contact your administrator.";
+      return t("Single sign-on didn't work. Try again, or contact your administrator.");
   }
 }

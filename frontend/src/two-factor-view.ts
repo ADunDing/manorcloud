@@ -7,6 +7,7 @@
 //
 // QR code 由伺服器算出點陣，這裡用 SVG 畫出來：不使用任何外部的 QR 服務，密鑰不會離開這台伺服器。
 
+import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
 
@@ -43,13 +44,13 @@ interface SetupOptions {
 export function renderTwoFactorSetup(container: HTMLElement, options: SetupOptions): void {
   const password = h("input", { type: "password", required: true, autocomplete: "current-password" });
   const errorBox = h("p", { class: "error", role: "alert" });
-  const next = h("button", { type: "submit", class: "primary" }, "Continue");
+  const next = h("button", { type: "submit", class: "primary" }, t("Continue"));
 
   const form = h(
     "form",
     { method: "post", class: "auth-form embedded" },
-    h("p", {}, "Enter your password to start. You'll need an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password."),
-    h("label", {}, "Current password", password),
+    h("p", {}, t("Enter your password to start. You'll need an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password.")),
+    h("label", {}, t("Current password"), password),
     errorBox,
     h("div", { class: "actions" }, next, cancelButton(options)),
   );
@@ -81,23 +82,23 @@ export function renderTwoFactorSetup(container: HTMLElement, options: SetupOptio
 function showScanStep(container: HTMLElement, setup: SetupResponse, options: SetupOptions): void {
   const code = codeInput();
   const errorBox = h("p", { class: "error", role: "alert" });
-  const turnOn = h("button", { type: "submit", class: "primary" }, "Turn on");
+  const turnOn = h("button", { type: "submit", class: "primary" }, t("Turn on"));
   // 手動輸入時每 4 個字元一組，比較不容易看錯
   const grouped = setup.secret.match(/.{1,4}/g)?.join(" ") ?? setup.secret;
 
   const form = h(
     "form",
     { method: "post", class: "auth-form embedded" },
-    h("p", {}, "1. Scan this QR code with your authenticator app."),
+    h("p", {}, t("1. Scan this QR code with your authenticator app.")),
     h("div", { class: "qr-box" }, qrSvg(setup.qr.size, setup.qr.modules)),
     h(
       "details",
       { class: "manual-secret" },
-      h("summary", {}, "Can't scan it? Enter this key instead"),
+      h("summary", {}, t("Can't scan it? Enter this key instead")),
       h("code", {}, grouped),
     ),
-    h("p", {}, "2. Enter the 6-digit code the app shows."),
-    h("label", {}, "Code", code),
+    h("p", {}, t("2. Enter the 6-digit code the app shows.")),
+    h("label", {}, t("Code"), code),
     errorBox,
     h("div", { class: "actions" }, turnOn, cancelButton(options)),
   );
@@ -135,24 +136,24 @@ export function showRecoveryCodes(
   onDone: () => void,
 ): void {
   const text = codes.join("\n");
-  const copy = h("button", { type: "button", class: "secondary" }, "Copy");
-  const download = h("button", { type: "button", class: "secondary" }, "Download");
-  const done = h("button", { type: "button", class: "primary" }, "Done");
+  const copy = h("button", { type: "button", class: "secondary" }, t("Copy"));
+  const download = h("button", { type: "button", class: "secondary" }, t("Download"));
+  const done = h("button", { type: "button", class: "primary" }, t("Done"));
   const status = h("p", { class: "hint", role: "status" });
 
   copy.addEventListener("click", () => {
     navigator.clipboard
       .writeText(text)
       .then(() => {
-        status.textContent = "Copied.";
+        status.textContent = t("Copied.");
       })
       .catch(() => {
         // http 的網址中瀏覽器不提供剪貼簿：改用下載
-        status.textContent = "Your browser can't copy here. Use Download instead.";
+        status.textContent = t("Your browser can't copy here. Use Download instead.");
       });
   });
   download.addEventListener("click", () => {
-    const file = new Blob([`ManorCloud recovery codes\n\n${text}\n`], { type: "text/plain" });
+    const file = new Blob([`${t("ManorCloud recovery codes")}\n\n${text}\n`], { type: "text/plain" });
     const url = URL.createObjectURL(file);
     const link = h("a", { href: url, download: "manorcloud-recovery-codes.txt", hidden: true });
     document.body.append(link);
@@ -166,11 +167,11 @@ export function showRecoveryCodes(
     h(
       "div",
       { class: "auth-form embedded" },
-      h("p", {}, h("strong", {}, "Two-factor authentication is on.")),
+      h("p", {}, h("strong", {}, t("Two-factor authentication is on."))),
       h(
         "p",
         {},
-        "Save these recovery codes somewhere safe. If you lose your phone, each code lets you log in once. They won't be shown again.",
+        t("Save these recovery codes somewhere safe. If you lose your phone, each code lets you log in once. They won't be shown again."),
       ),
       h("ol", { class: "recovery-codes" }, codes.map((c) => h("li", {}, h("code", {}, c)))),
       h("div", { class: "actions" }, copy, download, done),
@@ -203,7 +204,7 @@ function qrSvg(size: number, modules: string): SVGSVGElement {
   svg.setAttribute("viewBox", `0 0 ${total} ${total}`);
   svg.setAttribute("class", "qr");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "QR code for your authenticator app");
+  svg.setAttribute("aria-label", t("QR code for your authenticator app"));
   svg.setAttribute("shape-rendering", "crispEdges");
 
   const background = document.createElementNS(SVG_NS, "rect");
@@ -233,9 +234,9 @@ function cancelButton(options: SetupOptions): HTMLElement | null {
   if (onCancel === undefined) {
     return null;
   }
-  return h("button", { type: "button", class: "secondary", onClick: onCancel }, "Cancel");
+  return h("button", { type: "button", class: "secondary", onClick: onCancel }, t("Cancel"));
 }
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? error.message : "Something went wrong";
+  return error instanceof ApiError ? error.message : t("Something went wrong");
 }

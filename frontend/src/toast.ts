@@ -3,6 +3,7 @@
 // 同一時間只顯示一則：新的通知取代舊的。幾秒後自動消失；滑鼠停在上面時暫停計時，
 // 讓使用者來得及按 Undo。放在 document.body：畫面重新載入（renderBrowser）時不會跟著消失。
 
+import { t } from "./i18n.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
 
@@ -21,7 +22,7 @@ export function showToast(message: string, action?: ToastAction): void {
 
   const close = h(
     "button",
-    { type: "button", class: "toast-close", "aria-label": "Dismiss", title: "Dismiss" },
+    { type: "button", class: "toast-close", "aria-label": t("Dismiss"), title: t("Dismiss") },
     icon("close", 16),
   );
   const element = h(
