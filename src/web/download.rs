@@ -108,7 +108,9 @@ fn base_response(name: &str, etag: &str) -> Builder {
 
 /// 影音檔依副檔名回傳類型，其他一律是 application/octet-stream
 fn media_type(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase());
     match ext.as_deref() {
         Some("mp4" | "m4v") => "video/mp4",
         Some("mov") => "video/quicktime",
