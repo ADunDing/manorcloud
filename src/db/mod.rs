@@ -1,4 +1,5 @@
 pub mod session;
+pub mod shares;
 pub mod sso;
 pub mod storage;
 pub mod transfers;

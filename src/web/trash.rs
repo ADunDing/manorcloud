@@ -7,6 +7,9 @@
 //!
 //! 放進垃圾桶是 DELETE /api/files（見 spaces.rs）。永久刪除先刪檔案、再刪紀錄（見 db::trash）。
 
+use std::path::Path;
+use std::sync::Arc;
+
 use axum::{
     Json, Router,
     extract::{Path as UrlPath, State},
@@ -24,6 +27,7 @@ use super::{
 };
 use crate::{
     db::trash::{self as trash_db, TrashItem},
+    quota,
     space::Space,
     storage,
     tree::{self, OnConflict, RelPath},
@@ -143,8 +147,9 @@ async fn purge(pool: &SqlitePool, space: &Space, id: i64) -> Result<(), AppError
 
 /// DELETE /api/trash/{id}
 async fn delete_forever(
-    InSpace { space, .. }: InSpace,
+    InSpace { user, space }: InSpace,
     State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, AppError> {
     let place = space.trash;
@@ -152,18 +157,22 @@ async fn delete_forever(
         .await?
         .ok_or_else(not_in_trash)?;
     purge(&pool, &space, id).await?;
+    // 配額的用量包含垃圾桶：重新計算
+    quota::forget(&data_dir, user.id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/trash：清空
 async fn empty(
-    InSpace { space, .. }: InSpace,
+    InSpace { user, space }: InSpace,
     State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
 ) -> Result<StatusCode, AppError> {
     let place = space.trash;
     for item in trash_db::list(&pool, place).await? {
         purge(&pool, &space, item.id).await?;
     }
+    quota::forget(&data_dir, user.id);
     Ok(StatusCode::NO_CONTENT)
 }
 

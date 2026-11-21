@@ -2,6 +2,7 @@
 //! 路徑都是空間中的路徑，例如 `相片/2026/a.jpg`；空字串是空間的最上層。
 //!
 //!   GET    /api/files?path=                     資料夾的內容
+//!   GET    /api/search?path=&q=                 在資料夾（含子資料夾）中依名稱搜尋
 //!   POST   /api/files?path=&name=&on_conflict=  一般上傳（multipart，欄位名稱 file）
 //!   PATCH  /api/files                           改名，或搬到同一個空間中的另一個資料夾
 //!   DELETE /api/files?path=                     刪除：放進垃圾桶
@@ -17,7 +18,8 @@
 //! 所有檔案系統的操作都在背景執行緒進行（spawn_blocking），不會卡住其他請求。
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -37,7 +39,8 @@ use super::{
 };
 use crate::{
     db::{trash as trash_db, user as user_db},
-    space::Space,
+    quota::{self, QuotaError},
+    space::{Space, SpaceKey},
     storage::{self, USERS_DIR},
     tree::{self, Entry, OnConflict, RelPath},
 };
@@ -59,6 +62,7 @@ pub fn router(upload_limit: UploadLimit) -> Router<AppState> {
                 .delete(remove),
         )
         .route("/api/files/copy", post(copy))
+        .route("/api/search", get(search))
         .route("/api/files/content", get(download))
         .route("/api/archive", get(archive))
         .route("/api/folders", post(create_folder))
@@ -124,6 +128,28 @@ pub(super) fn io_error(e: io::Error) -> AppError {
             AppError::Conflict("That can't be moved across disks here. Copy it instead".to_string())
         }
         _ => AppError::internal(e),
+    }
+}
+
+/// 新增 `extra` 位元組之前確認配額（見 `crate::quota`）。只有一般使用者自己的 My files 有配額
+pub(super) async fn check_quota(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    user: &CurrentUser,
+    space: &Space,
+    extra: u64,
+) -> Result<(), AppError> {
+    if space.key != SpaceKey::Me {
+        return Ok(());
+    }
+    match quota::reserve(pool, data_dir, user.id, user.role == "admin", extra).await {
+        Ok(()) => Ok(()),
+        Err(QuotaError::Exceeded) => Err(AppError::InsufficientStorage(
+            "This would go over your storage limit. Delete some files and empty the trash, or ask your administrator for more space."
+                .to_string(),
+        )),
+        Err(QuotaError::Space(e)) => Err(AppError::internal(format!("{e:?}"))),
+        Err(QuotaError::Db(e)) => Err(AppError::internal(e)),
     }
 }
 
@@ -197,6 +223,79 @@ async fn list(
         read_only: space.check_write_in(&dir).err(),
         items,
     }))
+}
+
+// ==================== 搜尋 ====================
+
+/// 一次搜尋最多回傳幾個項目
+const SEARCH_LIMIT: usize = 500;
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    path: String,
+    q: String,
+}
+
+#[derive(Serialize)]
+struct FoundResponse {
+    /// 空間中的完整路徑
+    path: String,
+    #[serde(flatten)]
+    item: ItemResponse,
+}
+
+#[derive(Serialize)]
+struct SearchResponse {
+    items: Vec<FoundResponse>,
+    /// 還有更多結果沒有列出（超過上限）
+    more: bool,
+}
+
+/// GET /api/search?path=相片&q=旅行 2026：名稱包含每一個關鍵字的檔案與資料夾，上層的在前
+async fn search(
+    InSpace { user, space }: InSpace,
+    State(pool): State<SqlitePool>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, AppError> {
+    let dir = parse_path(&query.path)?;
+    let terms = tree::search_terms(&query.q);
+    if terms.is_empty() {
+        return Err(AppError::BadRequest(
+            "Enter something to search for".to_string(),
+        ));
+    }
+    let hidden = show_hidden(&pool, &user).await?;
+    let root = space.root.clone();
+    let abs = space.abs(&dir);
+    let filter_space = space.clone();
+    let filter_dir = dir.clone();
+    let (found, more) = blocking(move || {
+        let include = |parent: &RelPath, name: &str| {
+            (hidden || !tree::is_hidden_name(name))
+                && !filter_space.is_ignored(&filter_dir.join(parent), name)
+        };
+        tree::search(&root, &abs, &terms, &include, SEARCH_LIMIT)
+    })
+    .await?;
+    let items = found
+        .into_iter()
+        .map(|f| {
+            let path = dir.join(&f.path);
+            let parent = path.parent().unwrap_or_default();
+            FoundResponse {
+                item: ItemResponse {
+                    locked: space.is_locked(&parent, &f.entry.name),
+                    kind: if f.entry.is_dir { "folder" } else { "file" },
+                    size: (!f.entry.is_dir).then_some(f.entry.size),
+                    modified: f.entry.modified,
+                    name: f.entry.name,
+                },
+                path: path.display(),
+            }
+        })
+        .collect();
+    Ok(Json(SearchResponse { items, more }))
 }
 
 // ==================== 下載 ====================
@@ -371,7 +470,9 @@ struct CopyRequest {
 
 /// POST /api/files/copy：同名時自動改名（在原本的資料夾複製一份就是「名稱 (1)」）
 async fn copy(
-    InSpace { space, .. }: InSpace,
+    InSpace { user, space }: InSpace,
+    State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
     Json(req): Json<CopyRequest>,
 ) -> Result<(StatusCode, Json<NameResponse>), AppError> {
     let from = parse_path(&req.path)?;
@@ -379,6 +480,9 @@ async fn copy(
     let name = from.name().ok_or_else(item_not_found)?.to_string();
     space.check_write_in(&parent).map_err(denied)?;
     let name = check_name(&space, &parent, &name)?;
+    let (root, abs) = (space.root.clone(), space.abs(&from));
+    let size = blocking(move || Ok(tree::tree_size(&tree::resolve(&root, &abs, true)?))).await?;
+    check_quota(&pool, &data_dir, &user, &space, size).await?;
     let root = space.root.clone();
     let tmp = space.tmp_dir();
     let (abs_from, abs_parent) = (space.abs(&from), space.abs(&parent));
@@ -458,14 +562,24 @@ struct UploadResponse {
 /// POST /api/files?path=&name=&on_conflict=（multipart，第一個欄位必須是 file）。
 /// 一次送完；大檔案用分段上傳（uploads.rs），可以續傳
 async fn upload(
-    InSpace { space, .. }: InSpace,
+    InSpace { user, space }: InSpace,
+    State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
     State(UploadLimit(limit)): State<UploadLimit>,
     Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<UploadResponse>), AppError> {
     let dir = parse_path(&query.path)?;
     space.check_write_in(&dir).map_err(denied)?;
     let name = check_name(&space, &dir, &query.name)?;
+    // 一般上傳只用在小檔案：以請求的大小（略大於檔案）檢查配額
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    check_quota(&pool, &data_dir, &user, &space, declared).await?;
     let root = space.root.clone();
     let abs = space.abs(&dir);
     let target_dir: PathBuf = blocking(move || tree::resolve_dir(&root, &abs)).await?;
@@ -564,7 +678,24 @@ struct StorageResponse {
 }
 
 /// GET /api/storage：空間所在硬碟的總容量與可用空間，給畫面左側的容量顯示
-async fn storage_info(InSpace { space, .. }: InSpace) -> Result<Json<StorageResponse>, AppError> {
+async fn storage_info(
+    InSpace { user, space }: InSpace,
+    State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
+) -> Result<Json<StorageResponse>, AppError> {
+    // 有配額的一般使用者：顯示配額與用量，而不是整顆硬碟
+    if space.key == SpaceKey::Me
+        && user.role != "admin"
+        && let Some(limit) = user_db::quota(&pool, user.id).await?
+    {
+        let used = quota::usage(&pool, &data_dir, user.id)
+            .await
+            .map_err(|e| AppError::internal(format!("{e:?}")))?;
+        return Ok(Json(StorageResponse {
+            total_bytes: limit,
+            available_bytes: limit.saturating_sub(used),
+        }));
+    }
     let root = space.root.clone();
     let disk = blocking(move || storage::disk_space(&root)).await?;
     Ok(Json(StorageResponse {
@@ -784,5 +915,34 @@ mod tests {
                 "{path}: {status}"
             );
         }
+    }
+    #[sqlx::test]
+    async fn search_lists_matches_with_their_paths(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let home = t.home("carol");
+        std::fs::create_dir_all(home.join("相片/旅行")).unwrap();
+        std::fs::write(home.join("相片/旅行/Trip.jpg"), b"x").unwrap();
+        std::fs::write(home.join("trip.txt"), b"x").unwrap();
+        std::fs::write(home.join(".trip"), b"x").unwrap();
+
+        let (status, body) = t.json(Method::GET, "/api/search?q=TRIP", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let paths: Vec<&str> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["trip.txt", "相片/旅行/Trip.jpg"]);
+        assert_eq!(body["more"], false);
+
+        let (_, body) = t
+            .json(Method::GET, "/api/search?path=相片&q=trip", None)
+            .await;
+        assert_eq!(body["items"][0]["path"], "相片/旅行/Trip.jpg");
+        assert_eq!(body["items"][0]["kind"], "file");
+
+        let (status, _) = t.json(Method::GET, "/api/search?q=%20", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

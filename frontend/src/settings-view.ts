@@ -120,7 +120,7 @@ function renderAccount(
       panel,
       user,
       (updated) => {
-        showToast("Your account was updated");
+        showToast(t("Your account was updated"));
         onAccountChanged(updated);
       },
       { forced: false, embedded: true },
@@ -172,7 +172,7 @@ function renderTwoFactorSection(section: HTMLElement): void {
       turnOn.addEventListener("click", () =>
         renderTwoFactorSetup(body, {
           onDone: () => {
-            showToast("Two-factor authentication is on");
+            showToast(t("Two-factor authentication is on"));
             reload();
           },
           onCancel: reload,
@@ -223,7 +223,7 @@ function renderTwoFactorSection(section: HTMLElement): void {
             current_password: password.value,
             code: code.value,
           });
-          showToast("Two-factor authentication is off");
+          showToast(t("Two-factor authentication is off"));
           reload();
         },
       );
@@ -577,7 +577,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   copy.addEventListener("click", () => {
     void copyText(redirect).then((copied) => {
       if (copied) {
-        showToast("Redirect URI copied");
+        showToast(t("Redirect URI copied"));
       }
     });
   });
@@ -665,7 +665,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
           public_url: publicUrl.value.trim(),
           auto_create: autoCreate.checked,
         });
-        showToast("Single sign-on settings saved");
+        showToast(t("Single sign-on settings saved"));
         showSsoForm(panel, saved);
       } catch (error) {
         if (!isHandledGlobally(error)) {
@@ -717,7 +717,7 @@ function renderRequirement(section: HTMLElement): void {
       void (async () => {
         try {
           await api.put("/api/admin/two-factor", { require_two_factor: required.checked });
-          showToast("Saved");
+          showToast(t("Saved"));
           // 打開強制而自己還沒設定：這個請求就會收到 two_factor_setup_required，
           // 全域處理會切換到設定畫面
           await api.get("/api/admin/two-factor");

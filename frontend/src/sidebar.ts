@@ -9,16 +9,17 @@ import { h } from "./dom.js";
 import { formatSize } from "./format.js";
 import { icon } from "./icons.js";
 import { dropdown, menuItem, menuSeparator } from "./menu.js";
-import { filesHref, MY_FILES, TRASH_HREF, type Location } from "./router.js";
+import { filesHref, MY_FILES, SHARED_HREF, TRASH_HREF, type Location } from "./router.js";
 import { spaceOfLocation, withSpace, type Space } from "./space.js";
 import type { StorageInfo, StorageOverview } from "./types.js";
 
 /** 目前所在的區塊：側欄中對應的項目會反白。帳號設定、使用者管理等頁面不屬於任何一個 */
-type Section = "files" | "trash" | null;
+type Section = "files" | "trash" | "shared" | null;
 
 interface SidebarActions {
   readonly newFolder: () => void;
   readonly upload: () => void;
+  readonly uploadFolder: () => void;
 }
 
 /** 使用量超過這個比例時，容量條變成紅色 */
@@ -72,6 +73,7 @@ export function renderSidebar(
     menuItem({ label: t("New folder"), icon: "newFolder", onSelect: actions.newFolder }),
     menuSeparator(),
     menuItem({ label: t("Upload files"), icon: "upload", onSelect: actions.upload }),
+    menuItem({ label: t("Upload folder"), icon: "upload", onSelect: actions.uploadFolder }),
   );
   dropdown(newButton, newMenu);
 
@@ -127,6 +129,16 @@ export function renderSidebar(
         "ul",
         { class: "nav-list" },
         myFilesItem,
+        h(
+          "li",
+          {},
+          h(
+            "a",
+            { href: SHARED_HREF, class: "nav-link", "aria-current": section === "shared" ? "page" : null },
+            icon("link", 20),
+            t("Shared links"),
+          ),
+        ),
         trashItem,
       ),
     ),

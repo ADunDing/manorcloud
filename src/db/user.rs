@@ -481,6 +481,40 @@ pub async fn set_show_hidden(
         .map(|_| ())
 }
 
+/// 儲存空間配額（位元組）；None：不限制
+pub async fn quota(pool: &SqlitePool, user_id: i64) -> Result<Option<u64>, sqlx::Error> {
+    let value: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT quota_bytes FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(value
+        .flatten()
+        .map(|bytes| u64::try_from(bytes).unwrap_or(0)))
+}
+
+/// 所有人的配額：(使用者, 配額)
+pub async fn quotas(pool: &SqlitePool) -> Result<Vec<(i64, Option<i64>)>, sqlx::Error> {
+    sqlx::query_as("SELECT id, quota_bytes FROM users ORDER BY id")
+        .fetch_all(pool)
+        .await
+}
+
+/// 設定配額。回傳 false：沒有這個人
+pub async fn set_quota(
+    pool: &SqlitePool,
+    user_id: i64,
+    bytes: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let updated = sqlx::query("UPDATE users SET quota_bytes = ? WHERE id = ?")
+        .bind(bytes)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(updated == 1)
+}
+
 /// 把「至少一個管理員」trigger 的錯誤轉成 `LastAdmin`，其他錯誤原樣保留
 fn last_admin_or_db(e: sqlx::Error) -> AdminUpdateError {
     if e.as_database_error()

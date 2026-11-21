@@ -76,7 +76,7 @@ static ARGON2_PERMITS: Semaphore = Semaphore::const_new(2);
 /// 登入的錯誤：一般的 AppError，或因失敗次數過多被暫時鎖定。
 ///
 /// 429 需要額外的 Retry-After 標頭與剩餘秒數，所以不放進所有 handler 共用的 AppError。
-enum LoginError {
+pub(super) enum LoginError {
     App(AppError),
     Locked(Duration),
 }
@@ -147,7 +147,7 @@ fn retry_after_secs(wait: Duration) -> u64 {
 /// 讓猜測不被計數。正常使用者登入到一半關掉分頁，多算一次失敗也無傷大雅。
 ///
 /// 輸入 2FA 驗證碼也使用同一套名額：猜驗證碼與猜密碼一樣受到限制。
-struct LoginAttempt {
+pub(super) struct LoginAttempt {
     limits: LoginLimits,
     ip: IpAddr,
     username: String,
@@ -156,7 +156,11 @@ struct LoginAttempt {
 
 impl LoginAttempt {
     /// 佔用名額；被鎖定或名額已滿時回傳還要等多久
-    fn begin(limits: &LoginLimits, ip: IpAddr, username: &str) -> Result<Self, Duration> {
+    pub(super) fn begin(
+        limits: &LoginLimits,
+        ip: IpAddr,
+        username: &str,
+    ) -> Result<Self, Duration> {
         // 先存進 let：鎖在這一行結束時就釋放
         let allowed = limits.lock().begin(ip, username, Instant::now());
         allowed.map(|()| LoginAttempt {
@@ -173,7 +177,7 @@ impl LoginAttempt {
     }
 
     /// 登入成功：清除帳號的失敗計數
-    fn succeeded(&mut self) {
+    pub(super) fn succeeded(&mut self) {
         self.outcome = Outcome::Success;
     }
 }

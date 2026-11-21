@@ -45,6 +45,18 @@ export function renderAdmin(
   new AdminView(container, me, onSelfChanged).mount();
 }
 
+/** GET /api/admin/quotas 的一筆 */
+interface QuotaItem {
+  readonly user_id: number;
+  /** null：不限制 */
+  readonly limit_bytes: number | null;
+  /** 管理員沒有配額，是 null */
+  readonly used_bytes: number | null;
+}
+
+/** 配額以 GB 輸入：1024³ 位元組，與畫面上顯示的大小一致 */
+const GB = 1024 ** 3;
+
 class AdminView {
   /** 臨時密碼面板的位置。與列表分開：重新載入列表時，面板不會被清掉 */
   private readonly noticeSlot = h("div", {});
@@ -56,6 +68,8 @@ class AdminView {
   private twoFactor = new Set<number>();
   /** 儲存位置、每個人在哪裡、搬移的進度 */
   private storage: StorageOverview = { volumes: [], users: [], moves: [] };
+  /** 每個人的配額與用量 */
+  private quotas = new Map<number, QuotaItem>();
   /** 定時重新讀取搬移進度 */
   private pollTimer: number | undefined;
 
@@ -102,11 +116,13 @@ class AdminView {
       this.tableSlot.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
     }
     try {
-      const [users, twoFactor, storage] = await Promise.all([
+      const [users, twoFactor, storage, quotas] = await Promise.all([
         api.get<ManagedUser[]>("/api/admin/users"),
         api.get<{ enabled_user_ids: number[] }>("/api/admin/two-factor"),
         api.get<StorageOverview>("/api/admin/storage"),
+        api.get<QuotaItem[]>("/api/admin/quotas"),
       ]);
+      this.quotas = new Map(quotas.map((item) => [item.user_id, item]));
       this.twoFactor = new Set(twoFactor.enabled_user_ids);
       this.storage = storage;
       this.tableSlot.replaceChildren(
@@ -153,6 +169,7 @@ class AdminView {
           h("th", { scope: "col" }, t("Status")),
           h("th", { scope: "col" }, t("2FA")),
           h("th", { scope: "col" }, t("Storage")),
+          h("th", { scope: "col" }, t("Space used")),
           h("th", { scope: "col" }, t("Created")),
           h(
             "th",
@@ -204,9 +221,54 @@ class AdminView {
           : h("span", { class: "muted" }, t("Off")),
       ),
       h("td", {}, this.storageCell(user)),
+      h("td", { class: "nowrap" }, this.usageCell(user)),
       h("td", { class: "nowrap" }, formatUtcText(user.created_at)),
       h("td", { class: "actions-cell" }, this.rowMenu(user, isSelf)),
     );
+  }
+
+  /** 用量與配額。管理員沒有配額 */
+  private usageCell(user: ManagedUser): HTMLElement | string {
+    const quota = this.quotas.get(user.id);
+    if (quota === undefined || quota.used_bytes === null) {
+      return h("span", { class: "muted" }, "—");
+    }
+    if (quota.limit_bytes === null) {
+      return formatSize(quota.used_bytes);
+    }
+    const over = quota.used_bytes >= quota.limit_bytes;
+    return h(
+      "span",
+      { class: over ? "error-text" : null },
+      t("{used} of {limit}", { used: formatSize(quota.used_bytes), limit: formatSize(quota.limit_bytes) }),
+    );
+  }
+
+  /** 設定配額：以 GB 輸入，留空是不限制 */
+  private async setQuota(user: ManagedUser): Promise<void> {
+    const current = this.quotas.get(user.id)?.limit_bytes ?? null;
+    const saved = await nameDialog({
+      title: t("Storage limit for {name}", { name: user.username }),
+      message: t("The most space their files and trash can use, in GB. Leave it empty for no limit."),
+      confirmLabel: t("Save"),
+      initial: current === null ? "" : String(Math.round((current / GB) * 100) / 100),
+      submit: async (text) => {
+        const value = text.trim();
+        let bytes: number | null = null;
+        if (value !== "") {
+          const gb = Number(value.replace(",", "."));
+          if (!Number.isFinite(gb) || gb < 0) {
+            throw new ApiError(400, t("Enter a number of GB, or leave it empty for no limit"));
+          }
+          bytes = Math.round(gb * GB);
+        }
+        await api.put(`/api/admin/users/${user.id}/quota`, { limit_bytes: bytes });
+      },
+    });
+    if (saved) {
+      showToast(t("Storage limit saved"));
+      void this.loadTable();
+    }
   }
 
   /** 這個人的檔案在哪個位置；搬移中顯示進度，失敗時顯示原因 */
@@ -292,6 +354,13 @@ class AdminView {
 
     // 儲存位置：自己的也可以換
     entries.push(...this.storageEntries(user));
+    if (user.role !== "admin") {
+      entries.push({
+        label: t("Set storage limit…"),
+        icon: "disk",
+        onSelect: () => void this.setQuota(user),
+      });
+    }
 
     if (!isSelf) {
       entries.push("separator", {

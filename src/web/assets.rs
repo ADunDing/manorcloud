@@ -44,6 +44,8 @@ const CONTENT_SECURITY_POLICY: &str = concat!(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(root_handler))
+        // 分享連結的網頁：與首頁相同，前端依網址顯示分享的內容
+        .route("/s/{token}", get(root_handler))
         .route("/{*path}", get(asset_handler))
         .layer(middleware::from_fn(security_headers))
 }

@@ -22,6 +22,7 @@ export const MY_FILES: Location = { kind: "me" };
 type Route =
   | { readonly view: "files"; readonly location: Location; readonly path: readonly string[] }
   | { readonly view: "trash"; readonly location: Location }
+  | { readonly view: "shared" }
   | { readonly view: "settings"; readonly section: SettingsSection }
   | { readonly view: "admin"; readonly section: AdminSection };
 
@@ -29,6 +30,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "sign-in", "ap
 const ADMIN_SECTIONS: readonly AdminSection[] = ["users", "storage", "sign-in"];
 
 export const TRASH_HREF = "#/trash";
+export const SHARED_HREF = "#/shared";
 
 export function currentRoute(): Route {
   return parseRoute(window.location.hash);
@@ -53,6 +55,10 @@ function parseRoute(hash: string): Route {
         return { view: "files", location, path };
       }
     }
+  }
+
+  if (raw === "/shared") {
+    return { view: "shared" };
   }
 
   if (raw === "/trash") {

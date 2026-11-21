@@ -22,6 +22,13 @@ dependencies, and it runs comfortably on a Raspberry Pi.
   automatically when the connection drops, and can be resumed after reloading the page by
   choosing the same file again
 - **Resumable downloads** (HTTP range requests)
+- **Search** by name in a folder and its subfolders, or everywhere in your files
+- **Upload whole folders**, by dragging them in or with New → Upload folder; the folder
+  structure is kept
+- **Share links**: share a file or folder with people who don't have an account, optionally
+  with a password and an expiry date. Recipients can browse and download, nothing else
+- **Storage limits**: an administrator can limit how much space each member uses (their files
+  plus their trash)
 - **English and Traditional Chinese**: follows the browser's language, or choose one in
   Settings → Appearance
 - **Preview in the browser**: pictures, videos, music, PDFs and text files open full screen; use

@@ -37,20 +37,8 @@ export type IconName =
   | "key"
   | "shield"
   | "image"
-  | "type-image"
-  | "type-video"
-  | "type-audio"
-  | "type-pdf"
-  | "type-document"
-  | "type-spreadsheet"
-  | "type-presentation"
-  | "type-text"
-  | "type-code"
-  | "type-archive"
-  | "type-disc";
-
-/** 檔案的外框：各種檔案的圖示在裡面加上記號 */
-const FILE_OUTLINE = ["M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z", "M14 3v5h5"];
+  | "search"
+  | "link";
 
 /** 每個圖示的路徑，座標系為 24 × 24 */
 const PATHS: Readonly<Record<IconName, readonly string[]>> = {
@@ -114,23 +102,16 @@ const PATHS: Readonly<Record<IconName, readonly string[]>> = {
   ],
   key: ["M8 11a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M10.8 12.2L20 3", "M17 6l3 3", "M14.5 8.5l2 2"],
   shield: ["M12 3l7 3v6c0 4.5-3 7.5-7 9c-4-1.5-7-4.5-7-9V6z"],
+  link: [
+    "M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1",
+    "M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1",
+  ],
+  search: ["M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14z", "M20 20l-4-4"],
   image: [
     "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z",
     "M9 10.5a1.5 1.5 0 1 0 0-3a1.5 1.5 0 1 0 0 3z",
     "M20 15l-5-5L5 20",
   ],
-  // 檔案的種類（file-types.ts）
-  "type-image": [...FILE_OUTLINE, "M10 12.5a1 1 0 1 0 0-2a1 1 0 1 0 0 2z", "M16 18l-3-3-5 4"],
-  "type-video": [...FILE_OUTLINE, "M10 12v6l5-3z"],
-  "type-audio": [...FILE_OUTLINE, "M10.5 18.5a1.5 1.5 0 1 0 0-3a1.5 1.5 0 1 0 0 3z", "M12 17v-6l3 1"],
-  "type-pdf": [...FILE_OUTLINE, "M8.5 13h7", "M8.5 16h7", "M8.5 19h4"],
-  "type-document": [...FILE_OUTLINE, "M8.5 13h7", "M8.5 16h7", "M8.5 19h4"],
-  "type-spreadsheet": [...FILE_OUTLINE, "M8 12h8v7H8z", "M8 15.5h8", "M11.5 12v7"],
-  "type-presentation": [...FILE_OUTLINE, "M9.5 19v-3", "M12 19v-6", "M14.5 19v-4"],
-  "type-text": [...FILE_OUTLINE, "M8.5 13h7", "M8.5 16h5"],
-  "type-code": [...FILE_OUTLINE, "M10 13l-2 2.5 2 2.5", "M14 13l2 2.5-2 2.5"],
-  "type-archive": [...FILE_OUTLINE, "M10 4v1.5", "M10 7.5V9", "M10 11v1.5", "M9 14.5h2v3H9z"],
-  "type-disc": ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M12 10a2 2 0 1 0 0 4a2 2 0 1 0 0-4z"],
   disk: [
     "M5 4h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
     "M5 13h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z",

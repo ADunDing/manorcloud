@@ -37,7 +37,7 @@ use sqlx::SqlitePool;
 use super::{
     error::AppError,
     extract::{CurrentUser, InSpace, resolve_space},
-    spaces::{blocking, check_name, denied, parse_path},
+    spaces::{blocking, check_name, check_quota, denied, parse_path},
     state::{AppState, PendingUploadLimit, UploadLimit},
 };
 
@@ -320,6 +320,7 @@ async fn lock_part(
 async fn create(
     InSpace { user, space }: InSpace,
     State(pool): State<SqlitePool>,
+    State(data_dir): State<Arc<Path>>,
     State(UploadLimit(limit)): State<UploadLimit>,
     State(PendingUploadLimit(max_pending)): State<PendingUploadLimit>,
     Json(req): Json<CreateRequest>,
@@ -345,8 +346,9 @@ async fn create(
         return Err(UploadError::NameConflict);
     }
 
-    // 3. 那顆硬碟的空間：其他未完成的上傳還差的部分視為已被預留
+    // 3. 那顆硬碟的空間：其他未完成的上傳還差的部分視為已被預留；以及自己的配額
     ensure_space(&pool, &space.root, size).await?;
+    check_quota(&pool, &data_dir, &user, &space, size).await?;
 
     // 4. 先建立暫存檔，再寫入紀錄：有紀錄就一定有檔案
     let id = storage::generate_storage_key();

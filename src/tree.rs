@@ -329,6 +329,91 @@ pub fn tree_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+// ==================== 搜尋 ====================
+
+/// 搜尋到的一個項目
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    /// 從搜尋的資料夾算起的路徑
+    pub path: RelPath,
+    pub entry: Entry,
+}
+
+/// 把搜尋的文字拆成關鍵字：以空白分隔，統一成 NFC 與小寫
+pub fn search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(fold)
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+/// 比對用的名稱：NFC（macOS 傳來的檔名可能是 NFD）與小寫
+fn fold(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    text.nfc().collect::<String>().to_lowercase()
+}
+
+/// 在資料夾與它所有的子資料夾中，找名稱包含每一個關鍵字的檔案與資料夾。
+///
+/// 由淺到深走訪（上層的結果排在前面），找到 `limit` 個就停止，第二個回傳值表示還有更多。
+/// 略過符號連結、特殊檔案、ManorCloud 自己的資料夾，以及 `include(所在資料夾, 名稱)` 回傳
+/// false 的項目（資料夾被略過時，裡面的內容也不會搜尋）
+pub fn search(
+    root: &Path,
+    rel: &RelPath,
+    terms: &[String],
+    include: &dyn Fn(&RelPath, &str) -> bool,
+    limit: usize,
+) -> io::Result<(Vec<Found>, bool)> {
+    let start = resolve_dir(root, rel)?;
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(start, RelPath::default())]);
+    while let Some((dir, dir_rel)) = queue.pop_front() {
+        let Ok(items) = std::fs::read_dir(&dir) else {
+            // 讀不到的子資料夾（權限）跳過，不讓整個搜尋失敗
+            continue;
+        };
+        let mut items: Vec<_> = items.filter_map(Result::ok).collect();
+        items.sort_by_key(|item| item.file_name());
+        for item in items {
+            let Ok(name) = item.file_name().into_string() else {
+                continue;
+            };
+            if is_system_name(&name) || !include(&dir_rel, &name) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(item.path()) else {
+                continue;
+            };
+            let kind = meta.file_type();
+            if !(kind.is_file() || kind.is_dir()) {
+                continue;
+            }
+            let path = dir_rel.child(&name);
+            let folded = fold(&name);
+            if terms.iter().all(|term| folded.contains(term.as_str())) {
+                if found.len() == limit {
+                    return Ok((found, true));
+                }
+                found.push(Found {
+                    path: path.clone(),
+                    entry: Entry {
+                        name,
+                        is_dir: kind.is_dir(),
+                        size: if kind.is_dir() { 0 } else { meta.len() },
+                        modified: modified(&meta),
+                    },
+                });
+            }
+            if kind.is_dir() {
+                queue.push_back((item.path(), path));
+            }
+        }
+    }
+    Ok((found, false))
+}
+
 // ==================== 名稱 ====================
 
 /// 新的名稱：一般檔名的規則，另外不能用 ManorCloud 保留的名稱
@@ -914,5 +999,55 @@ mod tests {
         drop(upload);
 
         assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+    }
+    #[test]
+    fn search_finds_names_in_subfolders_shallow_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("相片/2026/旅行")).unwrap();
+        std::fs::write(root.join("Invoice 2026.pdf"), b"x").unwrap();
+        std::fs::write(root.join("相片/2026/旅行/invoice-2026-03.pdf"), b"x").unwrap();
+        std::fs::write(root.join("相片/2026/other.pdf"), b"x").unwrap();
+        std::fs::write(root.join(".invoice-2026"), b"x").unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("invoice-link-2026")).unwrap();
+        // macOS 的 NFD 檔名
+        std::fs::write(root.join("cafe\u{301} 2026"), b"x").unwrap();
+
+        let visible = |_: &RelPath, name: &str| !is_hidden_name(name);
+        let names =
+            |found: Vec<Found>| -> Vec<String> { found.iter().map(|f| f.path.display()).collect() };
+
+        let (found, more) = search(
+            root,
+            &RelPath::default(),
+            &search_terms("INVOICE  2026"),
+            &visible,
+            10,
+        )
+        .unwrap();
+        assert!(!more);
+        assert_eq!(
+            names(found),
+            ["Invoice 2026.pdf", "相片/2026/旅行/invoice-2026-03.pdf"]
+        );
+
+        let (found, _) = search(
+            root,
+            &RelPath::default(),
+            &search_terms("café"),
+            &visible,
+            10,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+
+        // 只在子資料夾中搜尋；路徑從那個資料夾算起
+        let photos = RelPath::parse("相片").unwrap();
+        let (found, _) = search(root, &photos, &search_terms("2026"), &visible, 10).unwrap();
+        assert_eq!(names(found), ["2026", "2026/旅行/invoice-2026-03.pdf"]);
+
+        let (found, more) =
+            search(root, &RelPath::default(), &search_terms("pdf"), &visible, 2).unwrap();
+        assert_eq!((found.len(), more), (2, true));
     }
 }

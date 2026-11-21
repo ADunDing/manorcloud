@@ -8,6 +8,7 @@ mod folders;
 mod gc;
 mod layout;
 mod mover;
+mod quota;
 mod rescue;
 mod space;
 mod storage;

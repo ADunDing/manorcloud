@@ -454,6 +454,63 @@ button.secondary {
     font-weight: 600;
 }
 
+/* ==================== 搜尋 ==================== */
+
+.search-box {
+    display: flex;
+    flex: 0 1 240px;
+    align-items: center;
+    gap: 6px;
+    min-width: 160px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--muted);
+}
+
+.search-box:focus-within {
+    border-color: var(--accent);
+}
+
+.search-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 34px;
+    padding: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+}
+
+.search-title {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.search-title .section-title {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.back-link {
+    font-size: 0.85rem;
+}
+
+button.trash-tab {
+    background: transparent;
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
 .toolbar {
     display: inline-flex;
     flex-wrap: wrap;
@@ -2157,4 +2214,116 @@ table.files .col-location {
         bottom: 16px;
         transform: none;
     }
+}
+
+/* 超過配額的用量 */
+.error-text {
+    color: var(--error);
+}
+
+/* ==================== 分享連結 ==================== */
+
+/* 看起來像按鈕的連結（下載） */
+a.button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0.45rem 0.9rem;
+    border-radius: 6px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+a.button.primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+}
+
+a.button.secondary {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-weight: normal;
+}
+
+.share-options {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 12px 0;
+}
+
+.share-options label.inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.expiry-row {
+    display: flex;
+    gap: 8px;
+}
+
+.expiry-row .expiry-amount {
+    flex: 0 0 6rem;
+}
+
+.share-link {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+}
+
+button.link.danger-link {
+    color: var(--error);
+}
+
+.share-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 14px;
+}
+
+/* 中文的欄位名稱與狀態不換行：表格太寬時左右捲動（.users-wrap） */
+table.users th,
+table.users td {
+    white-space: nowrap;
+}
+
+table.users.shares .name-cell {
+    max-width: 320px;
+}
+
+.share-page {
+    max-width: 960px;
+    margin: 0 auto;
+}
+
+.share-head {
+    margin: 8px 0 20px;
+}
+
+.share-title {
+    margin: 0 0 4px;
+    font-size: 1.4rem;
+    overflow-wrap: anywhere;
+}
+
+.share-file {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 40px 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+table.public-files a.name-cell {
+    color: var(--fg);
+    text-decoration: none;
+}
+
+table.public-files a.name-cell:hover .item-name {
+    text-decoration: underline;
 }

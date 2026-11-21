@@ -21,7 +21,7 @@ use sqlx::SqlitePool;
 use super::{
     error::{AppError, Forbidden},
     extract::CurrentUser,
-    spaces::blocking,
+    spaces::{blocking, check_quota},
     state::AppState,
 };
 use crate::{
@@ -176,6 +176,11 @@ async fn start(
         ),
         other => other,
     })?;
+
+    // 移動到同一個空間不會增加用量；其他情況檢查目的地的配額
+    if !(req.kind == "move" && plan.from.key == plan.to.key) {
+        check_quota(&pool, &data_dir, &user, &plan.to, total).await?;
+    }
 
     let created = transfers_db::create(
         &pool,

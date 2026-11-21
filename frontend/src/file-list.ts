@@ -66,6 +66,8 @@ interface FileListOptions {
   readonly draggable?: boolean;
   /** 有的話，在 Name 右邊多一欄「Original location」，顯示這個函式回傳的文字（垃圾桶） */
   readonly location?: (item: FileItem) => string;
+  /** location 那一欄的名稱，預設 Original location */
+  readonly locationLabel?: string;
   /** 時間那一欄的名稱，預設 Modified；垃圾桶是 Deleted */
   readonly timeLabel?: string;
   /** 沒有任何項目時顯示的文字 */
@@ -118,6 +120,8 @@ const CHECK_COLUMN = 44;
 const SORT_COLUMN = 120;
 /** 垃圾桶的 Original location 自動佔用空間，但至少保留這麼寬 */
 const MIN_LOCATION = 120;
+/** 有位置那一欄時，名稱最寬多少 */
+const LOCATION_NAME_WIDTH = 280;
 /** 滑鼠移動超過這個距離才算拖曳，否則是點擊 */
 const DRAG_THRESHOLD = 4;
 /** 用鍵盤調整欄寬時，每按一次的寬度 */
@@ -309,7 +313,7 @@ export class FileList {
           name,
           this.options.location === undefined
             ? null
-            : h("th", { scope: "col", class: "col-location" }, t("Original location")),
+            : h("th", { scope: "col", class: "col-location" }, this.options.locationLabel ?? t("Original location")),
           size,
           h(
             "th",
@@ -907,7 +911,12 @@ export class FileList {
   /** 寬度設定在標題儲存格上：固定版面的表格依第一列決定每一欄的寬度 */
   private applyColumns(): void {
     for (const [column, header] of this.headers) {
-      header.style.width = `${this.columns[column]}px`;
+      // 有位置那一欄時（垃圾桶、搜尋結果）名稱窄一點，留空間給位置與時間
+      const width =
+        column === "name" && this.options.location !== undefined
+          ? Math.min(this.columns.name, LOCATION_NAME_WIDTH)
+          : this.columns[column];
+      header.style.width = `${width}px`;
     }
   }
 }

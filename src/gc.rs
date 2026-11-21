@@ -24,8 +24,8 @@ use tokio::time::MissedTickBehavior;
 
 use crate::{
     db::{
-        session, storage as storage_db, transfers as transfers_db, trash as trash_db,
-        uploads as uploads_db,
+        session, shares as shares_db, storage as storage_db, transfers as transfers_db,
+        trash as trash_db, uploads as uploads_db,
     },
     storage, thumbs, tree,
 };
@@ -79,6 +79,8 @@ pub struct GcReport {
     /// 垃圾桶中沒有紀錄的檔案，以及沒有檔案的紀錄
     pub orphan_trash: u64,
     pub deleted_thumbs: u64,
+    /// 過期超過 30 天的分享連結（過期後先留著，分享者還看得到它已經過期）
+    pub expired_shares: u64,
     pub errors: u64,
 }
 
@@ -88,7 +90,7 @@ impl fmt::Display for GcReport {
         write!(
             f,
             "deleted {} temp items, {} upload part files; expired {} uploads, {} sessions; \
-             purged {} trash items, {} orphaned trash entries; {} thumbnails; {} errors",
+             purged {} trash items, {} orphaned trash entries; {} thumbnails; {} shares; {} errors",
             self.deleted_tmp,
             self.deleted_parts,
             self.expired_uploads,
@@ -96,6 +98,7 @@ impl fmt::Display for GcReport {
             self.purged_trash,
             self.orphan_trash,
             self.deleted_thumbs,
+            self.expired_shares,
             self.errors
         )
     }
@@ -149,6 +152,16 @@ pub async fn run_once(
         collect_thumbs(&root.path, now, policy, &mut report).await;
     }
     collect_sessions(pool, now, &mut report).await;
+    if let Some(now_secs) = unix_secs(now) {
+        let before = now_secs - policy.trash_retention.as_secs() as i64;
+        match shares_db::delete_expired(pool, before).await {
+            Ok(n) => report.expired_shares += n,
+            Err(e) => {
+                eprintln!("gc: cannot delete expired shares: {e}");
+                report.errors += 1;
+            }
+        }
+    }
     report
 }
 

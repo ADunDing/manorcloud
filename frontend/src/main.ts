@@ -3,8 +3,9 @@
 import { t } from "./i18n.js";
 import { api, ApiError, onPasswordChangeRequired, onUnauthorized } from "./api.js";
 import { renderChangeCredentials, renderLogin } from "./auth-view.js";
-import { chooseFiles, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
+import { chooseFiles, chooseUploadFolder, leaveBrowser, mountPanels, newFolder, renderBrowser } from "./browser-view.js";
 import { h } from "./dom.js";
+import { renderPublicShare, renderShares, shareToken } from "./shares.js";
 import { loadIconMap } from "./file-types.js";
 import { closeMenus, dropdown, menuItem, menuSeparator } from "./menu.js";
 import { adminHref, currentRoute, filesHref, MY_FILES, settingsHref } from "./router.js";
@@ -50,7 +51,7 @@ let screen: Screen = "login";
 /** 目前登入的使用者；未登入時為 null */
 let currentUser: User | null = null;
 
-const sidebarActions = { newFolder, upload: chooseFiles };
+const sidebarActions = { newFolder, upload: chooseFiles, uploadFolder: chooseUploadFolder };
 
 // ==================== 畫面 ====================
 
@@ -65,7 +66,7 @@ function showScreen(user: User): void {
   if (ssoResult.error !== null) {
     showToast(ssoResult.error);
   } else if (ssoResult.linked) {
-    showToast("Your account is now linked");
+    showToast(t("Your account is now linked"));
   }
   ssoResult = { error: null, linked: false };
   if (user.must_change_password) {
@@ -125,6 +126,12 @@ function showHome(user: User): void {
       leaveBrowser();
       renderSidebar(sidebar, sidebarActions, "trash", { ...admin, location: route.location });
       renderTrash(app, { ...admin, location: route.location });
+      return;
+
+    case "shared":
+      leaveBrowser();
+      renderSidebar(sidebar, sidebarActions, "shared", admin);
+      renderShares(app, isAdmin);
       return;
 
     case "settings":
@@ -279,7 +286,7 @@ async function refresh(): Promise<void> {
 // ==================== 全域事件 ====================
 
 // 操作途中遇到 401（Cookie 過期、在其他分頁登出、被停用）：回到登入畫面並說明原因
-onUnauthorized(() => showLoggedOut("Your session has expired. Log in again."));
+onUnauthorized(() => showLoggedOut(t("Your session has expired. Log in again.")));
 
 // 任何 API 回「必須先修改密碼」：重新讀取使用者，切換到修改畫面
 onPasswordChangeRequired(() => void refresh());
@@ -320,6 +327,14 @@ sidebar.addEventListener("click", (event) => {
 window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => event.preventDefault());
 
-// void：明確表示不等待這個 Promise（refresh 內部已處理所有錯誤）
-// 圖示的對應表先載入，第一次顯示列表時就有正確的圖示
-void loadIconMap().then(() => refresh());
+// 分享連結的網頁（/s/{代碼}）：給沒有帳號的人看，不需要登入，也不顯示側欄與帳號選單
+const token = shareToken();
+if (token !== null) {
+  brand.setAttribute("href", "/");
+  panels.hidden = true;
+  void loadIconMap().then(() => renderPublicShare(app, token));
+} else {
+  // void：明確表示不等待這個 Promise（refresh 內部已處理所有錯誤）
+  // 圖示的對應表先載入，第一次顯示列表時就有正確的圖示
+  void loadIconMap().then(() => refresh());
+}

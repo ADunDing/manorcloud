@@ -5,7 +5,9 @@ mod csrf;
 mod download;
 mod error;
 mod extract;
+mod quotas;
 mod range;
+mod shares;
 mod shutdown;
 mod spaces;
 mod sso;
@@ -89,6 +91,8 @@ fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
         .merge(uploads::router())
         .merge(transfers::router())
         .merge(thumbnails::router())
+        .merge(quotas::router())
+        .merge(shares::router())
         .merge(trash::router())
         .merge(sso::router())
         .merge(two_factor::router())
