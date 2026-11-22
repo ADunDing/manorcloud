@@ -74,6 +74,14 @@ A specific release:
 curl -fsSL https://github.com/ADunDing/manorcloud/releases/latest/download/install.sh | MANORCLOUD_VERSION=v0.1.0 sh
 ```
 
+Verify a download: every release file is signed by GitHub, proving it was built from this
+repository by GitHub Actions and not changed afterwards. With the
+[GitHub CLI](https://cli.github.com/) installed and logged in:
+
+```sh
+gh attestation verify manorcloud-linux-aarch64.tar.gz --repo ADunDing/manorcloud
+```
+
 Offline: download `manorcloud-linux-<arch>.tar.gz` from the
 [releases page](https://github.com/ADunDing/manorcloud/releases), copy it to the machine, then:
 

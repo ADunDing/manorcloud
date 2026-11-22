@@ -68,6 +68,10 @@ jobs:
     permissions:
       # 只有這個工作需要寫入權限：建立 Release
       contents: write
+      # 發布檔的簽章（GitHub 的 build provenance attestation）：
+      # id-token 向 GitHub 取得一次性的簽章憑證，attestations 存放簽章
+      id-token: write
+      attestations: write
     steps:
       # 取得 install.sh：它也要放上 Release，一行安裝從這裡下載它
       - uses: actions/checkout@v7
@@ -94,6 +98,14 @@ jobs:
           ls -l release
           (cd release && sha256sum * > SHA256SUMS)
           cat release/SHA256SUMS
+
+      # 簽章：證明每個檔案是這個 repo 的這個 commit 由 GitHub Actions 建置的。
+      # 與 SHA256SUMS 不同，簽章由 GitHub 簽發，換掉 Release 中的檔案的人無法偽造。
+      # 驗證：gh attestation verify <檔案> --repo <擁有者>/manorcloud（見 README）
+      - name: Sign the release files
+        uses: actions/attest@v4
+        with:
+          subject-path: "release/manorcloud-linux-*.tar.gz, release/install.sh"
 
       # 標籤中有連字號（v0.2.0-rc.1）的標記為預先發布版：
       # releases/latest 只指向正式版，一行安裝不會裝到測試版

@@ -155,8 +155,9 @@ download_package() {
     #
     # What it protects against: a download that is incomplete or damaged on the way.
     # What it does not: SHA256SUMS comes from the same release as the package, so someone able
-    # to replace the package there could replace SHA256SUMS too. That needs an independent
-    # signature, such as GitHub's build provenance attestations.
+    # to replace the package there could replace SHA256SUMS too. For that, every release file
+    # is also signed by GitHub (build provenance attestations); README explains how to verify
+    # them with the gh command. Not done here: it would make gh a requirement for installing.
     say "Verifying the checksum"
     grep -E "^[0-9a-f]{64}  $asset\$" "$WORK/SHA256SUMS" >"$WORK/expected" ||
         fail "$asset is not listed in SHA256SUMS"
