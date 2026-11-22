@@ -1461,7 +1461,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "getrandom 0.4.3",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "image",
  "libc",
  "mime_guess",
