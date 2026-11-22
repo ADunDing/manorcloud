@@ -24,6 +24,8 @@ pub struct SsoSettings {
     pub client_secret: String,
     pub public_url: String,
     pub auto_create: bool,
+    /// 身分提供者中的管理員群組：設定時，每次用 SSO 登入都依這個群組決定角色；空字串時不使用
+    pub admin_group: String,
 }
 
 impl fmt::Debug for SsoSettings {
@@ -36,6 +38,7 @@ impl fmt::Debug for SsoSettings {
             .field("client_secret", &"<redacted>")
             .field("public_url", &self.public_url)
             .field("auto_create", &self.auto_create)
+            .field("admin_group", &self.admin_group)
             .finish()
     }
 }
@@ -43,7 +46,8 @@ impl fmt::Debug for SsoSettings {
 /// 目前的設定；還沒有設定過時為 None
 pub async fn load_settings(pool: &SqlitePool) -> Result<Option<SsoSettings>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT enabled, display_name, issuer_url, client_id, client_secret, public_url, auto_create
+        "SELECT enabled, display_name, issuer_url, client_id, client_secret, public_url, auto_create,
+                admin_group
          FROM sso_settings WHERE id = 1",
     )
     .fetch_optional(pool)
@@ -54,8 +58,9 @@ pub async fn load_settings(pool: &SqlitePool) -> Result<Option<SsoSettings>, sql
 pub async fn save_settings(pool: &SqlitePool, settings: &SsoSettings) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO sso_settings
-             (id, enabled, display_name, issuer_url, client_id, client_secret, public_url, auto_create)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+             (id, enabled, display_name, issuer_url, client_id, client_secret, public_url, auto_create,
+              admin_group)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
              enabled = excluded.enabled,
              display_name = excluded.display_name,
@@ -64,6 +69,7 @@ pub async fn save_settings(pool: &SqlitePool, settings: &SsoSettings) -> Result<
              client_secret = excluded.client_secret,
              public_url = excluded.public_url,
              auto_create = excluded.auto_create,
+             admin_group = excluded.admin_group,
              updated_at = unixepoch()",
     )
     .bind(settings.enabled)
@@ -73,6 +79,7 @@ pub async fn save_settings(pool: &SqlitePool, settings: &SsoSettings) -> Result<
     .bind(&settings.client_secret)
     .bind(&settings.public_url)
     .bind(settings.auto_create)
+    .bind(&settings.admin_group)
     .execute(pool)
     .await?;
     Ok(())
@@ -325,6 +332,7 @@ mod tests {
             client_secret: "s3cret".to_string(),
             public_url: "https://cloud.example.com".to_string(),
             auto_create: false,
+            admin_group: String::new(),
         }
     }
 

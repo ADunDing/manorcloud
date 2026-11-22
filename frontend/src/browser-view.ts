@@ -21,11 +21,7 @@ import {
 import { icon, type IconName } from "./icons.js";
 import { isInside, toFileItems } from "./listing.js";
 import { openContextMenu, type MenuEntry } from "./menu.js";
-import {
-  chooseFolder,
-  type FolderChoice,
-  type FolderPlace,
-} from "./move-dialog.js";
+import { chooseFolder, type FolderChoice, type FolderPlace } from "./move-dialog.js";
 import { PendingUploads } from "./pending-uploads.js";
 import { isImage, openPreview, previewKind, thumbnailUrl } from "./preview.js";
 import {
@@ -40,20 +36,9 @@ import { shareDialog } from "./shares.js";
 import { sortControl, type SortControl } from "./sort-menu.js";
 import { filesHref, MY_FILES, type Location } from "./router.js";
 import { refreshStorage } from "./sidebar.js";
-import {
-  apiUrl,
-  joinPath,
-  spaceOf,
-  spaceOfLocation,
-  type Space,
-} from "./space.js";
+import { apiUrl, joinPath, spaceOf, spaceOfLocation, type Space } from "./space.js";
 import { showToast } from "./toast.js";
-import type {
-  FileItem,
-  Listing,
-  ServerConfig,
-  StorageOverview,
-} from "./types.js";
+import type { FileItem, Listing, ServerConfig, StorageOverview } from "./types.js";
 import { TransferPanel } from "./transfers.js";
 import { UploadQueue } from "./upload-queue.js";
 
@@ -104,27 +89,24 @@ interface Place {
 }
 
 /** 目前的檔案空間。同時只有一個資料夾畫面，下載與還原等輔助函式都以它為準 */
-let place: Place = {
-  location: MY_FILES,
-  space: null,
-  rootLabel: t("My files"),
-};
+let place: Place = { location: MY_FILES, space: null, rootLabel: t("My files") };
 /** 複製、移動時可以選擇的目的地：管理員是 My files 與每一顆硬碟，一般使用者只有 My files */
 let places: readonly FolderPlace[] = [place];
 /** space= 的值 → 顯示的名稱，給傳輸面板使用 */
 const spaceLabels = new Map<string, string>([["me", t("My files")]]);
 /** 上次的選項：畫面內部重新載入時沿用 */
-let lastOptions: BrowserOptions = {
-  location: MY_FILES,
-  path: [],
-  admin: false,
-  userId: 0,
-};
+let lastOptions: BrowserOptions = { location: MY_FILES, path: [], admin: false, userId: 0 };
 
-/** 上傳上限：第一次需要時向伺服器取得，之後重複使用 */
+/** 上傳上限：向伺服器取得後重複使用一分鐘（管理員可以隨時修改上限） */
 let limitPromise: Promise<number | null> | null = null;
+let limitFetchedAt = 0;
+const LIMIT_CACHE_MS = 60_000;
 
 function uploadLimit(): Promise<number | null> {
+  if (Date.now() - limitFetchedAt > LIMIT_CACHE_MS) {
+    limitPromise = null;
+    limitFetchedAt = Date.now();
+  }
   limitPromise ??= api
     .get<ServerConfig>("/api/config")
     .then((config) => config.max_upload_bytes)
@@ -140,12 +122,7 @@ function uploadLimit(): Promise<number | null> {
 const queue = new UploadQueue(
   (dir, space) => {
     refreshStorage();
-    if (
-      current !== null &&
-      joinPath(current.path) === dir &&
-      place.space === space &&
-      !current.isBusy()
-    ) {
+    if (current !== null && joinPath(current.path) === dir && place.space === space && !current.isBusy()) {
       reload();
     }
   },
@@ -184,19 +161,13 @@ export function mountPanels(container: HTMLElement): void {
   container.append(transfers.element, pending.element, queue.element);
   const observer = new ResizeObserver(() => {
     const height = container.hidden ? 0 : container.offsetHeight;
-    document.documentElement.style.setProperty(
-      "--panels-height",
-      `${height}px`,
-    );
+    document.documentElement.style.setProperty("--panels-height", `${height}px`);
   });
   observer.observe(container);
 }
 
 /** 在 container 中顯示資料夾的內容 */
-export function renderBrowser(
-  container: HTMLElement,
-  options: BrowserOptions,
-): void {
+export function renderBrowser(container: HTMLElement, options: BrowserOptions): void {
   lastOptions = options;
   current?.unmount();
   current = null;
@@ -232,19 +203,14 @@ export function chooseUploadFolder(): void {
   current?.chooseFolder();
 }
 
-async function load(
-  container: HTMLElement,
-  options: BrowserOptions,
-): Promise<void> {
+async function load(container: HTMLElement, options: BrowserOptions): Promise<void> {
   const token = ++navigation;
   container.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   const space = spaceOfLocation(options.location);
 
   try {
     const [listing, rootLabel, choices] = await Promise.all([
-      api.get<Listing>(
-        apiUrl("/api/files", space, { path: joinPath(options.path) }),
-      ),
+      api.get<Listing>(apiUrl("/api/files", space, { path: joinPath(options.path) })),
       rootLabelOf(options),
       placesFor(options),
     ]);
@@ -255,9 +221,7 @@ async function load(
     }
 
     place = { location: options.location, space, rootLabel };
-    places = choices.some((choice) => choice.space === space)
-      ? choices
-      : [place, ...choices];
+    places = choices.some((choice) => choice.space === space) ? choices : [place, ...choices];
     const view = new FolderView(container, options.path, listing);
     current = view;
     view.mount();
@@ -284,10 +248,7 @@ async function rootLabelOf(options: BrowserOptions): Promise<string> {
       return t("My files");
     case "disk": {
       const storage = await api.get<StorageOverview>("/api/admin/storage");
-      return (
-        storage.volumes.find((volume) => volume.id === location.disk)?.name ??
-        t("Disk")
-      );
+      return storage.volumes.find((volume) => volume.id === location.disk)?.name ?? t("Disk");
     }
   }
 }
@@ -300,9 +261,7 @@ async function placesFor(options: BrowserOptions): Promise<FolderPlace[]> {
   }
   try {
     const storage = await api.get<StorageOverview>("/api/admin/storage");
-    const home =
-      storage.users.find((user) => user.user_id === options.userId)
-        ?.volume_id ?? null;
+    const home = storage.users.find((user) => user.user_id === options.userId)?.volume_id ?? null;
     const disks = storage.volumes
       .filter((volume) => volume.id !== home)
       .map((volume) => ({ space: spaceOf(volume.id), rootLabel: volume.name }));
@@ -388,10 +347,7 @@ class FolderView {
     share: HTMLButtonElement;
     upload: HTMLButtonElement;
   };
-  private readonly viewButtons: {
-    list: HTMLButtonElement;
-    grid: HTMLButtonElement;
-  };
+  private readonly viewButtons: { list: HTMLButtonElement; grid: HTMLButtonElement };
 
   constructor(
     readonly container: HTMLElement,
@@ -411,49 +367,27 @@ class FolderView {
     this.picker = h("input", { type: "file", multiple: true, hidden: true });
     this.picker.addEventListener("change", () => {
       if (this.picker.files !== null && this.picker.files.length > 0) {
-        queue.add(
-          Array.from(this.picker.files),
-          joinPath(this.path),
-          place.space,
-        );
+        queue.add(Array.from(this.picker.files), joinPath(this.path), place.space);
       }
       // 清空，否則再次選擇同一個檔案時不會觸發 change
       this.picker.value = "";
     });
-    this.folderPicker = h("input", {
-      type: "file",
-      webkitdirectory: true,
-      multiple: true,
-      hidden: true,
-    });
+    this.folderPicker = h("input", { type: "file", webkitdirectory: true, multiple: true, hidden: true });
     this.folderPicker.addEventListener("change", () => {
       const files = Array.from(this.folderPicker.files ?? [])
         // webkitRelativePath：選擇的資料夾/子資料夾/檔名
-        .map((file) => ({
-          file,
-          dir: file.webkitRelativePath.split("/").slice(0, -1),
-        }))
+        .map((file) => ({ file, dir: file.webkitRelativePath.split("/").slice(0, -1) }))
         .filter((entry) => !isJunk(entry.file.name));
       this.folderPicker.value = "";
       void this.uploadTree(this.path, files, []);
     });
 
     this.buttons = {
-      rename: toolButton(t("Rename (F2)"), "rename", () =>
-        this.list.startRename(),
-      ),
+      rename: toolButton(t("Rename (F2)"), "rename", () => this.list.startRename()),
       copy: toolButton(t("Copy"), "copy", () => void this.copySelected()),
       move: toolButton(t("Move"), "move", () => void this.moveSelected()),
-      remove: toolButton(
-        t("Delete"),
-        "trash",
-        () => void this.deleteSelected(),
-      ),
-      download: toolButton(
-        t("Download"),
-        "download",
-        () => void this.downloadSelected(),
-      ),
+      remove: toolButton(t("Delete"), "trash", () => void this.deleteSelected()),
+      download: toolButton(t("Download"), "download", () => void this.downloadSelected()),
       share: toolButton(t("Share"), "link", () => this.shareSelected()),
       upload: toolButton(t("Upload files"), "upload", () => this.chooseFiles()),
     };
@@ -470,13 +404,7 @@ class FolderView {
         "div",
         { class: "drop-label" },
         icon("upload", 22),
-        h(
-          "span",
-          {},
-          tNodes("Drop files to upload to {folder}", {
-            folder: this.overlayTarget,
-          }),
-        ),
+        h("span", {}, tNodes("Drop files to upload to {folder}", { folder: this.overlayTarget })),
       ),
     );
 
@@ -490,35 +418,24 @@ class FolderView {
   }
 
   mount(): void {
-    const tools =
-      this.readOnly === null
-        ? [
-            this.buttons.rename,
-            this.buttons.copy,
-            this.buttons.move,
-            this.buttons.remove,
-            this.buttons.download,
-            this.buttons.share,
-            this.buttons.upload,
-          ]
-        : [this.buttons.copy, this.buttons.download];
+    const tools = this.readOnly === null
+      ? [
+          this.buttons.rename,
+          this.buttons.copy,
+          this.buttons.move,
+          this.buttons.remove,
+          this.buttons.download,
+          this.buttons.share,
+          this.buttons.upload,
+        ]
+      : [this.buttons.copy, this.buttons.download];
     this.container.replaceChildren(
       h(
         "div",
         { class: "folder-header" },
         breadcrumbs(this.path),
-        searchBox("", (query) =>
-          showSearch(this.container, this.path, query, this.path.length === 0),
-        ),
-        h(
-          "div",
-          {
-            class: "toolbar",
-            role: "toolbar",
-            "aria-label": t("File actions"),
-          },
-          tools,
-        ),
+        searchBox("", (query) => showSearch(this.container, this.path, query, this.path.length === 0)),
+        h("div", { class: "toolbar", role: "toolbar", "aria-label": t("File actions") }, tools),
         h(
           "div",
           { class: "view-switch", role: "group", "aria-label": t("View") },
@@ -551,13 +468,9 @@ class FolderView {
     this.bindKeys();
     this.bindDrop();
     // 框選可以從內容區的任何空白處開始，不只是列表裡面
-    this.container.addEventListener(
-      "mousedown",
-      (event) => this.list.startMarquee(event),
-      {
-        signal: this.controller.signal,
-      },
-    );
+    this.container.addEventListener("mousedown", (event) => this.list.startMarquee(event), {
+      signal: this.controller.signal,
+    });
   }
 
   unmount(): void {
@@ -671,9 +584,7 @@ class FolderView {
       sortControl: this.sorter.element,
       pinned: this.pinned,
       thumbnail: (item) =>
-        isImage(item)
-          ? thumbnailUrl(place.space, this.itemPath(item), item, "small")
-          : null,
+        isImage(item) ? thumbnailUrl(place.space, this.itemPath(item), item, "small") : null,
       draggable: this.readOnly === null,
       ...(this.readOnly === null
         ? {}
@@ -719,14 +630,8 @@ class FolderView {
   }
 
   private updateViewButtons(): void {
-    this.viewButtons.list.setAttribute(
-      "aria-pressed",
-      String(this.view === "list"),
-    );
-    this.viewButtons.grid.setAttribute(
-      "aria-pressed",
-      String(this.view === "grid"),
-    );
+    this.viewButtons.list.setAttribute("aria-pressed", String(this.view === "list"));
+    this.viewButtons.grid.setAttribute("aria-pressed", String(this.view === "grid"));
   }
 
   /** 依選取的數量啟用或停用工具列的按鈕 */
@@ -745,7 +650,7 @@ class FolderView {
   private shareSelected(): void {
     const [item] = this.list.selectedItems();
     if (item !== undefined) {
-      shareDialog(place.space, this.itemPath(item), item.name);
+      shareDialog(place.space, this.itemPath(item), item.name, item.kind);
     }
   }
 
@@ -755,10 +660,7 @@ class FolderView {
 
   private open(item: FileItem): void {
     if (item.kind === "folder") {
-      window.location.hash = filesHref(place.location, [
-        ...this.path,
-        item.name,
-      ]);
+      window.location.hash = filesHref(place.location, [...this.path, item.name]);
     } else if (previewKind(item) !== null) {
       this.preview(item);
     } else {
@@ -772,9 +674,7 @@ class FolderView {
       .filter((file) => previewKind(file) !== null)
       .map((file) => ({ item: file, path: this.itemPath(file) }));
     const start = files.findIndex((entry) => entry.item.name === item.name);
-    openPreview(place.space, files, start, (entry) =>
-      download(entry.path, entry.item.name),
-    );
+    openPreview(place.space, files, start, (entry) => download(entry.path, entry.item.name));
   }
 
   // ---------- 右鍵選單 ----------
@@ -782,23 +682,14 @@ class FolderView {
   private showContextMenu(x: number, y: number): void {
     const selected = this.list.selectedItems();
     const single = selected.length === 1 ? selected[0] : undefined;
-    const title =
-      single?.name ?? t("{count} items selected", { count: selected.length });
+    const title = single?.name ?? t("{count} items selected", { count: selected.length });
     const writable = this.readOnly === null;
 
     const entries: (MenuEntry | "separator")[] = [];
     if (single?.kind === "folder") {
-      entries.push({
-        label: t("Open"),
-        icon: "folder",
-        onSelect: () => this.open(single),
-      });
+      entries.push({ label: t("Open"), icon: "folder", onSelect: () => this.open(single) });
     } else if (single !== undefined && previewKind(single) !== null) {
-      entries.push({
-        label: t("Preview"),
-        icon: "image",
-        onSelect: () => this.preview(single),
-      });
+      entries.push({ label: t("Preview"), icon: "image", onSelect: () => this.preview(single) });
     }
     if (single !== undefined && writable) {
       entries.push({
@@ -808,17 +699,9 @@ class FolderView {
         onSelect: () => this.list.startRename(single),
       });
     }
-    entries.push({
-      label: t("Copy…"),
-      icon: "copy",
-      onSelect: () => void this.copySelected(),
-    });
+    entries.push({ label: t("Copy…"), icon: "copy", onSelect: () => void this.copySelected() });
     if (writable) {
-      entries.push({
-        label: t("Move…"),
-        icon: "move",
-        onSelect: () => void this.moveSelected(),
-      });
+      entries.push({ label: t("Move…"), icon: "move", onSelect: () => void this.moveSelected() });
     }
     entries.push({
       label: t("Download"),
@@ -826,11 +709,7 @@ class FolderView {
       onSelect: () => void this.downloadSelected(),
     });
     if (single !== undefined && writable) {
-      entries.push({
-        label: t("Share…"),
-        icon: "link",
-        onSelect: () => this.shareSelected(),
-      });
+      entries.push({ label: t("Share…"), icon: "link", onSelect: () => this.shareSelected() });
     }
     if (writable) {
       entries.push("separator", {
@@ -849,10 +728,7 @@ class FolderView {
   private async rename(item: FileItem, name: string): Promise<void> {
     this.errorBox.textContent = "";
     try {
-      await api.patch(apiUrl("/api/files", place.space), {
-        path: this.itemPath(item),
-        name,
-      });
+      await api.patch(apiUrl("/api/files", place.space), { path: this.itemPath(item), name });
     } catch (error) {
       if (!isHandledGlobally(error)) {
         this.errorBox.textContent = messageOf(error);
@@ -890,10 +766,7 @@ class FolderView {
       downloadArchive(this.path, selected);
     } else if (choice === "separate") {
       selected.forEach((item, index) => {
-        window.setTimeout(
-          () => download(this.itemPath(item), item.name),
-          index * 400,
-        );
+        window.setTimeout(() => download(this.itemPath(item), item.name), index * 400);
       });
     }
   }
@@ -911,9 +784,7 @@ class FolderView {
       return;
     }
     const title =
-      selected.length === 1
-        ? t('Copy "{name}"', { name: selected[0]?.name ?? "" })
-        : t("Copy {count} items", { count: selected.length });
+      selected.length === 1 ? t("Copy \"{name}\"", { name: selected[0]?.name ?? "" }) : t("Copy {count} items", { count: selected.length });
     const choice = await chooseFolder(
       title,
       t("Copy here"),
@@ -930,14 +801,11 @@ class FolderView {
       return;
     }
     // 複製到同一個資料夾也可以：伺服器自動改名為「名稱 (1)」
-    await this.each(
-      selected,
-      (done, total) => t("Copied {done} of {total} items.", { done, total }),
-      (item) =>
-        api.post(apiUrl("/api/files/copy", place.space), {
-          path: this.itemPath(item),
-          parent: joinPath(choice.path),
-        }),
+    await this.each(selected, (done, total) => t("Copied {done} of {total} items.", { done, total }), (item) =>
+      api.post(apiUrl("/api/files/copy", place.space), {
+        path: this.itemPath(item),
+        parent: joinPath(choice.path),
+      }),
     );
   }
 
@@ -952,28 +820,21 @@ class FolderView {
       return;
     }
     const trashed: number[] = [];
-    await this.each(
-      selected,
-      (done, total) => t("Deleted {done} of {total} items.", { done, total }),
-      async (item) => {
-        const result = await api.delete<{ trash_id: number }>(
-          apiUrl("/api/files", place.space, { path: this.itemPath(item) }),
-        );
-        trashed.push(result.trash_id);
-      },
-    );
+    await this.each(selected, (done, total) => t("Deleted {done} of {total} items.", { done, total }), async (item) => {
+      const result = await api.delete<{ trash_id: number }>(
+        apiUrl("/api/files", place.space, { path: this.itemPath(item) }),
+      );
+      trashed.push(result.trash_id);
+    });
 
     if (trashed.length === 0) {
       return;
     }
     const message =
       trashed.length === 1
-        ? t('"{name}" moved to trash', { name: first.name })
+        ? t("\"{name}\" moved to trash", { name: first.name })
         : t("{count} items moved to trash", { count: trashed.length });
-    showToast(message, {
-      label: t("Undo"),
-      onClick: () => void restoreItems(trashed),
-    });
+    showToast(message, { label: t("Undo"), onClick: () => void restoreItems(trashed) });
   }
 
   private async moveSelected(): Promise<void> {
@@ -982,9 +843,7 @@ class FolderView {
       return;
     }
     const title =
-      selected.length === 1
-        ? t('Move "{name}"', { name: selected[0]?.name ?? "" })
-        : t("Move {count} items", { count: selected.length });
+      selected.length === 1 ? t("Move \"{name}\"", { name: selected[0]?.name ?? "" }) : t("Move {count} items", { count: selected.length });
     const choice = await chooseFolder(
       title,
       t("Move here"),
@@ -1034,36 +893,26 @@ class FolderView {
       }
       return;
     }
-    const params = {
-      name: items[0]?.name ?? "",
-      count: items.length,
-      target: choice.place.rootLabel,
-    };
+    const params = { name: items[0]?.name ?? "", count: items.length, target: choice.place.rootLabel };
     showToast(
       kind === "move"
         ? items.length === 1
-          ? t('Moving "{name}" to {target}', params)
+          ? t("Moving \"{name}\" to {target}", params)
           : t("Moving {count} items to {target}", params)
         : items.length === 1
-          ? t('Copying "{name}" to {target}', params)
+          ? t("Copying \"{name}\" to {target}", params)
           : t("Copying {count} items to {target}", params),
     );
     transfers.refresh();
   }
 
   /** 把這些項目搬到 target */
-  private async moveTo(
-    items: readonly FileItem[],
-    target: readonly string[],
-  ): Promise<void> {
-    await this.each(
-      items,
-      (done, total) => t("Moved {done} of {total} items.", { done, total }),
-      (item) =>
-        api.patch(apiUrl("/api/files", place.space), {
-          path: this.itemPath(item),
-          parent: joinPath(target),
-        }),
+  private async moveTo(items: readonly FileItem[], target: readonly string[]): Promise<void> {
+    await this.each(items, (done, total) => t("Moved {done} of {total} items.", { done, total }), (item) =>
+      api.patch(apiUrl("/api/files", place.space), {
+        path: this.itemPath(item),
+        parent: joinPath(target),
+      }),
     );
   }
 
@@ -1159,9 +1008,7 @@ class FolderView {
       },
       { signal },
     );
-    zone.addEventListener("dragover", (event) => this.dragOver(event), {
-      signal,
-    });
+    zone.addEventListener("dragover", (event) => this.dragOver(event), { signal });
     zone.addEventListener(
       "dragleave",
       () => {
@@ -1216,11 +1063,7 @@ class FolderView {
     this.resetDrag();
 
     if (internal) {
-      if (
-        target !== null &&
-        dragging.length > 0 &&
-        this.canMoveTo(target.path)
-      ) {
+      if (target !== null && dragging.length > 0 && this.canMoveTo(target.path)) {
         void this.moveTo(dragging, target.path);
       }
       return;
@@ -1240,8 +1083,7 @@ class FolderView {
       return false;
     }
     return !dragging.some(
-      (item) =>
-        item.kind === "folder" && isInside(target, [...this.path, item.name]),
+      (item) => item.kind === "folder" && isInside(target, [...this.path, item.name]),
     );
   }
 
@@ -1264,9 +1106,7 @@ class FolderView {
     if (up !== undefined) {
       return { element, path: this.path.slice(0, Number(up)), name };
     }
-    const item = this.items.find(
-      (entry) => String(entry.id) === raw && entry.kind === "folder",
-    );
+    const item = this.items.find((entry) => String(entry.id) === raw && entry.kind === "folder");
     return item === undefined
       ? null
       : { element, path: [...this.path, item.name], name: item.name };
@@ -1329,9 +1169,7 @@ class FolderView {
             await readTree(entry, [], tree, emptyDirs);
           }
         } catch {
-          this.errorBox.textContent = t(
-            "Couldn't read the folder. Try choosing it with New → Upload folder.",
-          );
+          this.errorBox.textContent = t("Couldn't read the folder. Try choosing it with New → Upload folder.");
           return;
         }
         await this.uploadTree(folder, tree, emptyDirs);
@@ -1367,11 +1205,7 @@ interface SearchResponse {
  * 搜尋框：按 Enter 搜尋。onClear：清空搜尋框（刪掉文字、按 ×、或送出空白）時呼叫，
  * 搜尋結果畫面用它回到原本的資料夾
  */
-function searchBox(
-  value: string,
-  onSearch: (query: string) => void,
-  onClear?: () => void,
-): HTMLElement {
+function searchBox(value: string, onSearch: (query: string) => void, onClear?: () => void): HTMLElement {
   const input = h("input", {
     type: "search",
     class: "search-input",
@@ -1406,12 +1240,7 @@ function searchBox(
 }
 
 /** 顯示搜尋結果。all：搜尋整個空間；否則只在 folder 與它的子資料夾中 */
-function showSearch(
-  container: HTMLElement,
-  folder: readonly string[],
-  query: string,
-  all: boolean,
-): void {
+function showSearch(container: HTMLElement, folder: readonly string[], query: string, all: boolean): void {
   current?.unmount();
   const view = new SearchView(container, folder, query, all);
   current = view;
@@ -1420,11 +1249,7 @@ function showSearch(
 
 class SearchView implements View {
   private readonly errorBox = h("p", { class: "error", role: "alert" });
-  private readonly body = h(
-    "div",
-    { class: "search-body" },
-    h("p", { class: "muted" }, t("Searching…")),
-  );
+  private readonly body = h("div", { class: "search-body" }, h("p", { class: "muted" }, t("Searching…")));
   private readonly controller = new AbortController();
   /** 列表中每個項目的完整路徑（以 FileItem 的 id 對應） */
   private paths = new Map<number, string>();
@@ -1438,11 +1263,7 @@ class SearchView implements View {
   private token = 0;
   private view: ViewMode = loadView();
   /** 上傳到開始搜尋的資料夾 */
-  private readonly picker = h("input", {
-    type: "file",
-    multiple: true,
-    hidden: true,
-  });
+  private readonly picker = h("input", { type: "file", multiple: true, hidden: true });
   /** 工具列與資料夾畫面相同 */
   private readonly buttons: {
     rename: HTMLButtonElement;
@@ -1453,10 +1274,7 @@ class SearchView implements View {
     share: HTMLButtonElement;
     upload: HTMLButtonElement;
   };
-  private readonly viewButtons: {
-    list: HTMLButtonElement;
-    grid: HTMLButtonElement;
-  };
+  private readonly viewButtons: { list: HTMLButtonElement; grid: HTMLButtonElement };
 
   constructor(
     readonly container: HTMLElement,
@@ -1471,25 +1289,13 @@ class SearchView implements View {
       this.sorter.update(sort);
     });
     this.buttons = {
-      rename: toolButton(t("Rename (F2)"), "rename", () =>
-        this.list?.startRename(),
-      ),
+      rename: toolButton(t("Rename (F2)"), "rename", () => this.list?.startRename()),
       copy: toolButton(t("Copy"), "copy", () => void this.copyOrMove("copy")),
       move: toolButton(t("Move"), "move", () => void this.copyOrMove("move")),
-      remove: toolButton(
-        t("Delete"),
-        "trash",
-        () => void this.deleteSelected(),
-      ),
-      download: toolButton(
-        t("Download"),
-        "download",
-        () => void this.downloadSelected(),
-      ),
+      remove: toolButton(t("Delete"), "trash", () => void this.deleteSelected()),
+      download: toolButton(t("Download"), "download", () => void this.downloadSelected()),
       share: toolButton(t("Share"), "link", () => this.shareSelected()),
-      upload: toolButton(t("Upload files"), "upload", () =>
-        this.picker.click(),
-      ),
+      upload: toolButton(t("Upload files"), "upload", () => this.picker.click()),
     };
     this.viewButtons = {
       list: viewButton(t("List view"), "list", () => this.setView("list")),
@@ -1498,11 +1304,7 @@ class SearchView implements View {
     // 上傳到開始搜尋的資料夾，然後回到那個資料夾看結果
     this.picker.addEventListener("change", () => {
       if (this.picker.files !== null && this.picker.files.length > 0) {
-        queue.add(
-          Array.from(this.picker.files),
-          joinPath(this.path),
-          place.space,
-        );
+        queue.add(Array.from(this.picker.files), joinPath(this.path), place.space);
         this.backToFolder();
       }
       this.picker.value = "";
@@ -1522,14 +1324,8 @@ class SearchView implements View {
   }
 
   private updateViewButtons(): void {
-    this.viewButtons.list.setAttribute(
-      "aria-pressed",
-      String(this.view === "list"),
-    );
-    this.viewButtons.grid.setAttribute(
-      "aria-pressed",
-      String(this.view === "grid"),
-    );
+    this.viewButtons.list.setAttribute("aria-pressed", String(this.view === "list"));
+    this.viewButtons.grid.setAttribute("aria-pressed", String(this.view === "grid"));
   }
 
   /** 開始搜尋的資料夾 */
@@ -1545,14 +1341,8 @@ class SearchView implements View {
             h(
               "nav",
               { class: "trash-tabs", "aria-label": t("Where to search") },
-              this.scopeTab(
-                t('In "{folder}"', { folder: this.folderLabel() }),
-                false,
-              ),
-              this.scopeTab(
-                t("Everywhere in {place}", { place: place.rootLabel }),
-                true,
-              ),
+              this.scopeTab(t("In \"{folder}\"", { folder: this.folderLabel() }), false),
+              this.scopeTab(t("Everywhere in {place}", { place: place.rootLabel }), true),
             ),
           ];
     this.container.replaceChildren(
@@ -1574,11 +1364,7 @@ class SearchView implements View {
             },
             t("Back to {folder}", { folder: this.folderLabel() }),
           ),
-          h(
-            "h2",
-            { class: "section-title" },
-            t('Results for "{query}"', { query: this.query }),
-          ),
+          h("h2", { class: "section-title" }, t("Results for \"{query}\"", { query: this.query })),
         ),
         searchBox(
           this.query,
@@ -1587,11 +1373,7 @@ class SearchView implements View {
         ),
         h(
           "div",
-          {
-            class: "toolbar",
-            role: "toolbar",
-            "aria-label": t("File actions"),
-          },
+          { class: "toolbar", role: "toolbar", "aria-label": t("File actions") },
           this.buttons.rename,
           this.buttons.copy,
           this.buttons.move,
@@ -1617,18 +1399,10 @@ class SearchView implements View {
     window.addEventListener(
       "keydown",
       (event) => {
-        if (
-          event.defaultPrevented ||
-          isTyping(event.target) ||
-          dialogOpen() ||
-          this.list === null
-        ) {
+        if (event.defaultPrevented || isTyping(event.target) || dialogOpen() || this.list === null) {
           return;
         }
-        if (
-          (event.metaKey || event.ctrlKey) &&
-          event.key.toLowerCase() === "a"
-        ) {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
           event.preventDefault();
           this.list.selectAll();
         } else if (event.key === "Escape") {
@@ -1696,10 +1470,7 @@ class SearchView implements View {
     let response: SearchResponse;
     try {
       response = await api.get<SearchResponse>(
-        apiUrl("/api/search", place.space, {
-          path: this.all ? "" : joinPath(this.path),
-          q: this.query,
-        }),
+        apiUrl("/api/search", place.space, { path: this.all ? "" : joinPath(this.path), q: this.query }),
       );
     } catch (error) {
       if (token === this.token && !isHandledGlobally(error)) {
@@ -1713,12 +1484,7 @@ class SearchView implements View {
     }
     const visible = response.items.filter((item) => !item.locked);
     this.results = toFileItems(visible);
-    this.paths = new Map(
-      this.results.map((item, index) => [
-        item.id,
-        visible[index]?.path ?? item.name,
-      ]),
-    );
+    this.paths = new Map(this.results.map((item, index) => [item.id, visible[index]?.path ?? item.name]));
     this.more = response.more;
     this.render();
   }
@@ -1745,14 +1511,9 @@ class SearchView implements View {
       sortControl: this.sorter.element,
       location: (item) => [place.rootLabel, ...this.parentOf(item)].join(" / "),
       locationLabel: t("Location"),
-      thumbnail: (item) =>
-        isImage(item)
-          ? thumbnailUrl(place.space, this.itemPath(item), item, "small")
-          : null,
+      thumbnail: (item) => (isImage(item) ? thumbnailUrl(place.space, this.itemPath(item), item, "small") : null),
       draggable: false,
-      emptyMessage: t('No files or folders match "{query}".', {
-        query: this.query,
-      }),
+      emptyMessage: t("No files or folders match \"{query}\".", { query: this.query }),
     });
     this.list = list;
     this.body.replaceChildren(
@@ -1761,12 +1522,9 @@ class SearchView implements View {
             h(
               "p",
               { class: "hint" },
-              t(
-                "Showing the first {count} results. Search in a smaller folder or use more words to narrow it down.",
-                {
-                  count: this.results.length,
-                },
-              ),
+              t("Showing the first {count} results. Search in a smaller folder or use more words to narrow it down.", {
+                count: this.results.length,
+              }),
             ),
           ]
         : []),
@@ -1797,18 +1555,13 @@ class SearchView implements View {
 
   private open(item: FileItem): void {
     if (item.kind === "folder") {
-      window.location.hash = filesHref(
-        place.location,
-        this.itemPath(item).split("/"),
-      );
+      window.location.hash = filesHref(place.location, this.itemPath(item).split("/"));
     } else if (previewKind(item) !== null) {
       const files = sortItems(this.results, this.sort)
         .filter((file) => previewKind(file) !== null)
         .map((file) => ({ item: file, path: this.itemPath(file) }));
       const start = files.findIndex((entry) => entry.item.id === item.id);
-      openPreview(place.space, files, start, (entry) =>
-        download(entry.path, entry.item.name),
-      );
+      openPreview(place.space, files, start, (entry) => download(entry.path, entry.item.name));
     } else {
       download(this.itemPath(item), item.name);
     }
@@ -1828,77 +1581,34 @@ class SearchView implements View {
     const entries: (MenuEntry | "separator")[] = [];
     if (single !== undefined) {
       if (single.kind === "folder") {
-        entries.push({
-          label: t("Open"),
-          icon: "folder",
-          onSelect: () => this.open(single),
-        });
+        entries.push({ label: t("Open"), icon: "folder", onSelect: () => this.open(single) });
       } else if (previewKind(single) !== null) {
-        entries.push({
-          label: t("Preview"),
-          icon: "image",
-          onSelect: () => this.open(single),
-        });
+        entries.push({ label: t("Preview"), icon: "image", onSelect: () => this.open(single) });
       }
       entries.push(
-        {
-          label: t("Show in folder"),
-          icon: "folder",
-          onSelect: () => this.showSelected(),
-        },
-        {
-          label: t("Rename"),
-          icon: "rename",
-          shortcut: "F2",
-          onSelect: () => this.list?.startRename(single),
-        },
+        { label: t("Show in folder"), icon: "folder", onSelect: () => this.showSelected() },
+        { label: t("Rename"), icon: "rename", shortcut: "F2", onSelect: () => this.list?.startRename(single) },
       );
     }
     entries.push(
-      {
-        label: t("Copy…"),
-        icon: "copy",
-        onSelect: () => void this.copyOrMove("copy"),
-      },
-      {
-        label: t("Move…"),
-        icon: "move",
-        onSelect: () => void this.copyOrMove("move"),
-      },
-      {
-        label: t("Download"),
-        icon: "download",
-        onSelect: () => void this.downloadSelected(),
-      },
+      { label: t("Copy…"), icon: "copy", onSelect: () => void this.copyOrMove("copy") },
+      { label: t("Move…"), icon: "move", onSelect: () => void this.copyOrMove("move") },
+      { label: t("Download"), icon: "download", onSelect: () => void this.downloadSelected() },
     );
     if (single !== undefined) {
-      entries.push({
-        label: t("Share…"),
-        icon: "link",
-        onSelect: () => this.shareSelected(),
-      });
+      entries.push({ label: t("Share…"), icon: "link", onSelect: () => this.shareSelected() });
     }
-    entries.push("separator", {
-      label: t("Delete"),
-      icon: "trash",
-      danger: true,
-      onSelect: () => void this.deleteSelected(),
-    });
-    openContextMenu(
-      x,
-      y,
-      single?.name ?? t("{count} items selected", { count: selected.length }),
-      entries,
+    entries.push(
+      "separator",
+      { label: t("Delete"), icon: "trash", danger: true, onSelect: () => void this.deleteSelected() },
     );
+    openContextMenu(x, y, single?.name ?? t("{count} items selected", { count: selected.length }), entries);
   }
 
   private async rename(item: FileItem, name: string): Promise<void> {
     this.errorBox.textContent = "";
     try {
-      await api.patch(apiUrl("/api/files", place.space), {
-        path: this.itemPath(item),
-        name,
-      });
+      await api.patch(apiUrl("/api/files", place.space), { path: this.itemPath(item), name });
     } catch (error) {
       if (!isHandledGlobally(error)) {
         this.errorBox.textContent = messageOf(error);
@@ -1911,7 +1621,7 @@ class SearchView implements View {
   private shareSelected(): void {
     const [item] = this.list?.selectedItems() ?? [];
     if (item !== undefined) {
-      shareDialog(place.space, this.itemPath(item), item.name);
+      shareDialog(place.space, this.itemPath(item), item.name, item.kind);
     }
   }
 
@@ -1929,18 +1639,16 @@ class SearchView implements View {
     const title =
       kind === "copy"
         ? one
-          ? t('Copy "{name}"', { name: first.name })
+          ? t("Copy \"{name}\"", { name: first.name })
           : t("Copy {count} items", { count: selected.length })
         : one
-          ? t('Move "{name}"', { name: first.name })
+          ? t("Move \"{name}\"", { name: first.name })
           : t("Move {count} items", { count: selected.length });
     const choice = await chooseFolder(
       title,
       kind === "copy" ? t("Copy here") : t("Move here"),
       this.parentOf(first),
-      selected
-        .filter((item) => item.kind === "folder")
-        .map((item) => this.itemPath(item).split("/")),
+      selected.filter((item) => item.kind === "folder").map((item) => this.itemPath(item).split("/")),
       place,
       places,
     );
@@ -1980,18 +1688,12 @@ class SearchView implements View {
     } else {
       for (const item of selected) {
         // 已經在目的地的項目不用移動
-        if (
-          kind === "move" &&
-          joinPath(this.parentOf(item)) === joinPath(choice.path)
-        ) {
+        if (kind === "move" && joinPath(this.parentOf(item)) === joinPath(choice.path)) {
           done += 1;
           continue;
         }
         try {
-          const body = {
-            path: this.itemPath(item),
-            parent: joinPath(choice.path),
-          };
+          const body = { path: this.itemPath(item), parent: joinPath(choice.path) };
           if (kind === "copy") {
             await api.post(apiUrl("/api/files/copy", place.space), body);
           } else {
@@ -2015,14 +1717,8 @@ class SearchView implements View {
         ? messageOf(firstError)
         : `${
             kind === "copy"
-              ? t("Copied {done} of {total} items.", {
-                  done,
-                  total: selected.length,
-                })
-              : t("Moved {done} of {total} items.", {
-                  done,
-                  total: selected.length,
-                })
+              ? t("Copied {done} of {total} items.", { done, total: selected.length })
+              : t("Moved {done} of {total} items.", { done, total: selected.length })
           } ${messageOf(firstError)}`;
     }
   }
@@ -2038,9 +1734,7 @@ class SearchView implements View {
       return;
     }
     const parent = this.parentOf(first);
-    const sameFolder = selected.every(
-      (item) => joinPath(this.parentOf(item)) === joinPath(parent),
-    );
+    const sameFolder = selected.every((item) => joinPath(this.parentOf(item)) === joinPath(parent));
     if (selected.length > 1 && sameFolder) {
       const choice = await chooseDownload(
         selected.length,
@@ -2103,7 +1797,7 @@ class SearchView implements View {
     if (trashed.length > 0) {
       const message =
         trashed.length === 1
-          ? t('"{name}" moved to trash', { name: first.name })
+          ? t("\"{name}\" moved to trash", { name: first.name })
           : t("{count} items moved to trash", { count: trashed.length });
       showToast(message, {
         label: t("Undo"),
@@ -2123,12 +1817,7 @@ interface TreeFile {
 
 /** 作業系統自動產生、不需要上傳的檔案 */
 function isJunk(name: string): boolean {
-  return (
-    name === ".DS_Store" ||
-    name.startsWith("._") ||
-    name === "Thumbs.db" ||
-    name === "desktop.ini"
-  );
+  return name === ".DS_Store" || name.startsWith("._") || name === "Thumbs.db" || name === "desktop.ini";
 }
 
 /** 讀取拖進來的資料夾（以及它所有的子資料夾） */
@@ -2177,10 +1866,7 @@ async function readTree(
  * 通知的 Undo：把剛剛刪除的項目從垃圾桶還原，再重新載入目前的資料夾。
  * 失敗的項目仍在垃圾桶中，說明一下就好，使用者可以到垃圾桶自己還原
  */
-async function restoreItems(
-  ids: readonly number[],
-  after: () => void = reload,
-): Promise<void> {
+async function restoreItems(ids: readonly number[], after: () => void = reload): Promise<void> {
   let failed = 0;
   for (const id of ids) {
     try {
@@ -2193,46 +1879,23 @@ async function restoreItems(
     }
   }
   if (failed > 0) {
-    errorAfterReload = t(
-      "{failed} of {total} items could not be restored. They are still in the trash.",
-      { failed, total: ids.length },
-    );
+    errorAfterReload = t("{failed} of {total} items could not be restored. They are still in the trash.", { failed, total: ids.length });
   }
   after();
 }
 
-function toolButton(
-  label: string,
-  name: IconName,
-  onClick: () => void,
-): HTMLButtonElement {
+function toolButton(label: string, name: IconName, onClick: () => void): HTMLButtonElement {
   return h(
     "button",
-    {
-      type: "button",
-      class: "icon-button",
-      "aria-label": label,
-      title: label,
-      onClick,
-    },
+    { type: "button", class: "icon-button", "aria-label": label, title: label, onClick },
     icon(name),
   );
 }
 
-function viewButton(
-  label: string,
-  name: IconName,
-  onClick: () => void,
-): HTMLButtonElement {
+function viewButton(label: string, name: IconName, onClick: () => void): HTMLButtonElement {
   return h(
     "button",
-    {
-      type: "button",
-      class: "view-button",
-      "aria-label": label,
-      title: label,
-      onClick,
-    },
+    { type: "button", class: "view-button", "aria-label": label, title: label, onClick },
     icon(name),
   );
 }
@@ -2246,10 +1909,7 @@ function download(path: string, name: string): void {
 }
 
 /** 打包成一個 .zip 下載。伺服器一邊打包一邊傳送，不會先在磁碟上產生壓縮檔 */
-function downloadArchive(
-  folder: readonly string[],
-  items: readonly FileItem[],
-): void {
+function downloadArchive(folder: readonly string[], items: readonly FileItem[]): void {
   startDownload(
     apiUrl("/api/archive", place.space, {
       path: joinPath(folder),
@@ -2278,8 +1938,7 @@ function hasFiles(event: DragEvent): boolean {
 function isTyping(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLElement &&
-    (target.isContentEditable ||
-      target.matches("input:not([type='checkbox']), textarea, select"))
+    (target.isContentEditable || target.matches("input:not([type='checkbox']), textarea, select"))
   );
 }
 

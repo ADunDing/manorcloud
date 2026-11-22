@@ -2327,3 +2327,29 @@ table.public-files a.name-cell {
 table.public-files a.name-cell:hover .item-name {
     text-decoration: underline;
 }
+
+/* 上傳面板中的分區標題（Failed、Other uploads） */
+.panel-section {
+    padding: 8px 16px 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--muted);
+    list-style: none;
+}
+
+/* 管理 → 儲存空間：上傳上限 */
+.upload-limit {
+    margin-top: 28px;
+}
+
+.limit-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.limit-row .limit-input {
+    width: 8rem;
+}

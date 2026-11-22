@@ -17,11 +17,14 @@ pub struct Share {
     pub expires_at: Option<i64>,
     pub downloads: i64,
     pub created_at: i64,
+    /// 只能下載一次：第一次下載開始時刪除這個分享
+    pub one_time: bool,
 }
 
 macro_rules! columns {
     () => {
-        "id, token, owner_id, space, path, kind, password_hash, expires_at, downloads, created_at"
+        "id, token, owner_id, space, path, kind, password_hash, expires_at, downloads, created_at, \
+         one_time"
     };
 }
 
@@ -33,12 +36,13 @@ pub struct NewShare<'a> {
     pub kind: &'a str,
     pub password_hash: Option<&'a str>,
     pub expires_at: Option<i64>,
+    pub one_time: bool,
 }
 
 pub async fn create(pool: &SqlitePool, new: &NewShare<'_>) -> Result<Share, sqlx::Error> {
     const SQL: &str = concat!(
-        "INSERT INTO shares (token, owner_id, space, path, kind, password_hash, expires_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ",
+        "INSERT INTO shares (token, owner_id, space, path, kind, password_hash, expires_at, \
+                             one_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ",
         columns!()
     );
     sqlx::query_as(SQL)
@@ -49,6 +53,7 @@ pub async fn create(pool: &SqlitePool, new: &NewShare<'_>) -> Result<Share, sqlx
         .bind(new.kind)
         .bind(new.password_hash)
         .bind(new.expires_at)
+        .bind(new.one_time)
         .fetch_one(pool)
         .await
 }
@@ -73,6 +78,16 @@ pub async fn delete(pool: &SqlitePool, id: i64, owner_id: i64) -> Result<bool, s
     let deleted = sqlx::query("DELETE FROM shares WHERE id = ? AND owner_id = ?")
         .bind(id)
         .bind(owner_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(deleted == 1)
+}
+
+/// 用掉只能下載一次的分享：刪除它。回傳 false：已經被別的請求用掉了
+pub async fn consume(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
+    let deleted = sqlx::query("DELETE FROM shares WHERE id = ? AND one_time = 1")
+        .bind(id)
         .execute(pool)
         .await?
         .rows_affected();

@@ -4,7 +4,9 @@
 // - 上傳中：標題「Uploading… (23%)」，總進度、速度、剩餘時間，以及每個檔案
 // - 全部成功：標題「Uploads complete」，幾秒後自動消失
 // - 有失敗：標題「1 upload failed」，失敗的項目留著顯示原因，使用者按關閉才消失
-//   （失敗的訊息如果一閃即逝，使用者會以為檔案已經傳好了）
+//   （失敗的訊息如果一閃即逝，使用者會以為檔案已經傳好了）。
+//   失敗的項目一律排在清單最上方的「Failed」一區；全部結束後只留下失敗的項目，
+//   一次上傳很多檔案時不必在一長串完成的檔案中尋找
 // 使用者取消的檔案直接從清單移除，不算失敗。
 //
 // 佇列是獨立存在的物件，自己持有面板的元素，切換資料夾時面板與進度都保留。
@@ -389,6 +391,11 @@ export class UploadQueue {
     entry.cancelButton.hidden = !isActive(entry);
     entry.fill.classList.toggle("done", status === "done");
     entry.fill.classList.toggle("failed", status === "failed");
+    if (status === "failed") {
+      // 移到最上方的「Failed」一區
+      this.renderList();
+      return;
+    }
     this.refresh();
   }
 
@@ -406,8 +413,20 @@ export class UploadQueue {
   }
 
   private renderList(): void {
-    this.list.replaceChildren(...this.entries.map((entry) => entry.row));
+    this.drawList();
     this.refresh();
+  }
+
+  /** 失敗的在上方一區，其他的依加入的順序 */
+  private drawList(): void {
+    const failed = this.entries.filter((entry) => entry.status === "failed");
+    const others = this.entries.filter((entry) => entry.status !== "failed");
+    const heading = (text: string): HTMLElement => h("li", { class: "panel-section", role: "presentation" }, text);
+    this.list.replaceChildren(
+      ...(failed.length > 0 ? [heading(t("Failed")), ...failed.map((entry) => entry.row)] : []),
+      ...(failed.length > 0 && others.length > 0 ? [heading(t("Other uploads"))] : []),
+      ...others.map((entry) => entry.row),
+    );
   }
 
   /** 依目前的狀態更新標題、按鈕與總進度，決定面板是否顯示 */
@@ -429,6 +448,11 @@ export class UploadQueue {
       this.setButton(t("Cancel all uploads"));
       this.startTicker();
     } else if (failed > 0) {
+      // 全部結束：只留下失敗的項目
+      if (this.entries.some((entry) => entry.status !== "failed")) {
+        this.entries = this.entries.filter((entry) => entry.status === "failed");
+        this.drawList();
+      }
       this.title.textContent = failed === 1 ? t("1 upload failed") : t("{count} uploads failed", { count: failed });
       this.count.textContent = "";
       this.setButton(t("Close"));

@@ -127,7 +127,6 @@ const UI: Readonly<Record<string, string>> = {
 
   // ==================== 單一登入 ====================
   "Single sign-on": "單一登入",
-  "Sign in with single sign-on": "使用單一登入",
   "Sign in with {name}": "使用 {name} 登入",
   "You sign in with {name}. This account has no password, so there is nothing to change here.":
     "你使用 {name} 登入。這個帳號沒有密碼，所以這裡沒有可以修改的項目。",
@@ -156,7 +155,6 @@ const UI: Readonly<Record<string, string>> = {
   "Your account is already linked.": "你的帳號已經連結過了。",
   "You were logged out before linking finished. Log in and try again.": "連結完成前你已經登出了。請登入後再試一次。",
   "Single sign-on didn't work. Try again, or contact your administrator.": "單一登入失敗。請再試一次，或聯絡管理員。",
-  Authentik: "Authentik",
   "Saved. Leave empty to keep it": "已儲存。留空則保留原本的值",
   "Test connection": "測試連線",
   "Connecting…": "連線中…",
@@ -165,6 +163,9 @@ const UI: Readonly<Record<string, string>> = {
     "讓使用者透過 OpenID Connect 登入服務（例如 Authentik）登入。",
   "Create an OAuth2/OpenID provider there, then copy its values here.":
     "請先在那裡建立 OAuth2/OpenID Provider，再把它的設定值複製到這裡。",
+  "Administrator group": "管理員群組",
+  "Members of this group at the provider become administrators each time they sign in, and everyone else becomes a member. Leave empty to manage roles in ManorCloud.":
+    "在登入服務中屬於這個群組的人，每次登入時都會成為管理員，其他人則成為成員。留空時，角色在 ManorCloud 中管理。",
   "Turn on single sign-on": "開啟單一登入",
   "Button label": "按鈕文字",
   'Shown on the login page as "Sign in with …"': "在登入頁顯示為「使用 … 登入」",
@@ -291,6 +292,12 @@ const UI: Readonly<Record<string, string>> = {
   "Link expires": "連結期限",
   Never: "永不過期",
   "Require a password": "需要密碼",
+  "Allow only one download": "只能下載一次",
+  "The link stops working as soon as the download starts. If the download fails, create a new link.":
+    "下載一開始連結就會失效。下載失敗的話，要重新建立連結。",
+  "One download": "限下載一次",
+  "This link works for one download: it stops working as soon as the download starts. Keep this page open until the download finishes.":
+    "這個連結只能下載一次：下載一開始連結就會失效。下載完成前請不要關閉這個頁面。",
   "How long the link works": "連結的有效時間",
   Unit: "單位",
   minutes: "分鐘",
@@ -400,6 +407,8 @@ const UI: Readonly<Record<string, string>> = {
   "Uploading 0%": "上傳中 0%",
   "Uploading {percent}%": "上傳中 {percent}%",
   "Upload failed": "上傳失敗",
+  Failed: "失敗",
+  "Other uploads": "其他檔案",
   "1 upload failed": "1 個檔案上傳失敗",
   "{count} uploads failed": "{count} 個檔案上傳失敗",
   "Uploads complete": "上傳完成",
@@ -517,6 +526,14 @@ const UI: Readonly<Record<string, string>> = {
 
   // ==================== 管理：儲存空間 ====================
   "Add storage": "新增儲存空間",
+  "Upload limit": "上傳上限",
+  "The largest single file anyone can upload.": "單一檔案最大可以上傳多少。",
+  "Upload limit in GB": "上傳上限（GB）",
+  "Use the default": "使用預設值",
+  "The default from the configuration file is {size}.": "設定檔的預設值是 {size}。",
+  "This is the default from the configuration file (MANORCLOUD_MAX_UPLOAD_BYTES).": "目前使用設定檔的預設值（MANORCLOUD_MAX_UPLOAD_BYTES）。",
+  "Upload limit saved. It applies to uploads started from now on.": "已儲存上傳上限，之後開始的上傳都會套用。",
+  "Enter a size in GB": "請輸入 GB 數",
   "{name} usage": "{name} 的使用量",
   "Remove {name}?": "要移除 {name} 嗎？",
   "Remove {name}": "移除 {name}",
@@ -640,6 +657,8 @@ const SERVER: Readonly<Record<string, string>> = {
   "You can only share your own files": "只能分享自己的檔案",
   "The expiry date must be in the future": "到期時間必須在未來",
   "Share not found": "找不到這個分享",
+  "The upload limit must be at least 1 MB": "上傳上限至少要 1 MB",
+  "Only a file can be shared for a single download": "只有檔案可以設定為只能下載一次",
   "This would go over your storage limit. Delete some files and empty the trash, or ask your administrator for more space.":
     "這樣會超過你的空間上限。請刪除一些檔案並清空垃圾桶，或請管理員給你更多空間。",
   "The limit can't be negative": "上限不能是負數",

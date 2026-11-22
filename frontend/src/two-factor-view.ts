@@ -7,6 +7,7 @@
 //
 // QR code 由伺服器算出點陣，這裡用 SVG 畫出來：不使用任何外部的 QR 服務，密鑰不會離開這台伺服器。
 
+import { copyText } from "./clipboard.js";
 import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
@@ -142,15 +143,10 @@ export function showRecoveryCodes(
   const status = h("p", { class: "hint", role: "status" });
 
   copy.addEventListener("click", () => {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => {
-        status.textContent = t("Copied.");
-      })
-      .catch(() => {
-        // http 的網址中瀏覽器不提供剪貼簿：改用下載
-        status.textContent = t("Your browser can't copy here. Use Download instead.");
-      });
+    void copyText(text, copy).then((copied) => {
+      // 瀏覽器不允許複製時：改用下載
+      status.textContent = copied ? t("Copied.") : t("Your browser can't copy here. Use Download instead.");
+    });
   });
   download.addEventListener("click", () => {
     const file = new Blob([`${t("ManorCloud recovery codes")}\n\n${text}\n`], { type: "text/plain" });

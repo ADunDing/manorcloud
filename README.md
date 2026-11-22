@@ -63,7 +63,9 @@ curl -fsSL https://github.com/ADunDing/manorcloud/releases/latest/download/insta
 
 Run it as a normal user: the installer downloads the right build for your machine, verifies its
 checksum, and only then asks for administrator rights to install it. When it finishes, it prints
-the address to open, for example `http://192.168.1.20:3000`.
+the address to open. By default ManorCloud only accepts connections from the same machine
+(`http://127.0.0.1:3000`); to use it from other devices, set `MANORCLOUD_BIND=0.0.0.0:3000` in
+`/etc/manorcloud/manorcloud.env` and restart it.
 
 <details>
 <summary>Install a specific version, or install offline</summary>
@@ -116,12 +118,15 @@ sudo systemctl restart manorcloud
 
 | Setting                          | Default                                      | Meaning                                       |
 |----------------------------------|----------------------------------------------|-----------------------------------------------|
-| `MANORCLOUD_BIND`                | `0.0.0.0:3000`                               | Address and port to listen on                 |
+| `MANORCLOUD_BIND`                | `127.0.0.1:3000`                             | Address and port to listen on                 |
 | `MANORCLOUD_DATA_DIR`            | `/var/lib/manorcloud/data`                   | Where uploaded files are stored               |
 | `MANORCLOUD_DATABASE_URL`        | `sqlite:///var/lib/manorcloud/manorcloud.db` | The database; must be on a local disk         |
-| `MANORCLOUD_MAX_UPLOAD_BYTES`    | 10 GiB                                       | Largest single upload                         |
+| `MANORCLOUD_MAX_UPLOAD_BYTES`    | 10 GiB                                       | Largest single upload (Administration > Storage overrides it) |
 | `MANORCLOUD_MAX_PENDING_UPLOADS` | `5`                                          | Unfinished uploads each user may have at once |
 | `MANORCLOUD_SECURE_COOKIES`      | `false`                                      | Set to `true` only when serving over HTTPS    |
+| `MANORCLOUD_TLS_CERT`            | (none)                                       | PEM certificate file; serves HTTPS directly   |
+| `MANORCLOUD_TLS_KEY`             | (none)                                       | PEM private key for `MANORCLOUD_TLS_CERT`     |
+| `MANORCLOUD_TRUSTED_PROXIES`     | (none)                                       | Reverse proxy addresses, e.g. `127.0.0.1`; their `X-Forwarded-For` is used |
 
 To store files on an external disk, change `MANORCLOUD_DATA_DIR` and allow the service to write
 there; the comments in the configuration file show how.
@@ -175,9 +180,9 @@ longer need them.
 
 ### Security
 
-ManorCloud serves plain HTTP and is meant for your home network. **Do not expose it to the
-internet** without HTTPS in front of it (for example a reverse proxy such as Caddy). Once HTTPS
-is set up, set `MANORCLOUD_SECURE_COOKIES=true`.
+ManorCloud serves plain HTTP by default and is meant for your home network. **Do not expose it
+to the internet** without HTTPS: either set `MANORCLOUD_TLS_CERT` and `MANORCLOUD_TLS_KEY`, or put
+a reverse proxy such as Caddy in front of it and set `MANORCLOUD_SECURE_COOKIES=true`.
 
 ## Everyday tasks
 

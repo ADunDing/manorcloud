@@ -6,6 +6,7 @@
 // 伺服器的說明見 src/web/shares.rs。
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
+import { copyText } from "./clipboard.js";
 import { h } from "./dom.js";
 import { fileIconName, folderIconName, iconUrl } from "./file-types.js";
 import { formatSize, formatTime } from "./format.js";
@@ -24,6 +25,8 @@ interface Share {
   readonly name: string;
   readonly kind: "file" | "folder";
   readonly has_password: boolean;
+  /** 只能下載一次 */
+  readonly one_time: boolean;
   readonly expires_at: number | null;
   readonly expired: boolean;
   readonly downloads: number;
@@ -41,22 +44,23 @@ function messageOf(error: unknown): string {
   return error instanceof ApiError ? error.message : t("Something went wrong");
 }
 
-async function copyText(text: string, input?: HTMLInputElement): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
+/** 複製連結。near：觸發的按鈕（對話框中的按鈕要讓暫時的文字框放在同一個對話框） */
+async function copyLink(text: string, near: Element, input?: HTMLInputElement): Promise<void> {
+  if (await copyText(text, near)) {
     showToast(t("Link copied"));
-  } catch {
-    // http 的網址不能使用剪貼簿 API：選取起來讓使用者自己複製
-    input?.select();
-    showToast(t("Selected. Press Ctrl+C (⌘C on a Mac) to copy"));
+    return;
   }
+  input?.select();
+  showToast(t("Selected. Press Ctrl+C (⌘C on a Mac) to copy"));
 }
 
 // ==================== 建立連結 ====================
 
 /** 分享一個檔案或資料夾 */
-export function shareDialog(space: Space, path: string, name: string): void {
+export function shareDialog(space: Space, path: string, name: string, kind: "file" | "folder"): void {
   const usePassword = h("input", { type: "checkbox" });
+  // 只能下載一次：只有檔案可以（資料夾裡有很多檔案，下載一個就失效會很奇怪）
+  const oneTime = h("input", { type: "checkbox" });
   const password = h("input", {
     type: "text",
     class: "dialog-input",
@@ -100,6 +104,14 @@ export function shareDialog(space: Space, path: string, name: string): void {
     "div",
     { class: "share-options" },
     h("label", { class: "dialog-field" }, t("Link expires"), expiry),
+    kind === "file"
+      ? h(
+          "label",
+          { class: "inline", title: t("The link stops working as soon as the download starts. If the download fails, create a new link.") },
+          oneTime,
+          t("Allow only one download"),
+        )
+      : null,
     h("label", { class: "inline" }, usePassword, t("Require a password")),
     password,
   );
@@ -141,6 +153,7 @@ export function shareDialog(space: Space, path: string, name: string): void {
         share = await api.post<Share>(apiUrl("/api/shares", space), {
           path,
           password: usePassword.checked ? password.value : null,
+          one_time: kind === "file" && oneTime.checked,
           expires_at: seconds > 0 ? Math.floor(Date.now() / 1000) + count * seconds : null,
         });
       } catch (e) {
@@ -160,7 +173,11 @@ export function shareDialog(space: Space, path: string, name: string): void {
       });
       const copy = h(
         "button",
-        { type: "button", class: "primary", onClick: () => void copyText(link.value, link) },
+        {
+          type: "button",
+          class: "primary",
+          onClick: (event: Event) => void copyLink(link.value, event.currentTarget as Element, link),
+        },
         t("Copy link"),
       );
       const done = h("button", { type: "button", class: "secondary", onClick: () => dialog.close() }, t("Done"));
@@ -296,6 +313,7 @@ export function renderShares(container: HTMLElement, admin: boolean): void {
           }),
           h("span", { class: "item-name", title: share.name }, share.name),
           share.has_password ? h("span", { title: t("Requires a password") }, icon("lock", 14)) : null,
+          share.one_time ? h("span", { class: "badge" }, t("One download")) : null,
         ),
       ),
       h("td", { class: "muted" }, [spaceLabel(share.space), ...parent].join(" / ")),
@@ -319,7 +337,11 @@ export function renderShares(container: HTMLElement, admin: boolean): void {
             ? null
             : h(
                 "button",
-                { type: "button", class: "link", onClick: () => void copyText(shareUrl(share.token)) },
+                {
+                  type: "button",
+                  class: "link",
+                  onClick: (event: Event) => void copyLink(shareUrl(share.token), event.currentTarget as Element),
+                },
                 t("Copy link"),
               ),
           stop,
@@ -340,6 +362,8 @@ interface PublicInfo {
   readonly size: number | null;
   readonly owner: string | null;
   readonly expires_at: number | null;
+  /** 只能下載一次 */
+  readonly one_time: boolean;
 }
 
 interface PublicItem {
@@ -423,6 +447,13 @@ export function renderPublicShare(container: HTMLElement, token: string): void {
               icon("download", 16),
               t("Download"),
             ),
+            info.one_time
+              ? h(
+                  "p",
+                  { class: "hint" },
+                  t("This link works for one download: it stops working as soon as the download starts. Keep this page open until the download finishes."),
+                )
+              : null,
           ),
         ),
       );

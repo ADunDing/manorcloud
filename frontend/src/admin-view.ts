@@ -5,6 +5,7 @@
 // 臨時密碼只存在顯示它的面板元素裡，不放進任何變數或狀態；
 // 關閉面板時先清空值再移除元素，不會殘留在 DOM 中。
 
+import { copyText } from "./clipboard.js";
 import { t, tNodes } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { confirmDialog, nameDialog } from "./dialogs.js";
@@ -747,23 +748,17 @@ class AdminView {
 
 /**
  * 複製臨時密碼。
- * 剪貼簿 API 只在安全環境（HTTPS 或 localhost）可用；用 http://192.168.x.x 連線時不存在。
- * 不可用或失敗時，選取文字並請使用者自己按複製鍵。
+ * 複製失敗時（瀏覽器不允許），選取文字並請使用者自己按複製鍵。
  */
 async function copyPassword(
   field: HTMLInputElement,
   status: HTMLElement,
 ): Promise<void> {
-  field.select();
-  if (window.isSecureContext && "clipboard" in navigator) {
-    try {
-      await navigator.clipboard.writeText(field.value);
-      status.textContent = t("Copied");
-      return;
-    } catch {
-      // 使用者拒絕權限等情況：退回手動複製
-    }
+  if (await copyText(field.value, field)) {
+    status.textContent = t("Copied");
+    return;
   }
+  field.select();
   status.textContent = t("Selected. Press Ctrl+C (⌘C on a Mac) to copy");
 }
 

@@ -7,6 +7,7 @@ mod error;
 mod extract;
 mod quotas;
 mod range;
+mod server_settings;
 mod shares;
 mod shutdown;
 mod spaces;
@@ -14,25 +15,32 @@ mod sso;
 mod state;
 mod storage;
 mod thumbnails;
+pub mod tls;
 mod transfers;
 mod trash;
 mod two_factor;
+mod upload_progress;
 mod uploads;
 
 #[cfg(test)]
 mod test_support;
 
+pub use extract::TrustedProxies;
 pub use state::AppState;
 
 use axum::{Router, middleware};
-use state::UploadLimit;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// 收到停止訊號後，最多等待進行中的請求多久。
 /// 必須小於服務檔的 TimeoutStopSec，否則 systemd 會先用 SIGKILL 結束程式
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
-pub async fn run(state: AppState, addr: SocketAddr) {
+pub async fn run(
+    state: AppState,
+    addr: SocketAddr,
+    tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+) {
     // 開始接收請求前，先完成需要預熱的初始化
     auth::warm_up().await;
 
@@ -48,7 +56,8 @@ pub async fn run(state: AppState, addr: SocketAddr) {
             std::process::exit(1);
         }
     };
-    println!("listening on http://{addr}");
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    println!("listening on {scheme}://{addr}");
 
     // 在通知就緒之前註冊訊號處理：之後收到的 SIGTERM 一定會被優雅地處理
     let stop = shutdown::shutdown_signal();
@@ -56,7 +65,14 @@ pub async fn run(state: AppState, addr: SocketAddr) {
     // 已開始監聽：通知 systemd 服務就緒（Type=notify）
     crate::systemd::notify_ready();
 
-    match shutdown::serve_until(listener, app, stop, SHUTDOWN_GRACE).await {
+    let result = match tls {
+        Some(config) => match tls::TlsListener::new(listener, config) {
+            Ok(listener) => shutdown::serve_until(listener, app, stop, SHUTDOWN_GRACE).await,
+            Err(e) => Err(e),
+        },
+        None => shutdown::serve_until(listener, app, stop, SHUTDOWN_GRACE).await,
+    };
+    match result {
         Ok(shutdown::Shutdown::Graceful) => println!("stopped: all requests finished"),
         Ok(shutdown::Shutdown::TimedOut) => eprintln!(
             "stopped: requests still running after {} seconds were interrupted",
@@ -71,11 +87,9 @@ pub async fn run(state: AppState, addr: SocketAddr) {
 
 /// 組裝完整的應用程式。獨立出來讓測試可以直接使用。
 fn app(state: AppState) -> Router {
-    let upload_limit = state.upload_limit;
-
     Router::new()
         .merge(assets::router())
-        .merge(api_router(upload_limit))
+        .merge(api_router())
         .with_state(state)
 }
 
@@ -83,16 +97,17 @@ fn app(state: AppState) -> Router {
 ///
 /// 新的 API 模組只要在這裡 merge 進來，就會自動受到 CSRF 保護。
 /// `.layer` 必須維持在最後一行：它只會套用到在它之前加入的路由。
-fn api_router(upload_limit: UploadLimit) -> Router<AppState> {
+fn api_router() -> Router<AppState> {
     Router::new()
         .merge(auth::router())
         .merge(admin::router())
-        .merge(spaces::router(upload_limit))
+        .merge(spaces::router())
         .merge(uploads::router())
         .merge(transfers::router())
         .merge(thumbnails::router())
         .merge(quotas::router())
         .merge(shares::router())
+        .merge(server_settings::router())
         .merge(trash::router())
         .merge(sso::router())
         .merge(two_factor::router())

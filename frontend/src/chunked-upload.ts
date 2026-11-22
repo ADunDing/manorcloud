@@ -1,4 +1,4 @@
-// 分段上傳（可續傳）：大檔案切成 8 MiB 的段落依序送出。
+// 分段上傳（可續傳）：大檔案切成 8 到 64 MiB 的段落（依網路速度調整），同時送出好幾段。
 //
 // 斷線、休眠、伺服器重啟時自動重試，從伺服器已確認的位置繼續，不必整個重傳。
 // 重新整理之後，使用者選擇同一個檔案，也能接著伺服器上未完成的上傳繼續（見 isSameFile）。
@@ -9,11 +9,48 @@ import { api, ApiError, errorFromResponse } from "./api.js";
 import { withSpace, type Space } from "./space.js";
 import { readBody, UploadCancelled, type UploadHandle } from "./upload.js";
 
-/** 每段的大小。伺服器接受最多 16 MiB 的一段 */
-const CHUNK_SIZE = 8 * 1024 * 1024;
+/**
+ * 每段的大小範圍。伺服器接受最多 128 MiB 的一段。
+ * 每段結束時伺服器都要寫進硬碟並更新紀錄，段落越大，這些等待越少；
+ * 但網路慢時一段要傳很久，所以從小的開始，傳得快才加大
+ */
+const MIN_CHUNK = 8 * 1024 * 1024;
+const MAX_CHUNK = 64 * 1024 * 1024;
+
+/** 一段在這麼短的時間內傳完就加倍，超過 SLOW_CHUNK_MS 就減半 */
+const FAST_CHUNK_MS = 5_000;
+const SLOW_CHUNK_MS = 30_000;
+
+/**
+ * 同時送出幾段。瀏覽器單一連線的上傳速度有限（Chrome 約 40 MB/s），
+ * 好幾條連線才能用滿網路；一段在等伺服器寫進硬碟時，其他段也還在傳。
+ *
+ * - HTTP/1.1：瀏覽器對同一個伺服器最多開 6 條連線，留 2 條給頁面的其他請求（列表、縮圖）
+ * - HTTP/2、HTTP/3：所有請求共用同一條連線，沒有 6 條的限制
+ */
+const PARALLEL_HTTP1 = 4;
+const PARALLEL_MULTIPLEXED = 8;
+
+/**
+ * 最多跑在伺服器已確認長度前面多遠：前面那段慢了，後面的不能無限制地往前送。
+ * 足夠讓 PARALLEL_MULTIPLEXED 段同時在傳；伺服器的上限是 512 MiB，必須比它小
+ */
+const MAX_AHEAD = 7 * MAX_CHUNK;
+
+/** 這個頁面與伺服器之間用的協定：「http/1.1」、「h2」、「h3」，瀏覽器不提供時是空字串 */
+function protocol(): string {
+  const [navigation] = performance.getEntriesByType("navigation");
+  return navigation instanceof PerformanceNavigationTiming ? navigation.nextHopProtocol : "";
+}
+
+/** 依協定決定同時送幾段。不知道協定時當作 HTTP/1.1：保守一點，不會佔滿連線 */
+function parallelChunks(): number {
+  const used = protocol();
+  return used === "h2" || used === "h3" ? PARALLEL_MULTIPLEXED : PARALLEL_HTTP1;
+}
 
 /** 超過這個大小才使用分段上傳；更小的檔案分段沒有好處，只多了請求數 */
-export const CHUNKED_THRESHOLD = CHUNK_SIZE;
+export const CHUNKED_THRESHOLD = MIN_CHUNK;
 
 /** 連續失敗時，第 n 次重試前等待的時間；超過陣列長度後一直用最後一個 */
 const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
@@ -84,7 +121,8 @@ export function startChunkedUpload(
 /** 一次上傳的控制：取消、可被取消的等待、目前的請求 */
 class Control {
   private cancelled = false;
-  private xhr: XMLHttpRequest | null = null;
+  /** 正在送出的請求（同時好幾段） */
+  private readonly requests = new Set<XMLHttpRequest>();
   private wake: (() => void) | null = null;
   /** 已宣告的上傳編號：取消時用來通知伺服器刪除 */
   uploadId: string | null = null;
@@ -104,7 +142,9 @@ class Control {
       return;
     }
     this.cancelled = true;
-    this.xhr?.abort();
+    for (const xhr of this.requests) {
+      xhr.abort();
+    }
     this.wake?.();
     if (this.uploadId !== null) {
       discard(this.uploadId, this.space);
@@ -122,8 +162,12 @@ class Control {
     return this.cancelled;
   }
 
-  track(xhr: XMLHttpRequest | null): void {
-    this.xhr = xhr;
+  track(xhr: XMLHttpRequest): void {
+    this.requests.add(xhr);
+  }
+
+  untrack(xhr: XMLHttpRequest): void {
+    this.requests.delete(xhr);
   }
 
   /** 等待一段時間；取消時立刻結束 */
@@ -244,64 +288,142 @@ async function run(
   await complete(info, options.onNotice, control);
 }
 
-/** 依序送出每一段，直到伺服器確認收到全部 */
+/**
+ * 送出每一段，直到伺服器確認收到全部。
+ *
+ * 同時最多送 parallelChunks() 段。任何一段失敗時不再送新的，等送出中的都結束，
+ * 再向伺服器查詢已確認的位置，從那裡重新開始（已經傳過的後面幾段可能會重送）。
+ */
 async function sendChunks(
   file: File,
   info: UploadInfo,
   { onProgress, onNotice }: ChunkedUploadOptions,
   control: Control,
 ): Promise<void> {
-  let offset = info.received;
+  /** 伺服器已確認的長度：從頭開始連續收到多少 */
+  let received = info.received;
   let failures = 0;
+  let chunkSize = MIN_CHUNK;
+  const parallel = parallelChunks();
   // 需要先向伺服器查詢已確認的位置（重試之前、位置不一致時）
   let needsSync = false;
 
   for (;;) {
     control.check();
-    try {
-      if (needsSync) {
+    if (needsSync) {
+      try {
         const status = await api.get<UploadInfo>(
           control.url(`/api/uploads/${encodeURIComponent(info.id)}`),
         );
-        offset = status.received;
+        received = status.received;
         needsSync = false;
-      }
-      onProgress(offset / file.size);
-      if (offset >= file.size) {
-        return;
-      }
-
-      const start = offset;
-      const end = Math.min(start + CHUNK_SIZE, file.size);
-      offset = await putChunk(info.id, start, file.slice(start, end), control, (loaded) =>
-        onProgress((start + loaded) / file.size),
-      );
-      failures = 0;
-      onNotice(null);
-    } catch (error) {
-      // 取消造成的中斷：直接停下
-      control.check();
-
-      if (error instanceof ApiError && error.code === "offset_mismatch") {
-        // 不必等待：問伺服器正確的位置，從那裡繼續。也計入失敗，避免無限循環
-        needsSync = true;
-        failures += 1;
-        if (failures > MAX_FAILURES) {
-          throw error;
+      } catch (error) {
+        control.check();
+        if (!isRetryable(error) || failures >= MAX_FAILURES) {
+          throw failures > 0 ? interrupted(error) : error;
         }
+        const delay = retryDelay(failures);
+        failures += 1;
+        onNotice(retryNotice(error, delay));
+        await control.sleep(delay);
         continue;
       }
-      if (!isRetryable(error) || failures >= MAX_FAILURES) {
-        throw failures > 0 ? interrupted(error) : error;
-      }
-
-      const delay = retryDelay(failures);
-      failures += 1;
-      onNotice(retryNotice(error, delay));
-      await control.sleep(delay);
-      // 斷線前伺服器可能已經收到並確認了一部分
-      needsSync = true;
     }
+    onProgress(received / file.size);
+    if (received >= file.size) {
+      return;
+    }
+
+    // 這一輪從已確認的位置開始。進度 = 起點 + 已傳完的段落 + 送出中各段已送出的部分
+    const base = received;
+    let next = received;
+    let finished = 0;
+    const loaded = new Map<number, number>();
+    const showProgress = (): void => {
+      let sending = 0;
+      for (const bytes of loaded.values()) {
+        sending += bytes;
+      }
+      onProgress(Math.min(base + finished + sending, file.size) / file.size);
+    };
+
+    let failure: unknown = null;
+    const inFlight = new Set<Promise<void>>();
+    for (;;) {
+      while (
+        failure === null &&
+        inFlight.size < parallel &&
+        next < file.size &&
+        next - received < MAX_AHEAD
+      ) {
+        const start = next;
+        const end = Math.min(start + chunkSize, file.size);
+        next = end;
+        const began = performance.now();
+        const onLoaded = (bytes: number): void => {
+          loaded.set(start, bytes);
+          showProgress();
+        };
+        const sent: Promise<void> = putChunk(info.id, start, file.slice(start, end), control, onLoaded)
+          .then((confirmed) => {
+            received = Math.max(received, confirmed);
+            finished += end - start;
+            const took = performance.now() - began;
+            if (took < FAST_CHUNK_MS) {
+              chunkSize = Math.min(chunkSize * 2, MAX_CHUNK);
+            } else if (took > SLOW_CHUNK_MS) {
+              chunkSize = Math.max(chunkSize / 2, MIN_CHUNK);
+            }
+            failures = 0;
+            onNotice(null);
+          })
+          .catch((error: unknown) => {
+            failure ??= error;
+          })
+          .finally(() => {
+            loaded.delete(start);
+            inFlight.delete(sent);
+            showProgress();
+          });
+        inFlight.add(sent);
+      }
+      if (inFlight.size === 0) {
+        break;
+      }
+      await Promise.race(inFlight);
+    }
+
+    if (failure === null) {
+      // 全部送出了，伺服器卻還沒確認到最後（例如伺服器重新啟動過，忘了後面已收到的段落）：
+      // 問一次正確的位置，從那裡補送
+      if (received < file.size) {
+        needsSync = true;
+      }
+      continue;
+    }
+
+    // 取消造成的中斷：直接停下
+    control.check();
+    const error = failure;
+    if (error instanceof ApiError && error.code === "offset_mismatch") {
+      // 不必等待：問伺服器正確的位置，從那裡繼續。也計入失敗，避免無限循環
+      needsSync = true;
+      failures += 1;
+      if (failures > MAX_FAILURES) {
+        throw error;
+      }
+      continue;
+    }
+    if (!isRetryable(error) || failures >= MAX_FAILURES) {
+      throw failures > 0 ? interrupted(error) : error;
+    }
+
+    const delay = retryDelay(failures);
+    failures += 1;
+    onNotice(retryNotice(error, delay));
+    await control.sleep(delay);
+    // 斷線前伺服器可能已經收到並確認了一部分
+    needsSync = true;
   }
 }
 
@@ -366,6 +488,7 @@ function putChunk(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     control.track(xhr);
+    const done = (): void => control.untrack(xhr);
 
     xhr.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
@@ -373,7 +496,7 @@ function putChunk(
       }
     });
     xhr.addEventListener("load", () => {
-      control.track(null);
+      done();
       const body = readBody(xhr);
       if (xhr.status >= 200 && xhr.status < 300) {
         const received = (body as { received?: unknown } | null)?.received;
@@ -388,15 +511,15 @@ function putChunk(
       }
     });
     xhr.addEventListener("error", () => {
-      control.track(null);
+      done();
       reject(new ApiError(0, t("Can't reach the server")));
     });
     xhr.addEventListener("timeout", () => {
-      control.track(null);
+      done();
       reject(new ApiError(0, t("The connection timed out")));
     });
     xhr.addEventListener("abort", () => {
-      control.track(null);
+      done();
       reject(new UploadCancelled());
     });
 

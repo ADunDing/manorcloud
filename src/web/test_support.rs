@@ -31,6 +31,8 @@ pub struct TestApp {
     pub dir: TempDir,
     pub cookie: String,
     pub user_id: i64,
+    /// 與 app 共用的狀態：測試可以直接查看或操作記憶體中的資料
+    pub state: AppState,
 }
 
 impl TestApp {
@@ -47,7 +49,7 @@ impl TestApp {
 
         TestApp {
             // 測試沒有真正的 TCP 連線，由這裡提供一個固定的來源位址給需要 IP 的 handler
-            app: app(state).layer(MockConnectInfo(SocketAddr::from((
+            app: app(state.clone()).layer(MockConnectInfo(SocketAddr::from((
                 [192, 168, 1, 10],
                 50000,
             )))),
@@ -55,6 +57,7 @@ impl TestApp {
             dir,
             cookie: format!("{SESSION_COOKIE}={token}"),
             user_id,
+            state,
         }
     }
 

@@ -1,7 +1,8 @@
 //! 分段上傳（可續傳）的 API。
 //!
 //! 1. POST   /api/uploads?space=        宣告：資料夾、檔名、總大小 → 取得上傳編號
-//! 2. PUT    /api/uploads/{id}?offset=N 從第 N 個位元組續寫一段，回傳新的已確認長度
+//! 2. PUT    /api/uploads/{id}?offset=N 寫入從第 N 個位元組開始的一段，回傳新的已確認長度；
+//!    好幾段可以同時送，不必按照順序
 //! 3. POST   /api/uploads/{id}/complete 完成：放到資料夾中的正式名稱上
 //!    GET    /api/uploads/{id}          查詢已確認的長度（斷線後從哪裡繼續）
 //!    GET    /api/uploads?space=        列出自己在這個空間中未完成的上傳（重新整理後續傳）
@@ -9,11 +10,11 @@
 //!
 //! 檔案與資料庫的先後順序，處處都是「檔案先、紀錄後」：
 //! - 宣告：先建立暫存檔，再寫入紀錄。有紀錄就一定有檔案
-//! - 續寫：先寫入並 fsync，再推進已確認的長度。檔案永遠不少於紀錄
+//! - 寫入：先寫入並 fsync，再推進已確認的長度。已確認的部分一定已經落盤
 //! - 完成：先放到正式的名稱上，再刪除紀錄。放不上去（同名）時暫存檔與紀錄都留著，換個名稱再完成
 //! - 取消：例外，先刪紀錄、再刪檔案。反過來的話，斷電在兩步之間會留下「有紀錄、沒檔案」
 //!
-//! 續寫與完成都是「先拿暫存檔的鎖，再讀資料庫的已確認長度」，理由見 lock_part。
+//! 寫入與完成都是「先拿暫存檔的鎖，再讀資料庫的紀錄」，理由見 lock_part。
 //!
 //! 暫存檔放在空間所在硬碟的 `.manorcloud/uploads/`，和目的地在同一個檔案系統，完成時只是改名。
 
@@ -39,6 +40,7 @@ use super::{
     extract::{CurrentUser, InSpace, resolve_space},
     spaces::{blocking, check_name, check_quota, denied, parse_path},
     state::{AppState, PendingUploadLimit, UploadLimit},
+    upload_progress::UploadProgress,
 };
 
 use crate::{
@@ -51,8 +53,8 @@ use crate::{
     tree::{self, OnConflict, RelPath},
 };
 
-/// 每段的大小上限。前端每段送 8 MiB，這裡留一倍的餘裕
-const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+/// 每段的大小上限。前端每段送 8 到 64 MiB（依網路速度調整），這裡留一倍的餘裕
+const MAX_CHUNK_BYTES: usize = 128 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -287,11 +289,10 @@ async fn name_taken(dir: PathBuf, name: String, on_conflict: OnConflict) -> Resu
     blocking(move || Ok(tree::find_same_name(&dir, &name, None)?.is_some())).await
 }
 
-/// 取得暫存檔的獨佔鎖。
+/// 取得暫存檔的鎖：寫入用共用鎖（`shared`），完成用獨佔鎖。
 ///
-/// 呼叫端必須**在這之後**才讀取資料庫的已確認長度：持有鎖的期間沒有別人能推進它，
-/// 讀到的一定是最新的。反過來的話，讀到的值可能在拿到鎖之前就過時了，
-/// 截斷會把另一個請求剛確認的資料切掉。
+/// 呼叫端必須**在這之後**才讀取資料庫的紀錄：完成時，持有獨佔鎖的期間沒有別人在寫，
+/// 讀到的已確認長度一定是最新的；寫入時，拿到共用鎖就代表上傳還沒被完成。
 ///
 /// 暫存檔不在時再查一次紀錄：紀錄也不在是正常的 404（已經完成或取消，例如連按兩下完成），
 /// 紀錄還在才是真的遺失。
@@ -300,8 +301,14 @@ async fn lock_part(
     uploads_dir: &Path,
     user: &CurrentUser,
     id: &str,
+    shared: bool,
 ) -> Result<PartLock, UploadError> {
-    match PartLock::acquire(uploads_dir, id).await {
+    let lock = if shared {
+        PartLock::acquire_shared(uploads_dir, id).await
+    } else {
+        PartLock::acquire(uploads_dir, id).await
+    };
+    match lock {
         Ok(lock) => Ok(lock),
         Err(PartError::NotFound) => match uploads_db::find_upload(pool, user.id, id).await? {
             Some(_) => {
@@ -321,7 +328,7 @@ async fn create(
     InSpace { user, space }: InSpace,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
-    State(UploadLimit(limit)): State<UploadLimit>,
+    State(limit): State<UploadLimit>,
     State(PendingUploadLimit(max_pending)): State<PendingUploadLimit>,
     Json(req): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<UploadResponse>), UploadError> {
@@ -329,6 +336,7 @@ async fn create(
     let dir = parse_path(&req.path)?;
     space.check_write_in(&dir).map_err(denied)?;
     let name = check_name(&space, &dir, &req.name)?;
+    let limit = limit.get();
     let size = u64::try_from(req.size)
         .map_err(|_| AppError::BadRequest("Invalid file size".to_string()))?;
     if size > limit {
@@ -353,7 +361,9 @@ async fn create(
     // 4. 先建立暫存檔，再寫入紀錄：有紀錄就一定有檔案
     let id = storage::generate_storage_key();
     let uploads_dir = space.uploads_dir();
-    create_part(&uploads_dir, &id).await.map_err(part_error)?;
+    create_part(&uploads_dir, &id, size)
+        .await
+        .map_err(part_error)?;
 
     let space_param = space.key.to_param();
     let dir_text = dir.display();
@@ -437,14 +447,22 @@ struct OffsetQuery {
 /// 30 秒遠長於正常情況下兩塊資料的間隔，又短於前端自動重試的總時間（約 5 分鐘）。
 const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// PUT /api/uploads/{id}?offset=N：從第 N 個位元組續寫。
+/// 已確認長度之後，最遠可以從多遠的地方開始寫一段：
+/// 同時上傳好幾段時，前面那段慢了，後面的不能無限制地跑在前面
+const MAX_AHEAD: u64 = 4 * MAX_CHUNK_BYTES as u64;
+
+/// PUT /api/uploads/{id}?offset=N：寫入從第 N 個位元組開始的一段，回傳新的已確認長度。
 ///
-/// 請求內容一塊一塊地寫入；連線中途中斷時，已收到的部分照樣 fsync 並確認，
+/// 同一個上傳可以同時有好幾個請求寫不同的段落（不按順序到達也可以）。
+/// 每段寫完並 fsync 之後記在 UploadProgress；前面沒有空缺時，已確認長度推進到最遠的地方。
+///
+/// 請求內容一塊一塊地寫入；連線中途中斷時，已收到的部分照樣 fsync 並記下，
 /// 續傳時只需要從那裡繼續，而不是重傳整段。
 async fn append(
     user: CurrentUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
+    State(progress): State<UploadProgress>,
     UrlPath(id): UrlPath<String>,
     Query(query): Query<OffsetQuery>,
     body: Body,
@@ -453,28 +471,36 @@ async fn append(
     let upload = find_own(&pool, &user, &id).await?;
     let space = space_of(&pool, &data_dir, &user, &upload).await?;
 
-    // 2. 先拿鎖，再讀已確認的長度：這時讀到的一定是最新的（見 lock_part）
-    let lock = lock_part(&pool, &space.uploads_dir(), &user, &id)
+    // 2. 先拿共用鎖，再讀已確認的長度（理由見 lock_part）。正在完成時是 Busy
+    let lock = lock_part(&pool, &space.uploads_dir(), &user, &id, true)
         .await
-        .inspect_err(|_| {
-            eprintln!("upload {id}: rejected, another request still holds the lock")
-        })?;
-    eprintln!("upload {id}: request at offset {} started", query.offset);
+        .inspect_err(|_| eprintln!("upload {id}: rejected, the upload is being finished"))?;
     let upload = find_own(&pool, &user, &id).await?;
 
-    // 3. 位置必須與伺服器已確認的長度相同
-    if query.offset != upload.received {
+    // 3. 位置：不能在已確認的範圍內（前端以為還沒收到，問一次正確的位置就好），
+    //    也不能跑得太前面
+    let confirmed = to_u64(upload.received)?;
+    let size = to_u64(upload.size)?;
+    let offset = u64::try_from(query.offset).unwrap_or(0);
+    if query.offset < upload.received || offset > size || offset > confirmed + MAX_AHEAD {
         return Err(UploadError::OffsetMismatch {
             received: upload.received,
         });
     }
 
-    // 4. 截斷到已確認的長度（丟掉斷電前沒被確認的部分）
-    let confirmed = to_u64(upload.received)?;
+    // 4. 同一段已經有請求在寫（例如前端逾時後重送，舊的請求還沒結束）
+    let Some(_active) = progress.begin(&id, offset) else {
+        eprintln!("upload {id}: rejected, the segment at {offset} is still being written");
+        return Err(UploadError::Busy);
+    };
+    eprintln!("upload {id}: request at offset {offset} started");
     let mut part = lock
-        .resume(confirmed, to_u64(upload.size)?)
+        .write_at(confirmed, offset, size)
         .await
         .map_err(part_error)?;
+
+    // 各階段花的時間，寫在結束的紀錄裡：找出上傳慢的原因（網路、硬碟或資料庫）
+    let started = std::time::Instant::now();
 
     // 5. 一塊一塊地寫入；出錯時先記下來，不立刻 return，下一步要先保住已寫入的部分
     let mut stream = body.into_data_stream();
@@ -506,22 +532,25 @@ async fn append(
             break;
         }
     }
+    let receive_ms = started.elapsed().as_millis();
+    let mut sync_ms = 0;
 
-    // 6. 有新資料：先 fsync，再推進已確認的長度
-    let mut received = upload.received;
-    if part.len() > confirmed {
-        let new_len = to_i64(part.sync().await.map_err(part_error)?)?;
-        let advanced =
-            uploads_db::advance_received(&pool, user.id, &id, upload.received, new_len).await?;
-        if !advanced {
-            // 檔案鎖保證同一時間只有一個請求在寫；更新失敗代表上傳在這段期間被取消了
-            return Err(upload_not_found().into());
-        }
-        received = new_len;
+    // 6. 有新資料：先 fsync，記下這一段，再推進已確認的長度
+    if part.len() > offset {
+        let step = std::time::Instant::now();
+        let end = part.sync().await.map_err(part_error)?;
+        sync_ms = step.elapsed().as_millis();
+        progress.record(&id, offset, end);
     }
+    drop(part);
+
+    let step = std::time::Instant::now();
+    let received = advance(&pool, &user, &progress, &id).await?;
+    let db_ms = step.elapsed().as_millis();
 
     eprintln!(
-        "upload {id}: request ended, {received} bytes confirmed{}",
+        "upload {id}: request at offset {offset} ended, {received} bytes confirmed{} \
+         (receive {receive_ms} ms, sync {sync_ms} ms, database {db_ms} ms)",
         if failure.is_some() {
             " (interrupted)"
         } else {
@@ -531,6 +560,30 @@ async fn append(
     match failure {
         Some(e) => Err(e),
         None => Ok(Json(ProgressResponse { received })),
+    }
+}
+
+/// 把已確認長度推進到已落盤的段落連續到達的地方，回傳新的已確認長度。
+///
+/// 好幾個請求可能同時推進：資料庫只在值仍是讀到的那個時才更新（見 advance_received），
+/// 慢了一步就重讀再算。
+async fn advance(
+    pool: &SqlitePool,
+    user: &CurrentUser,
+    progress: &UploadProgress,
+    id: &str,
+) -> Result<i64, UploadError> {
+    loop {
+        // 上傳在這段期間被取消時，這裡是 404
+        let current = find_own(pool, user, id).await?.received;
+        let reach = to_i64(progress.reach(id, to_u64(current)?))?;
+        if reach <= current {
+            return Ok(current);
+        }
+        if uploads_db::advance_received(pool, user.id, id, current, reach).await? {
+            progress.confirm(id, to_u64(reach)?);
+            return Ok(reach);
+        }
     }
 }
 
@@ -548,6 +601,7 @@ async fn complete(
     user: CurrentUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
+    State(progress): State<UploadProgress>,
     UrlPath(id): UrlPath<String>,
     Json(req): Json<CompleteRequest>,
 ) -> Result<(StatusCode, Json<CompleteResponse>), UploadError> {
@@ -555,7 +609,7 @@ async fn complete(
     //    持有鎖的期間沒有別的請求能續寫、完成或截斷它
     let upload = find_own(&pool, &user, &id).await?;
     let space = space_of(&pool, &data_dir, &user, &upload).await?;
-    let lock = lock_part(&pool, &space.uploads_dir(), &user, &id).await?;
+    let lock = lock_part(&pool, &space.uploads_dir(), &user, &id, false).await?;
     let upload = find_own(&pool, &user, &id).await?;
 
     // 2. 必須已經傳完
@@ -599,6 +653,7 @@ async fn complete(
     };
 
     // 5. 上傳紀錄已經沒有用處
+    progress.forget(&id);
     if let Err(e) = uploads_db::delete_upload(&pool, user.id, &id).await {
         // 留下的紀錄沒有對應的暫存檔，24 小時後由垃圾回收刪除
         eprintln!("failed to delete the finished upload {id}: {e}");
@@ -622,12 +677,14 @@ async fn cancel(
     user: CurrentUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
+    State(progress): State<UploadProgress>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<StatusCode, UploadError> {
     let upload = find_own(&pool, &user, &id).await?;
     if !uploads_db::delete_upload(&pool, user.id, &id).await? {
         return Err(upload_not_found().into());
     }
+    progress.forget(&id);
     // 空間找不到（例如硬碟沒有掛載）也沒關係：沒有紀錄的暫存檔由垃圾回收刪除
     if let Ok(space) = space_of(&pool, &data_dir, &user, &upload).await
         && let Err(e) = remove_part(&space.uploads_dir(), &id).await
@@ -932,7 +989,7 @@ mod tests {
         let t = TestApp::new(pool, MIB).await;
         let dave = t.other_user("dave").await;
         let id = storage::generate_storage_key();
-        create_part(&uploads_dir(&t), &id).await.unwrap();
+        create_part(&uploads_dir(&t), &id, 10).await.unwrap();
         let new = NewUpload {
             id: &id,
             owner_id: dave,
@@ -959,39 +1016,76 @@ mod tests {
     // ==================== 競爭 ====================
 
     #[sqlx::test]
-    async fn a_stale_request_never_truncates_confirmed_data(pool: SqlitePool) {
+    async fn segments_can_arrive_out_of_order(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let id = declare(&t, "a.bin", 15).await;
+
+        // 後面的段落先到：已確認長度還不能推進
+        assert_eq!(put(&t, &id, 10, b"!!!!!").await.1["received"], 0);
+        assert_eq!(put(&t, &id, 5, b"world").await.1["received"], 0);
+        // 空缺補上：一次推進到最後
+        assert_eq!(put(&t, &id, 0, b"hello").await.1["received"], 15);
+
+        let (status, body) = complete(&t, &id, json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(file_content(&t, "a.bin"), b"helloworld!!!!!");
+    }
+
+    #[sqlx::test]
+    async fn a_segment_too_far_ahead_is_refused(pool: SqlitePool) {
+        let t = TestApp::new(pool, 1 << 40).await;
+        let size = 2 * MAX_AHEAD as i64;
+        let id = declare(&t, "big.bin", size).await;
+
+        let (status, body) = put(&t, &id, MAX_AHEAD as i64 + 1, b"x").await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "offset_mismatch");
+        assert_eq!(body["received"], 0);
+    }
+
+    #[sqlx::test]
+    async fn writers_never_overlap_and_block_completion(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
         let id = declare(&t, "a.bin", 10).await;
         put(&t, &id, 0, b"hello").await;
 
-        // 請求 C：持有鎖，寫入並確認了後半段，還沒釋放鎖
-        let mut c = PartLock::acquire(&uploads_dir(&t), &id)
-            .await
-            .unwrap()
-            .resume(5, 10)
-            .await
-            .unwrap();
-        c.write_chunk(b"world").await.unwrap();
-        c.sync().await.unwrap();
-        uploads_db::advance_received(&t.pool, t.user_id, &id, 5, 10)
+        // 請求 C：正在寫 5 開始的那一段，還沒結束
+        let progress = t.state.upload_progress.clone();
+        let c = progress.begin(&id, 5).unwrap();
+        let c_lock = PartLock::acquire_shared(&uploads_dir(&t), &id)
             .await
             .unwrap();
 
-        // 請求 B：前端以為 C 逾時了，用舊的 offset 重送
-        let (status, body) = put(&t, &id, 5, b"XXXXX").await;
+        // 前端以為 C 逾時了，重送同一段：拒絕，不會兩個請求同時寫同一個位置
+        let (status, body) = put(&t, &id, 5, b"world").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "upload_busy");
+        // 還有人在寫：不能完成
+        let (status, body) = complete(&t, &id, json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "upload_busy");
 
-        // C 結束、釋放鎖之後，B 再重試：拿到鎖之後才讀紀錄，看到的是最新的 10
-        drop(c);
-        let (status, body) = put(&t, &id, 5, b"XXXXX").await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["code"], "offset_mismatch");
-        assert_eq!(body["received"], 10);
+        // C 結束之後，重送就能成功
+        drop((c, c_lock));
+        assert_eq!(put(&t, &id, 5, b"world").await.1["received"], 10);
+        assert_eq!(complete(&t, &id, json!({})).await.0, StatusCode::CREATED);
+        assert_eq!(file_content(&t, "a.bin"), b"helloworld");
+    }
 
-        // C 確認的資料完好無缺
-        let (status, _) = complete(&t, &id, json!({})).await;
-        assert_eq!(status, StatusCode::CREATED);
+    #[sqlx::test]
+    async fn segments_lost_by_a_restart_are_sent_again(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let id = declare(&t, "a.bin", 10).await;
+        put(&t, &id, 5, b"world").await;
+
+        // 程式重新啟動：記憶體中「5 之後已經收到」的紀錄不見了
+        t.state.upload_progress.forget(&id);
+        assert_eq!(put(&t, &id, 0, b"hello").await.1["received"], 5);
+
+        // 前端從已確認的 5 重送
+        assert_eq!(put(&t, &id, 5, b"world").await.1["received"], 10);
+        assert_eq!(complete(&t, &id, json!({})).await.0, StatusCode::CREATED);
         assert_eq!(file_content(&t, "a.bin"), b"helloworld");
     }
 

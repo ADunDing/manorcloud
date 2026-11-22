@@ -197,6 +197,13 @@ async fn serve() {
         eprintln!("configuration error: {e}");
         std::process::exit(1);
     });
+    // 憑證也在一開始讀取：檔案不存在或格式錯誤時立刻停止
+    let tls = config.tls.as_ref().map(|files| {
+        web::tls::load(&files.cert, &files.key).unwrap_or_else(|e| {
+            eprintln!("TLS error: {e}");
+            std::process::exit(1);
+        })
+    });
 
     // 每個使用者的資料夾在他第一次寫入時才建立，這裡只需要資料目錄本身
     std::fs::create_dir_all(&config.data_dir).expect("failed to create the data directory");
@@ -204,6 +211,14 @@ async fn serve() {
     println!("data directory: {}", config.data_dir.display());
     println!("upload limit: {} bytes", config.max_upload_bytes);
     println!("secure cookies: {}", config.secure_cookies);
+    if !config.trusted_proxies.is_empty() {
+        let proxies: Vec<String> = config
+            .trusted_proxies
+            .iter()
+            .map(|r| r.to_string())
+            .collect();
+        println!("trusted proxies: {}", proxies.join(", "));
+    }
     println!(
         "unfinished uploads per user: {}",
         config.max_pending_uploads
@@ -250,10 +265,20 @@ async fn serve() {
 
     let state = web::AppState::new(pool, config.data_dir, config.max_upload_bytes)
         .with_secure_cookies(config.secure_cookies)
-        .with_max_pending_uploads(config.max_pending_uploads);
+        .with_max_pending_uploads(config.max_pending_uploads)
+        .with_trusted_proxies(web::TrustedProxies::new(config.trusted_proxies.clone()));
+    // 管理頁面設定的上傳上限：取代設定檔的值
+    match db::settings::max_upload_bytes(&state.pool).await {
+        Ok(Some(bytes)) => {
+            state.upload_limit.set(Some(bytes));
+            println!("upload limit set in Administration: {bytes} bytes");
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("cannot read the upload limit set in Administration: {e}"),
+    }
     // 登入次數限制：背景定期清除過期的記錄
     state.login_limits.spawn_pruning();
-    web::run(state, config.bind_addr).await;
+    web::run(state, config.bind_addr, tls).await;
 }
 
 #[cfg(test)]

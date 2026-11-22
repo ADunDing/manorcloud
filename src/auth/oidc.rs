@@ -47,6 +47,9 @@ pub struct Identity {
     /// 建議的帳號名稱：只在自動建立帳號時參考，不用於辨識
     pub preferred_username: Option<String>,
     pub email: Option<String>,
+    /// 所屬的群組（groups 欄位，Authentik 等會提供）；身分提供者沒有送這個欄位時為 None。
+    /// 用於「管理員群組」：沒有送時不能當成「不在任何群組」，否則設定錯誤會讓管理員全部被降級
+    pub groups: Option<Vec<String>>,
 }
 
 /// 失敗的原因。只記在 log；對使用者一律顯示通用的訊息
@@ -155,7 +158,33 @@ pub async fn finish(
             .preferred_username()
             .map(|name| name.as_str().to_string()),
         email: claims.email().map(|email| email.as_str().to_string()),
+        groups: groups_claim(&id_token.to_string()),
     })
+}
+
+/// 從 ID token 讀出 groups 欄位。
+///
+/// openidconnect 只解析標準欄位；groups 不是標準欄位，所以直接讀 token 的內容。
+/// 呼叫前 token 已經通過驗證（簽章、發行者、對象、到期、nonce），內容可以信任。
+fn groups_claim(token: &str) -> Option<Vec<String>> {
+    use base64::Engine as _;
+
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let groups = claims.get("groups")?;
+    Some(
+        groups
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|g| g.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// 讀取身分提供者的設定：{issuer}/.well-known/openid-configuration 與它的金鑰
@@ -184,4 +213,36 @@ fn error_chain(e: &dyn std::error::Error) -> String {
         source = s.source();
     }
     parts.join(" <- ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token(payload: &str) -> String {
+        use base64::Engine as _;
+        let encode = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        format!("{}.{}.sig", encode(r#"{"alg":"RS256"}"#), encode(payload))
+    }
+
+    #[test]
+    fn groups_are_read_from_the_token() {
+        let groups = groups_claim(&token(
+            r#"{"sub":"a","groups":["authentik Admins","family"]}"#,
+        ));
+        assert_eq!(
+            groups,
+            Some(vec!["authentik Admins".to_string(), "family".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_missing_groups_claim_is_not_an_empty_list() {
+        assert_eq!(groups_claim(&token(r#"{"sub":"a"}"#)), None);
+        assert_eq!(
+            groups_claim(&token(r#"{"sub":"a","groups":[]}"#)),
+            Some(vec![])
+        );
+        assert_eq!(groups_claim("not a token"), None);
+    }
 }

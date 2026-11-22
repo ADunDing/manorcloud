@@ -9,14 +9,14 @@
 //!
 //! 只知道密碼的人拿到的只有那張待驗證的憑證，什麼都不能做。
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, State},
+    extract::State,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -28,7 +28,7 @@ use tokio::sync::Semaphore;
 
 use super::{
     error::{AppError, Forbidden},
-    extract::SessionUser,
+    extract::{ClientIp, SessionUser},
     state::{AppState, CookieSecure, LoginLimits},
 };
 use crate::{
@@ -314,14 +314,14 @@ async fn login(
     State(pool): State<SqlitePool>,
     State(cookie_secure): State<CookieSecure>,
     State(limits): State<LoginLimits>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientIp(client): ClientIp,
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), LoginError> {
     // 0. 佔用名額。被鎖定、或名額已被進行中的嘗試佔滿時直接拒絕：
     //    不查資料庫，也不花 Argon2 的運算。
     //    從這裡起，任何提早 return 都會在 attempt 被丟棄時記為一次失敗
-    let mut attempt = match LoginAttempt::begin(&limits, peer.ip(), &req.username) {
+    let mut attempt = match LoginAttempt::begin(&limits, client, &req.username) {
         Ok(attempt) => attempt,
         Err(wait) => return Err(LoginError::Locked(wait)),
     };
@@ -420,7 +420,7 @@ async fn login_two_factor(
     State(pool): State<SqlitePool>,
     State(cookie_secure): State<CookieSecure>,
     State(limits): State<LoginLimits>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientIp(client): ClientIp,
     jar: CookieJar,
     Json(req): Json<TwoFactorRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), LoginError> {
@@ -446,7 +446,7 @@ async fn login_two_factor(
     };
 
     // 2. 與密碼相同的名額：猜驗證碼也受登入次數限制
-    let mut attempt = match LoginAttempt::begin(&limits, peer.ip(), &summary.username) {
+    let mut attempt = match LoginAttempt::begin(&limits, client, &summary.username) {
         Ok(attempt) => attempt,
         Err(wait) => return Err(LoginError::Locked(wait)),
     };

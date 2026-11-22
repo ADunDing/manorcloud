@@ -9,8 +9,8 @@ use std::io;
 use std::time::Duration;
 
 use axum::Router;
+use axum::serve::ListenerExt;
 use std::net::SocketAddr;
-use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 /// 伺服器如何結束
@@ -43,12 +43,15 @@ pub fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
 ///
 /// `stop` 可以是任何 future：正式執行時是 `shutdown_signal()`，測試時是一個通道，
 /// 不需要真的對測試程式送訊號。
-pub async fn serve_until(
-    listener: TcpListener,
+pub async fn serve_until<L>(
+    listener: L,
     app: Router,
     stop: impl Future<Output = ()> + Send + 'static,
     grace: Duration,
-) -> io::Result<Shutdown> {
+) -> io::Result<Shutdown>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     // 「開始停止」的時刻：收到訊號才開始計時，而不是從伺服器啟動就計時
     let (stopping_tx, mut stopping_rx) = tokio::sync::watch::channel(false);
 
@@ -64,8 +67,10 @@ pub async fn serve_until(
 
     // with_graceful_shutdown：stop 完成後不再接受新連線，等現有連線上的請求完成
     // 附帶連線資訊：handler 才能用 ConnectInfo 取得對方的 IP（登入次數限制需要）
+    // tap_io 不做任何事，只是包一層：axum 對包過的任何監聽器都提供 SocketAddr 的連線資訊，
+    // 這樣 HTTP（TcpListener）與 HTTPS（TlsListener）可以共用同一段程式
     let server = axum::serve(
-        listener,
+        listener.tap_io(|_| {}),
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(stop)
@@ -96,6 +101,7 @@ mod tests {
     use axum::routing::get;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
     /// 綁定到隨機的可用埠號

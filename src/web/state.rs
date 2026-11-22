@@ -1,18 +1,51 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use axum::extract::FromRef;
+
+use super::extract::TrustedProxies;
+use super::upload_progress::UploadProgress;
 use sqlx::SqlitePool;
 
 use crate::auth::limiter::{self, LoginLimiter};
 
 /// 單一檔案的上傳大小上限（位元組）。
 ///
-/// 用專屬型別包起來而不是直接用 u64：`FromRef` 依「型別」提取欄位，
-/// 若之後再有其他 u64 欄位會互相衝突；`State<UploadLimit>` 的語意也比 `State<u64>` 清楚。
-#[derive(Clone, Copy, Debug)]
-pub struct UploadLimit(pub u64);
+/// 預設是設定檔的 MANORCLOUD_MAX_UPLOAD_BYTES；管理員可以在管理頁面改成其他值
+/// （存在資料庫的 server_settings，啟動時載入）。所有請求共用同一個值，修改後立即生效。
+#[derive(Clone, Debug)]
+pub struct UploadLimit {
+    /// 設定檔的值
+    config: u64,
+    current: Arc<AtomicU64>,
+}
+
+impl UploadLimit {
+    pub fn new(config: u64) -> Self {
+        UploadLimit {
+            config,
+            current: Arc::new(AtomicU64::new(config)),
+        }
+    }
+
+    /// 目前的上限
+    pub fn get(&self) -> u64 {
+        self.current.load(Ordering::Relaxed)
+    }
+
+    /// 設定檔的值（管理頁面沒有另外設定時使用）
+    pub fn config(&self) -> u64 {
+        self.config
+    }
+
+    /// 管理頁面設定的值；None 回到設定檔的值
+    pub fn set(&self, custom: Option<u64>) {
+        self.current
+            .store(custom.unwrap_or(self.config), Ordering::Relaxed);
+    }
+}
 
 /// 每個使用者最多幾個未完成（可續傳）的上傳
 #[derive(Clone, Copy, Debug)]
@@ -86,7 +119,7 @@ impl LoginLimits {
 ///
 /// axum 每次提取 `State` 都會 clone，所以每個欄位都必須便宜可 clone：
 /// `SqlitePool` 內部本來就是共享的，`data_dir` 用 `Arc<Path>` 避免每次複製路徑字串，
-/// 設定值是 Copy 的小型值，`LoginLimits` 與 `HttpClient` 內部是 `Arc`。
+/// 設定值是 Copy 的小型值，`LoginLimits`、`HttpClient` 與 `UploadProgress` 內部是 `Arc`。
 ///
 /// `FromRef` 讓 handler 可以只提取需要的欄位，例如 `State<SqlitePool>` 或
 /// `State<UploadLimit>`，不必拿整個 `AppState`。
@@ -99,6 +132,8 @@ pub struct AppState {
     pub cookie_secure: CookieSecure,
     pub login_limits: LoginLimits,
     pub http: HttpClient,
+    pub upload_progress: UploadProgress,
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl AppState {
@@ -108,16 +143,23 @@ impl AppState {
         AppState {
             pool,
             data_dir: Arc::from(data_dir),
-            upload_limit: UploadLimit(max_upload_bytes),
+            upload_limit: UploadLimit::new(max_upload_bytes),
             pending_upload_limit: PendingUploadLimit(DEFAULT_PENDING_UPLOAD_LIMIT),
             cookie_secure: CookieSecure(false),
             login_limits: LoginLimits::default(),
             http: HttpClient::new(),
+            upload_progress: UploadProgress::default(),
+            trusted_proxies: TrustedProxies::default(),
         }
     }
 
     pub fn with_secure_cookies(mut self, secure: bool) -> Self {
         self.cookie_secure = CookieSecure(secure);
+        self
+    }
+
+    pub fn with_trusted_proxies(mut self, proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = proxies;
         self
     }
 

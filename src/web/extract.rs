@@ -11,13 +11,16 @@
 //! 要允許這些狀態必須刻意改用 `SessionUser`。
 //!
 //! 檔案的 API 用 `InSpace`：目前的使用者，加上網址參數 `?space=` 指定的空間。
+//!
+//! `ClientIp`：使用者的 IP（登入次數限制用），放在反向代理後面時取自 X-Forwarded-For。
 
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::{FromRef, FromRequestParts},
-    http::request::Parts,
+    extract::{ConnectInfo, FromRef, FromRequestParts},
+    http::{HeaderMap, request::Parts},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Serialize;
@@ -29,6 +32,7 @@ use super::{
 };
 use crate::{
     auth,
+    config::IpRange,
     db::session,
     space::{self, Space, SpaceError, SpaceKey},
 };
@@ -373,5 +377,151 @@ mod tests {
             .await
             .unwrap();
         assert!(user.two_factor_setup_required);
+    }
+}
+
+// ==================== 使用者的 IP ====================
+
+/// 放在前面的反向代理的位址（MANORCLOUD_TRUSTED_PROXIES）
+#[derive(Clone, Default)]
+pub struct TrustedProxies(Arc<[IpRange]>);
+
+impl TrustedProxies {
+    pub fn new(ranges: Vec<IpRange>) -> Self {
+        TrustedProxies(ranges.into())
+    }
+
+    fn trusts(&self, ip: IpAddr) -> bool {
+        self.0.iter().any(|range| range.contains(ip))
+    }
+
+    /// 使用者真正的 IP。
+    ///
+    /// 連線不是來自信任的代理時，直接用連線的位址：任何人都能自己寫 X-Forwarded-For，
+    /// 不能讓它決定登入次數算在誰頭上。
+    ///
+    /// 來自信任的代理時，X-Forwarded-For 是「使用者, 代理1, 代理2…」，每經過一層代理就在後面加一個。
+    /// 從右往左看，跳過信任的代理，第一個不信任的就是使用者：最左邊的可能是使用者自己偽造的。
+    /// 內容無法解析時當作沒有這個標頭，用連線的位址（代理本身）。
+    fn client(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        let peer = peer.to_canonical();
+        if !self.trusts(peer) {
+            return peer;
+        }
+        let mut hops = Vec::new();
+        for value in headers.get_all("x-forwarded-for") {
+            let Ok(value) = value.to_str() else {
+                return peer;
+            };
+            for hop in value.split(',') {
+                match hop.trim().parse::<IpAddr>() {
+                    Ok(ip) => hops.push(ip.to_canonical()),
+                    Err(_) => return peer,
+                }
+            }
+        }
+        hops.iter()
+            .rev()
+            .find(|&&ip| !self.trusts(ip))
+            .or(hops.first())
+            .copied()
+            .unwrap_or(peer)
+    }
+}
+
+/// 使用者的 IP，見 TrustedProxies::client
+pub struct ClientIp(pub IpAddr);
+
+impl<S> FromRequestParts<S> for ClientIp
+where
+    TrustedProxies: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let ConnectInfo(peer) = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
+            .await
+            .map_err(AppError::internal)?;
+        let proxies = TrustedProxies::from_ref(state);
+        Ok(ClientIp(proxies.client(peer.ip(), &parts.headers)))
+    }
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    fn proxies(list: &[&str]) -> TrustedProxies {
+        TrustedProxies::new(list.iter().map(|r| IpRange::parse(r).unwrap()).collect())
+    }
+
+    fn forwarded(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append("x-forwarded-for", HeaderValue::from_str(value).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn without_trusted_proxies_the_header_is_ignored() {
+        let none = TrustedProxies::default();
+
+        // 任何人都能自己寫這個標頭
+        let client = none.client(ip("203.0.113.9"), &forwarded(&["10.0.0.1"]));
+
+        assert_eq!(client, ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn behind_a_trusted_proxy_the_forwarded_address_is_used() {
+        let nginx = proxies(&["127.0.0.1"]);
+
+        let client = nginx.client(ip("127.0.0.1"), &forwarded(&["203.0.113.9"]));
+
+        assert_eq!(client, ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn a_forged_leftmost_address_is_skipped() {
+        let nginx = proxies(&["127.0.0.1"]);
+
+        // 使用者自己送了「1.1.1.1」，nginx 在後面加上真正的位址
+        let client = nginx.client(ip("127.0.0.1"), &forwarded(&["1.1.1.1, 203.0.113.9"]));
+
+        assert_eq!(client, ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn several_trusted_proxies_are_skipped() {
+        let chain = proxies(&["127.0.0.1", "172.18.0.0/16"]);
+
+        // 使用者 → Caddy（172.18.0.5）→ nginx（127.0.0.1）→ ManorCloud
+        let client = chain.client(
+            ip("::ffff:127.0.0.1"),
+            &forwarded(&["203.0.113.9", "172.18.0.5"]),
+        );
+
+        assert_eq!(client, ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn a_missing_or_malformed_header_means_the_proxy_itself() {
+        let nginx = proxies(&["127.0.0.1"]);
+
+        assert_eq!(
+            nginx.client(ip("127.0.0.1"), &HeaderMap::new()),
+            ip("127.0.0.1")
+        );
+        assert_eq!(
+            nginx.client(ip("127.0.0.1"), &forwarded(&["203.0.113.9, unknown"])),
+            ip("127.0.0.1")
+        );
     }
 }

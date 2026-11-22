@@ -45,18 +45,15 @@ use crate::{
     tree::{self, Entry, OnConflict, RelPath},
 };
 
-/// multipart 格式本身的額外開銷（邊界字串、欄位標頭）的預留空間。
-/// 請求本體上限 = 檔案上限 + 這個值，否則剛好等於上限的合法檔案會被誤擋。
-const MULTIPART_OVERHEAD: u64 = 1024 * 1024;
-
-pub fn router(upload_limit: UploadLimit) -> Router<AppState> {
+pub fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/api/files",
             // 順序很重要：MethodRouter::layer 只套用到呼叫當下已存在的方法。
-            // 放寬的上限只作用在上傳，其他方法維持預設
+            // 上傳不使用預設的請求大小上限：上限可以在管理頁面隨時修改，
+            // 由 tree::Upload 一邊接收一邊檢查（超過時立刻停止，回 413）
             post(upload)
-                .layer(DefaultBodyLimit::max(body_limit(upload_limit)))
+                .layer(DefaultBodyLimit::disable())
                 .get(list)
                 .patch(rename)
                 .delete(remove),
@@ -69,18 +66,6 @@ pub fn router(upload_limit: UploadLimit) -> Router<AppState> {
         .route("/api/config", get(config))
         .route("/api/me/preferences", get(preferences).put(set_preferences))
         .route("/api/storage", get(storage_info))
-}
-
-/// 計算請求本體上限。32 位元平台上 usize 放不下 10 GiB 的設定時，在啟動時停止
-fn body_limit(UploadLimit(limit): UploadLimit) -> usize {
-    let total = limit.saturating_add(MULTIPART_OVERHEAD);
-    usize::try_from(total).unwrap_or_else(|_| {
-        panic!(
-            "MANORCLOUD_MAX_UPLOAD_BYTES ({limit}) is too large for this platform: \
-             the limit plus the multipart overhead can't exceed {} bytes",
-            usize::MAX
-        )
-    })
 }
 
 // ==================== 共用 ====================
@@ -565,7 +550,7 @@ async fn upload(
     InSpace { user, space }: InSpace,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
-    State(UploadLimit(limit)): State<UploadLimit>,
+    State(limit): State<UploadLimit>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
     mut multipart: Multipart,
@@ -595,7 +580,7 @@ async fn upload(
         ));
     }
 
-    let mut upload = tree::Upload::create(&space.tmp_dir(), limit)
+    let mut upload = tree::Upload::create(&space.tmp_dir(), limit.get())
         .await
         .map_err(io_error)?;
     while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
@@ -635,12 +620,9 @@ struct ConfigResponse {
 }
 
 /// GET /api/config。需要登入：沒有理由對未登入的人公開伺服器的設定
-async fn config(
-    _user: CurrentUser,
-    State(UploadLimit(limit)): State<UploadLimit>,
-) -> Json<ConfigResponse> {
+async fn config(_user: CurrentUser, State(limit): State<UploadLimit>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
-        max_upload_bytes: limit,
+        max_upload_bytes: limit.get(),
     })
 }
 

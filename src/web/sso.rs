@@ -44,6 +44,7 @@ use crate::{
     db::{
         session,
         sso::{self, CreateUserError, Flow, LinkError, SsoSettings, UnlinkOutcome},
+        user::{self, AdminUpdateError},
     },
 };
 
@@ -55,6 +56,8 @@ const FLOW_MINUTES: i64 = 10;
 const CALLBACK_PATH: &str = "/api/auth/sso/callback";
 
 const DISPLAY_NAME_MAX: usize = 40;
+/// 管理員群組名稱的長度上限
+const ADMIN_GROUP_MAX: usize = 200;
 const CLIENT_ID_MAX: usize = 255;
 const URL_MAX: usize = 1024;
 const SECRET_MAX: usize = 1024;
@@ -356,6 +359,7 @@ async fn complete(
                 None if settings.auto_create => create_account(pool, &identity).await?,
                 None => return Err(Failure::NoAccount),
             };
+            sync_role(pool, &settings, &identity, user_id).await?;
             // 與密碼登入相同的入口：停用的檢查在 start_session 裡
             let jar = start_session(pool, jar, user_id, cookie_secure)
                 .await
@@ -365,6 +369,62 @@ async fn complete(
                 })?;
             Ok((jar, Done::LoggedIn))
         }
+    }
+}
+
+/// 設定了管理員群組時，依身分提供者的群組決定角色：在群組裡是管理員，不在是成員。
+///
+/// - 身分提供者沒有送 groups 欄位時不改變角色：多半是設定問題（例如 scope 沒有包含群組），
+///   當成「不在任何群組」的話，所有管理員都會在下次登入時被降級
+/// - 降級會讓系統沒有任何可以用密碼登入的管理員時，保持管理員（資料庫的 trigger 擋下），
+///   身分提供者壞掉時仍然有人能登入管理
+async fn sync_role(
+    pool: &SqlitePool,
+    settings: &SsoSettings,
+    identity: &Identity,
+    user_id: i64,
+) -> Result<(), Failure> {
+    let group = settings.admin_group.as_str();
+    if group.is_empty() {
+        return Ok(());
+    }
+    let Some(groups) = &identity.groups else {
+        eprintln!(
+            "sso: the provider sent no groups, so roles were not changed; \
+             make sure the ID token includes the groups claim"
+        );
+        return Ok(());
+    };
+    let role = if groups.iter().any(|g| g == group) {
+        "admin"
+    } else {
+        "member"
+    };
+    let current: Option<(String, String)> =
+        sqlx::query_as("SELECT username, role FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((username, current)) = current else {
+        return Err(Failure::Failed);
+    };
+    if current == role {
+        return Ok(());
+    }
+    match user::update_user(pool, user_id, Some(role), None).await {
+        Ok(()) => {
+            println!("sso: {username:?} is now {role} (administrator group {group:?})");
+            Ok(())
+        }
+        Err(AdminUpdateError::LastAdmin) => {
+            eprintln!(
+                "sso: {username:?} is not in {group:?} but stays an administrator: \
+                 otherwise no administrator could sign in with a password"
+            );
+            Ok(())
+        }
+        Err(AdminUpdateError::NotFound) => Err(Failure::Failed),
+        Err(AdminUpdateError::Db(e)) => Err(e.into()),
     }
 }
 
@@ -498,6 +558,7 @@ struct AdminSettings {
     has_secret: bool,
     public_url: String,
     auto_create: bool,
+    admin_group: String,
     /// 要貼到身分提供者設定中的網址；ManorCloud 的網址還沒設定時為 None
     redirect_uri: Option<String>,
 }
@@ -506,12 +567,13 @@ impl From<Option<SsoSettings>> for AdminSettings {
     fn from(settings: Option<SsoSettings>) -> Self {
         let settings = settings.unwrap_or(SsoSettings {
             enabled: false,
-            display_name: String::new(),
+            display_name: "OIDC".to_string(),
             issuer_url: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
             public_url: String::new(),
             auto_create: false,
+            admin_group: String::new(),
         });
         AdminSettings {
             redirect_uri: (!settings.public_url.is_empty())
@@ -523,6 +585,7 @@ impl From<Option<SsoSettings>> for AdminSettings {
             has_secret: !settings.client_secret.is_empty(),
             public_url: settings.public_url,
             auto_create: settings.auto_create,
+            admin_group: settings.admin_group,
         }
     }
 }
@@ -547,6 +610,9 @@ struct SaveRequest {
     client_secret: Option<String>,
     public_url: String,
     auto_create: bool,
+    /// 舊版的前端不會送這個欄位：當作不使用
+    #[serde(default)]
+    admin_group: String,
 }
 
 /// PUT /api/admin/sso：儲存設定。啟用時每一項都必須填寫
@@ -569,6 +635,7 @@ async fn save_admin_settings(
         client_secret: secret,
         public_url: req.public_url.trim().to_string(),
         auto_create: req.auto_create,
+        admin_group: req.admin_group.trim().to_string(),
     };
     let settings = validate_settings(settings)?;
     sso::save_settings(&pool, &settings).await?;
@@ -581,6 +648,9 @@ fn validate_settings(mut settings: SsoSettings) -> Result<SsoSettings, AppError>
 
     if settings.display_name.chars().count() > DISPLAY_NAME_MAX {
         return bad("The button label is too long");
+    }
+    if settings.admin_group.chars().count() > ADMIN_GROUP_MAX {
+        return bad("The administrator group name is too long");
     }
     if settings.client_id.len() > CLIENT_ID_MAX || settings.client_secret.len() > SECRET_MAX {
         return bad("The client ID or secret is too long");
@@ -727,16 +797,16 @@ mod tests {
         http::{HeaderMap, Method, header},
     };
     use openidconnect::{
-        AccessToken, Audience, AuthUrl, EmptyAdditionalClaims, EmptyExtraTokenFields,
-        EndUserUsername, IdToken, IdTokenClaims, IssuerUrl, JsonWebKeyId, JsonWebKeySet,
-        JsonWebKeySetUrl, Nonce, PrivateSigningKey, ResponseTypes, StandardClaims,
-        SubjectIdentifier, TokenUrl,
+        AdditionalClaims, Audience, AuthUrl, EndUserUsername, IdToken, IdTokenClaims, IssuerUrl,
+        JsonWebKeyId, JsonWebKeySet, JsonWebKeySetUrl, Nonce, PrivateSigningKey, ResponseTypes,
+        StandardClaims, SubjectIdentifier, TokenUrl,
         core::{
-            CoreIdTokenFields, CoreJwsSigningAlgorithm, CoreProviderMetadata, CoreResponseType,
-            CoreRsaPrivateSigningKey, CoreSubjectIdentifierType, CoreTokenResponse, CoreTokenType,
+            CoreGenderClaim, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
+            CoreProviderMetadata, CoreResponseType, CoreRsaPrivateSigningKey,
+            CoreSubjectIdentifierType,
         },
     };
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 
     /// 測試專用的金鑰（PKCS#1），只用於簽發假的 ID token。
@@ -754,7 +824,18 @@ mod tests {
         audience: String,
         /// 用另一把金鑰簽名（偽造的 token）
         forged: bool,
+        /// groups 欄位；None 時不送這個欄位
+        groups: Option<Vec<String>>,
     }
+
+    /// Authentik 在 ID token 中附上的 groups 欄位
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct GroupsClaim {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        groups: Option<Vec<String>>,
+    }
+
+    impl AdditionalClaims for GroupsClaim {}
 
     /// 修改下一次簽發的 ID token，模擬一種攻擊
     type Tamper = fn(&mut NextToken);
@@ -777,6 +858,7 @@ mod tests {
                     nonce: None,
                     audience: CLIENT_ID.to_string(),
                     forged: false,
+                    groups: None,
                 })),
             };
             let app = Router::new()
@@ -801,6 +883,7 @@ mod tests {
                 client_secret: "secret".to_string(),
                 public_url: "http://localhost:3000".to_string(),
                 auto_create,
+                admin_group: String::new(),
             }
         }
     }
@@ -840,10 +923,17 @@ mod tests {
             now,
             StandardClaims::new(SubjectIdentifier::new(next.subject))
                 .set_preferred_username(next.username.map(EndUserUsername::new)),
-            EmptyAdditionalClaims {},
+            GroupsClaim {
+                groups: next.groups,
+            },
         )
         .set_nonce(next.nonce.map(Nonce::new));
-        let id_token = IdToken::new(
+        let id_token = IdToken::<
+            GroupsClaim,
+            CoreGenderClaim,
+            CoreJweContentEncryptionAlgorithm,
+            CoreJwsSigningAlgorithm,
+        >::new(
             claims,
             &signing_key(next.forged),
             CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
@@ -851,12 +941,11 @@ mod tests {
             None,
         )
         .unwrap();
-        let response = CoreTokenResponse::new(
-            AccessToken::new("access".to_string()),
-            CoreTokenType::Bearer,
-            CoreIdTokenFields::new(Some(id_token), EmptyExtraTokenFields {}),
-        );
-        Json(serde_json::to_value(response).unwrap())
+        Json(json!({
+            "access_token": "access",
+            "token_type": "bearer",
+            "id_token": id_token.to_string(),
+        }))
     }
 
     // ---------- ManorCloud 這一邊 ----------
@@ -948,6 +1037,98 @@ mod tests {
         assert_eq!(again["id"], user["id"]);
     }
 
+    /// SSO 設定加上管理員群組
+    async fn with_admin_group(pool: &SqlitePool, provider: &Provider) {
+        let settings = SsoSettings {
+            admin_group: "authentik Admins".to_string(),
+            ..provider.settings(true)
+        };
+        sso::save_settings(pool, &settings).await.unwrap();
+    }
+
+    fn groups(names: &[&str]) -> Option<Vec<String>> {
+        Some(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    #[sqlx::test]
+    async fn the_admin_group_decides_the_role_at_every_sign_in(pool: SqlitePool) {
+        let provider = Provider::start().await;
+        with_admin_group(&pool, &provider).await;
+        let t = TestApp::new(pool, MIB).await;
+        // 另有一位可以用密碼登入的管理員，降級才不會被擋下
+        make_admin(&t).await;
+
+        // 在群組裡：第一次登入就是管理員
+        provider.set(|next| next.groups = groups(&["authentik Admins", "family"]));
+        let (_, headers) = sign_in(&t, &provider).await;
+        assert_eq!(
+            me(&t, &cookie_value(&headers, SESSION_COOKIE)).await["role"],
+            "admin"
+        );
+
+        // 在身分提供者被移出群組：下次登入降為成員
+        provider.set(|next| next.groups = groups(&["family"]));
+        let (_, headers) = sign_in(&t, &provider).await;
+        assert_eq!(
+            me(&t, &cookie_value(&headers, SESSION_COOKIE)).await["role"],
+            "member"
+        );
+    }
+
+    #[sqlx::test]
+    async fn no_groups_claim_leaves_the_role_alone(pool: SqlitePool) {
+        let provider = Provider::start().await;
+        with_admin_group(&pool, &provider).await;
+        let t = TestApp::new(pool, MIB).await;
+        provider.set(|next| next.groups = groups(&["authentik Admins"]));
+        sign_in(&t, &provider).await;
+
+        // 身分提供者的設定改壞了，不再送 groups：不能因此把管理員降級
+        provider.set(|next| next.groups = None);
+        let (_, headers) = sign_in(&t, &provider).await;
+
+        assert_eq!(
+            me(&t, &cookie_value(&headers, SESSION_COOKIE)).await["role"],
+            "admin"
+        );
+    }
+
+    #[sqlx::test]
+    async fn without_an_admin_group_roles_are_not_touched(pool: SqlitePool) {
+        let provider = Provider::start().await;
+        sso::save_settings(&pool, &provider.settings(true))
+            .await
+            .unwrap();
+        let t = TestApp::new(pool, MIB).await;
+        provider.set(|next| next.groups = groups(&["authentik Admins"]));
+
+        let (_, headers) = sign_in(&t, &provider).await;
+
+        assert_eq!(
+            me(&t, &cookie_value(&headers, SESSION_COOKIE)).await["role"],
+            "member"
+        );
+    }
+
+    #[sqlx::test]
+    async fn the_last_password_admin_is_never_demoted(pool: SqlitePool) {
+        let provider = Provider::start().await;
+        with_admin_group(&pool, &provider).await;
+        let t = TestApp::new(pool, MIB).await;
+        // carol 是唯一可以用密碼登入的管理員，她連結了一個不在管理員群組的身分
+        make_admin(&t).await;
+        sso::link_identity(&t.pool, t.user_id, &provider.issuer, "sub-mom")
+            .await
+            .unwrap();
+        provider.set(|next| next.groups = groups(&["family"]));
+
+        let (_, headers) = sign_in(&t, &provider).await;
+
+        let user = me(&t, &cookie_value(&headers, SESSION_COOKIE)).await;
+        assert_eq!(user["id"], t.user_id);
+        assert_eq!(user["role"], "admin");
+    }
+
     #[sqlx::test]
     async fn unknown_people_are_refused_when_not_allowed(pool: SqlitePool) {
         let provider = Provider::start().await;
@@ -1025,6 +1206,7 @@ mod tests {
                     nonce: Some(nonce),
                     audience: CLIENT_ID.to_string(),
                     forged: false,
+                    groups: None,
                 };
                 change(next);
             });
@@ -1306,6 +1488,7 @@ mod tests {
             subject: "s".to_string(),
             preferred_username: username.map(str::to_string),
             email: email.map(str::to_string),
+            groups: None,
         };
         assert_eq!(username_base(&identity(Some("Mom"), None)), "mom");
         assert_eq!(

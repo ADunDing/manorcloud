@@ -277,7 +277,8 @@ web_address() {
             esac
             ;;
         127.0.0.1 | "[::1]" | localhost)
-            echo "http://$host:$port (from this machine only)"
+            echo "http://$host:$port (from this machine only;"
+            echo "            for other devices, set MANORCLOUD_BIND=0.0.0.0:$port in $ENV_FILE)"
             ;;
         *)
             echo "http://$host:$port"
@@ -370,8 +371,9 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-CapabilityBoundingSet=
-AmbientCapabilities=
+# The only privilege kept: listening on ports below 1024 (for example 443 with HTTPS)
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -388,9 +390,9 @@ env_template() {
 # Format: one NAME=value per line. This file is read by systemd, not by a shell:
 # no "export", no $VARIABLE expansion, and comments must be on their own line.
 
-# Address and port to listen on. 0.0.0.0 lets other devices on your network connect;
-# use 127.0.0.1:3000 to allow connections from this machine only.
-MANORCLOUD_BIND=0.0.0.0:3000
+# Address and port to listen on. 127.0.0.1 allows connections from this machine only;
+# to let other devices on your network connect, change it to 0.0.0.0:3000
+MANORCLOUD_BIND=127.0.0.1:3000
 
 # Database location. It MUST be on a local disk, never on NFS or another network share:
 # SQLite relies on file locking, which is unreliable on network filesystems and can
@@ -408,6 +410,7 @@ MANORCLOUD_DATABASE_URL=sqlite:///var/lib/manorcloud/manorcloud.db
 MANORCLOUD_DATA_DIR=/var/lib/manorcloud/data
 
 # Maximum size of a single upload, in bytes (default: 10 GiB). Uncomment to change.
+# A limit set in Administration > Storage takes priority over this value.
 #MANORCLOUD_MAX_UPLOAD_BYTES=10737418240
 
 # Unfinished uploads each user may have at once (default: 5). Uncomment to change.
@@ -417,7 +420,21 @@ MANORCLOUD_DATA_DIR=/var/lib/manorcloud/data
 
 # Send the session cookie over HTTPS only.
 # Set to true ONLY after HTTPS is configured: with plain http:// it prevents logging in.
+# Not needed when the TLS settings below are used: it is then always on.
 MANORCLOUD_SECURE_COOKIES=false
+
+# Behind a reverse proxy (nginx, Caddy, ...): its address, so that ManorCloud uses the
+# visitor's address from X-Forwarded-For instead of the proxy's. Without it, everyone appears
+# to come from the proxy and failed logins by one person lock out all of them.
+# Addresses or ranges separated by commas. Only list proxies you control.
+#MANORCLOUD_TRUSTED_PROXIES=127.0.0.1
+
+# Serve HTTPS directly with your own certificate (PEM files; the certificate file may
+# include the chain). Set both, or neither for plain HTTP. The files must be readable by
+# the manorcloud user, and the service must be restarted after the certificate is renewed.
+# To use the standard HTTPS port, also set MANORCLOUD_BIND=0.0.0.0:443
+#MANORCLOUD_TLS_CERT=/etc/manorcloud/tls/cert.pem
+#MANORCLOUD_TLS_KEY=/etc/manorcloud/tls/key.pem
 EOF
 }
 

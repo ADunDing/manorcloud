@@ -3,6 +3,7 @@
 // 新的區塊（例如儲存位置的 Storage）：在 router.ts 的清單加上名稱，
 // 再在這裡的清單與 switch 各加一項。
 
+import { copyText } from "./clipboard.js";
 import { languageSetting, setLanguage, t, tNodes, type LanguageSetting } from "./i18n.js";
 import { renderAdmin } from "./admin-view.js";
 import { renderStorage } from "./storage-view.js";
@@ -99,7 +100,7 @@ function renderAccount(
     }
 
     if (status !== null && !status.has_password) {
-      const name = status.display_name ?? "single sign-on";
+      const name = status.display_name ?? "OIDC";
       panel.replaceChildren(
         h("h2", { class: "section-title" }, t("Account")),
         h(
@@ -304,7 +305,7 @@ function renderSsoLink(panel: HTMLElement): void {
       return;
     }
 
-    const name = status.display_name ?? "single sign-on";
+    const name = status.display_name ?? "OIDC";
     const errorBox = h("p", { class: "error", role: "alert" });
     const content: Node[] = [];
 
@@ -537,7 +538,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const displayName = h("input", {
     type: "text",
     value: current.display_name,
-    placeholder: t("Authentik"),
+    placeholder: "OIDC",
     maxlength: 40,
   });
   const issuer = h("input", {
@@ -561,6 +562,13 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const redirect = h("input", { type: "text", readonly: true, class: "copy-field" });
   const autoCreate = h("input", { type: "radio", name: "new-users", checked: current.auto_create });
   const refuse = h("input", { type: "radio", name: "new-users", checked: !current.auto_create });
+  const adminGroup = h("input", {
+    type: "text",
+    value: current.admin_group,
+    placeholder: "authentik Admins",
+    maxlength: 200,
+    spellcheck: "false",
+  });
   const testResult = h("p", { class: "hint", role: "status" });
   const errorBox = h("p", { class: "error", role: "alert" });
   const save = h("button", { type: "submit", class: "primary" }, t("Save"));
@@ -575,7 +583,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
 
   const copy = h("button", { type: "button", class: "secondary" }, t("Copy"));
   copy.addEventListener("click", () => {
-    void copyText(redirect).then((copied) => {
+    void copyInput(redirect).then((copied) => {
       if (copied) {
         showToast(t("Redirect URI copied"));
       }
@@ -644,6 +652,11 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
         choiceLabel(refuse, t("Don't let them in"), t("An administrator creates their account first")),
       ),
     ),
+    field(
+      t("Administrator group"),
+      adminGroup,
+      t("Members of this group at the provider become administrators each time they sign in, and everyone else becomes a member. Leave empty to manage roles in ManorCloud."),
+    ),
     errorBox,
     h("div", { class: "actions" }, save),
   );
@@ -664,6 +677,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
           ...(secret === "" ? {} : { client_secret: secret }),
           public_url: publicUrl.value.trim(),
           auto_create: autoCreate.checked,
+          admin_group: adminGroup.value.trim(),
         });
         showToast(t("Single sign-on settings saved"));
         showSsoForm(panel, saved);
@@ -734,16 +748,14 @@ function renderRequirement(section: HTMLElement): void {
   })();
 }
 
-/** 複製文字。http 的網址中瀏覽器不提供剪貼簿 API：改成選取文字，讓使用者自己複製 */
-async function copyText(input: HTMLInputElement): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(input.value);
+/** 複製輸入框的文字。瀏覽器不允許時選取文字，讓使用者自己複製 */
+async function copyInput(input: HTMLInputElement): Promise<boolean> {
+  if (await copyText(input.value, input)) {
     return true;
-  } catch {
-    input.focus();
-    input.select();
-    return false;
   }
+  input.focus();
+  input.select();
+  return false;
 }
 
 function field(label: string, control: HTMLElement, hint?: string): HTMLElement {

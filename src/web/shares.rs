@@ -20,15 +20,16 @@
 //!   算出來的：不需要另外存在伺服器上，改密碼或刪除分享後就失效。猜密碼與登入使用同一套次數限制
 //! - 只能分享自己可以修改的項目：一般使用者自己的 My files，管理員不能分享別人資料夾中的檔案
 //! - 分享者被停用或刪除後，連結就失效
+//! - 只能下載一次的連結（只有檔案）：下載開始時就刪除分享，之後的請求一律當成失效。
+//!   不支援續傳：下載中斷就要重新建立連結
 //! - 下載的回應與一般下載相同（attachment、nosniff、sandbox，見 download.rs）
 
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path as UrlPath, Query, State},
+    extract::{Path as UrlPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::Response,
     routing::{delete, get, post},
@@ -41,7 +42,7 @@ use super::{
     auth::{LoginAttempt, LoginError, hash_password, verify_password},
     download::{ArchiveItem, archive_response, file_response},
     error::AppError,
-    extract::{CurrentUser, InSpace},
+    extract::{ClientIp, CurrentUser, InSpace},
     spaces::{blocking, parse_path},
     state::{AppState, CookieSecure},
 };
@@ -91,6 +92,8 @@ struct ShareResponse {
     name: String,
     kind: String,
     has_password: bool,
+    /// 只能下載一次
+    one_time: bool,
     expires_at: Option<i64>,
     expired: bool,
     downloads: i64,
@@ -103,6 +106,7 @@ impl From<Share> for ShareResponse {
             name: s.path.rsplit('/').next().unwrap_or("").to_string(),
             expired: s.expires_at.is_some_and(|at| at <= unix_now()),
             has_password: s.password_hash.is_some(),
+            one_time: s.one_time,
             id: s.id,
             token: s.token,
             space: s.space,
@@ -125,6 +129,9 @@ struct CreateRequest {
     /// 到期時間（Unix 秒）；null：不會到期
     #[serde(default)]
     expires_at: Option<i64>,
+    /// 只能下載一次（只有檔案可以）
+    #[serde(default)]
+    one_time: bool,
 }
 
 /// POST /api/shares?space=
@@ -163,6 +170,11 @@ async fn create(
         Ok(std::fs::symlink_metadata(tree::resolve(&root, &abs, true)?)?.is_dir())
     })
     .await?;
+    if req.one_time && is_dir {
+        return Err(AppError::BadRequest(
+            "Only a file can be shared for a single download".to_string(),
+        ));
+    }
     let password_hash = match password {
         Some(p) => Some(hash_password(p).await?),
         None => None,
@@ -178,6 +190,7 @@ async fn create(
             kind: if is_dir { "folder" } else { "file" },
             password_hash: password_hash.as_deref(),
             expires_at: req.expires_at,
+            one_time: req.one_time,
         },
     )
     .await?;
@@ -291,6 +304,8 @@ struct InfoResponse {
     size: Option<u64>,
     owner: Option<String>,
     expires_at: Option<i64>,
+    /// 只能下載一次
+    one_time: bool,
 }
 
 /// GET /api/public/shares/{token}
@@ -309,6 +324,7 @@ async fn info(
             size: None,
             owner: None,
             expires_at: None,
+            one_time: share.one_time,
         }));
     }
     let root = space.root.clone();
@@ -335,6 +351,7 @@ async fn info(
         size,
         owner,
         expires_at: share.expires_at,
+        one_time: share.one_time,
     }))
 }
 
@@ -347,7 +364,7 @@ struct UnlockRequest {
 /// POST /api/public/shares/{token}/unlock：密碼正確時給這個連結的 Cookie
 async fn unlock(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientIp(client): ClientIp,
     UrlPath(token): UrlPath<String>,
     jar: CookieJar,
     Json(req): Json<UnlockRequest>,
@@ -364,7 +381,7 @@ async fn unlock(
         return Ok((jar, StatusCode::NO_CONTENT));
     };
     // 與登入相同的次數限制：同一個 IP、同一個連結猜錯太多次就暫時鎖定
-    let mut attempt = LoginAttempt::begin(&limits, peer.ip(), &format!("share:{}", share.id))
+    let mut attempt = LoginAttempt::begin(&limits, client, &format!("share:{}", share.id))
         .map_err(LoginError::Locked)?;
     if req.password.chars().count() > PASSWORD_MAX
         || !verify_password(req.password, share.password_hash.clone()).await?
@@ -451,10 +468,20 @@ async fn file(
         Ok((file, meta, etag))
     })
     .await?;
-    // 續傳的後續請求（Range 不是從頭開始）不重複計算
-    if !headers.contains_key(header::RANGE) {
-        shares_db::count_download(&pool, share.id).await?;
-    }
+    // 只能下載一次：檔案確定可以讀取之後、開始傳送之前刪除分享。
+    // 同時有兩個請求時只有一個刪得掉，另一個當成失效。整個檔案從頭傳送，不接受 Range
+    let headers = if share.one_time {
+        if !shares_db::consume(&pool, share.id).await? {
+            return Err(gone());
+        }
+        HeaderMap::new()
+    } else {
+        // 續傳的後續請求（Range 不是從頭開始）不重複計算
+        if !headers.contains_key(header::RANGE) {
+            shares_db::count_download(&pool, share.id).await?;
+        }
+        headers
+    };
     file_response(
         tokio::fs::File::from_std(file),
         meta.len(),
@@ -646,5 +673,39 @@ mod tests {
         let uri = format!("/api/public/shares/{}", body["token"].as_str().unwrap());
         let (status, _, _) = t.send(empty_request(Method::GET, &uri, None)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    #[sqlx::test]
+    async fn a_one_time_link_works_once(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let home = t.home("carol");
+        std::fs::write(home.join("a.txt"), b"once").unwrap();
+        std::fs::create_dir(home.join("docs")).unwrap();
+
+        let (status, _) = t
+            .json(
+                Method::POST,
+                "/api/shares",
+                Some(json!({"path": "docs", "one_time": true})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (_, body) = t
+            .json(
+                Method::POST,
+                "/api/shares",
+                Some(json!({"path": "a.txt", "one_time": true})),
+            )
+            .await;
+        assert_eq!(body["one_time"], true);
+        let uri = format!(
+            "/api/public/shares/{}/file",
+            body["token"].as_str().unwrap()
+        );
+        let (status, _, body) = t.send(empty_request(Method::GET, &uri, None)).await;
+        assert_eq!((status, &body[..]), (StatusCode::OK, &b"once"[..]));
+        let (status, _, _) = t.send(empty_request(Method::GET, &uri, None)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(t.json(Method::GET, "/api/shares", None).await.1, json!([]));
     }
 }

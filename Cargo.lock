@@ -1468,6 +1468,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "unicode-normalization",

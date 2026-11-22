@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::env::VarError;
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use crate::storage::DEFAULT_MAX_UPLOAD_BYTES;
@@ -31,6 +31,11 @@ const BIND_VAR: &str = "MANORCLOUD_BIND";
 const DEFAULT_BIND: &str = "127.0.0.1:3000";
 
 const SECURE_COOKIES_VAR: &str = "MANORCLOUD_SECURE_COOKIES";
+
+const TLS_CERT_VAR: &str = "MANORCLOUD_TLS_CERT";
+const TLS_KEY_VAR: &str = "MANORCLOUD_TLS_KEY";
+
+const TRUSTED_PROXIES_VAR: &str = "MANORCLOUD_TRUSTED_PROXIES";
 
 const MAX_PENDING_UPLOADS_VAR: &str = "MANORCLOUD_MAX_PENDING_UPLOADS";
 /// 每個使用者最多幾個未完成的上傳：放棄的上傳不能無限累積佔用磁碟
@@ -53,6 +58,81 @@ pub struct Config {
     pub secure_cookies: bool,
     /// 每個使用者最多幾個未完成（可續傳）的上傳
     pub max_pending_uploads: u32,
+    /// 直接提供 HTTPS 時的憑證與私鑰；沒有設定時只提供 HTTP
+    pub tls: Option<TlsFiles>,
+    /// 放在前面的反向代理（nginx、Caddy）的位址：只有從這些位址來的連線，
+    /// 才採用 X-Forwarded-For 中的使用者 IP
+    pub trusted_proxies: Vec<IpRange>,
+}
+
+/// 一個 IP 位址或網段，例如 127.0.0.1、172.18.0.0/16、fd00::/8
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IpRange {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl std::fmt::Display for IpRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let max = if self.addr.is_ipv4() { 32 } else { 128 };
+        if self.prefix == max {
+            write!(f, "{}", self.addr)
+        } else {
+            write!(f, "{}/{}", self.addr, self.prefix)
+        }
+    }
+}
+
+impl IpRange {
+    /// 解析「位址」或「位址/前綴長度」
+    pub fn parse(text: &str) -> Option<IpRange> {
+        let (addr, prefix) = match text.split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (text, None),
+        };
+        let addr: IpAddr = addr.parse().ok()?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix.parse::<u8>().ok().filter(|&p| p <= max)?,
+            None => max,
+        };
+        Some(IpRange {
+            addr: addr.to_canonical(),
+            prefix: if addr.to_canonical().is_ipv4() && !addr.is_ipv4() {
+                prefix.saturating_sub(96)
+            } else {
+                prefix
+            },
+        })
+    }
+
+    /// `ip` 是否在這個範圍內。IPv4 對應的 IPv6 位址（::ffff:1.2.3.4）當作 IPv4 比對
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let bits = |ip: IpAddr| -> (u128, u32) {
+            match ip.to_canonical() {
+                IpAddr::V4(v4) => (u128::from(u32::from(v4)), 32),
+                IpAddr::V6(v6) => (u128::from(v6), 128),
+            }
+        };
+        let (range, width) = bits(self.addr);
+        let (ip, ip_width) = bits(ip);
+        if width != ip_width {
+            return false;
+        }
+        let prefix = u32::from(self.prefix);
+        if prefix == 0 {
+            return true;
+        }
+        let shift = width - prefix;
+        (range >> shift) == (ip >> shift)
+    }
+}
+
+/// PEM 格式的憑證鏈與私鑰檔案路徑
+#[derive(Debug, Clone, PartialEq)]
+pub struct TlsFiles {
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 impl Config {
@@ -70,13 +150,20 @@ impl Config {
             .map(|v| v.trim().to_string())
             .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_string());
 
+        let tls = parse_tls(lookup(TLS_CERT_VAR), lookup(TLS_KEY_VAR))?;
+        // 直接提供 HTTPS 時，Cookie 一定只走 HTTPS
+        let secure_cookies =
+            parse_bool(SECURE_COOKIES_VAR, lookup(SECURE_COOKIES_VAR))? || tls.is_some();
+
         Ok(Config {
             data_dir,
             database_url,
             max_upload_bytes: parse_max_upload_bytes(lookup(MAX_UPLOAD_VAR))?,
             bind_addr: parse_bind_addr(lookup(BIND_VAR))?,
-            secure_cookies: parse_bool(SECURE_COOKIES_VAR, lookup(SECURE_COOKIES_VAR))?,
+            secure_cookies,
             max_pending_uploads: parse_max_pending_uploads(lookup(MAX_PENDING_UPLOADS_VAR))?,
+            tls,
+            trusted_proxies: parse_trusted_proxies(lookup(TRUSTED_PROXIES_VAR))?,
         })
     }
 }
@@ -189,6 +276,45 @@ fn parse_bind_addr(raw: Result<String, VarError>) -> Result<SocketAddr, String> 
     })
 }
 
+/// 憑證與私鑰必須一起設定：只設一個多半是漏寫，不能默默改用 HTTP
+fn parse_tls(
+    cert: Result<String, VarError>,
+    key: Result<String, VarError>,
+) -> Result<Option<TlsFiles>, String> {
+    let cert = read_env_string(TLS_CERT_VAR, cert)?;
+    let key = read_env_string(TLS_KEY_VAR, key)?;
+    match (cert, key) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => Ok(Some(TlsFiles {
+            cert: PathBuf::from(cert.trim()),
+            key: PathBuf::from(key.trim()),
+        })),
+        _ => Err(format!(
+            "{TLS_CERT_VAR} and {TLS_KEY_VAR} must be set together"
+        )),
+    }
+}
+
+/// 以逗號分隔的位址或網段，例如 127.0.0.1,172.18.0.0/16
+fn parse_trusted_proxies(raw: Result<String, VarError>) -> Result<Vec<IpRange>, String> {
+    let Some(value) = read_env_string(TRUSTED_PROXIES_VAR, raw)? else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            IpRange::parse(item).ok_or_else(|| {
+                format!(
+                    "{TRUSTED_PROXIES_VAR} must be IP addresses or ranges separated by commas, \
+                     e.g. 127.0.0.1,172.18.0.0/16, got: {item}"
+                )
+            })
+        })
+        .collect()
+}
+
 /// 必須是正整數。0 不允許：那等於關閉大檔案的上傳，而設定寫成 0 多半是誤會
 fn parse_max_pending_uploads(raw: Result<String, VarError>) -> Result<u32, String> {
     let Some(value) = read_env_string(MAX_PENDING_UPLOADS_VAR, raw)? else {
@@ -260,6 +386,43 @@ mod tests {
         assert!(config.bind_addr.ip().is_loopback());
         assert!(!config.secure_cookies);
         assert_eq!(config.max_pending_uploads, 5);
+        assert_eq!(config.tls, None);
+        assert!(config.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    fn trusted_proxies_are_addresses_or_ranges() {
+        let config = load_from(&[(
+            "MANORCLOUD_TRUSTED_PROXIES",
+            " 127.0.0.1, 172.18.0.0/16 ,::1 ",
+        )])
+        .unwrap();
+        let proxies = config.trusted_proxies;
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+
+        assert_eq!(proxies.len(), 3);
+        assert!(proxies[0].contains(ip("127.0.0.1")));
+        assert!(!proxies[0].contains(ip("127.0.0.2")));
+        // 監聽 [::] 時，IPv4 的連線會以 ::ffff:x.x.x.x 的形式出現
+        assert!(proxies[0].contains(ip("::ffff:127.0.0.1")));
+        assert!(proxies[1].contains(ip("172.18.200.3")));
+        assert!(!proxies[1].contains(ip("172.19.0.1")));
+        assert!(proxies[2].contains(ip("::1")));
+        assert!(!proxies[2].contains(ip("127.0.0.1")));
+    }
+
+    #[test]
+    fn tls_files_turn_on_secure_cookies() {
+        let config = load_from(&[
+            ("MANORCLOUD_TLS_CERT", "/etc/manorcloud/tls/cert.pem"),
+            ("MANORCLOUD_TLS_KEY", " /etc/manorcloud/tls/key.pem "),
+        ])
+        .unwrap();
+
+        let tls = config.tls.unwrap();
+        assert_eq!(tls.cert, PathBuf::from("/etc/manorcloud/tls/cert.pem"));
+        assert_eq!(tls.key, PathBuf::from("/etc/manorcloud/tls/key.pem"));
+        assert!(config.secure_cookies);
     }
 
     #[test]
@@ -287,6 +450,10 @@ mod tests {
             ("MANORCLOUD_BIND", "localhost:3000"),
             ("MANORCLOUD_MAX_UPLOAD_BYTES", "10GB"),
             ("MANORCLOUD_MAX_PENDING_UPLOADS", "0"),
+            ("MANORCLOUD_TLS_CERT", "/etc/manorcloud/tls/cert.pem"),
+            ("MANORCLOUD_TLS_KEY", "/etc/manorcloud/tls/key.pem"),
+            ("MANORCLOUD_TRUSTED_PROXIES", "127.0.0.1,nginx"),
+            ("MANORCLOUD_TRUSTED_PROXIES", "10.0.0.0/33"),
         ] {
             let error = load_from(&[pair]).unwrap_err();
             // 錯誤訊息會印到終端機：必須是 ASCII，而且指出是哪個設定

@@ -30,6 +30,7 @@ export interface AdminSso {
   readonly has_secret: boolean;
   readonly public_url: string;
   readonly auto_create: boolean;
+  readonly admin_group: string;
   readonly redirect_uri: string | null;
 }
 

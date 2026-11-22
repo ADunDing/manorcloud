@@ -180,7 +180,7 @@ async function addSsoButton(form: HTMLElement, errorBox: HTMLElement): Promise<v
   const button = h(
     "button",
     { type: "button", class: "secondary sso-button" },
-    info.display_name === null ? t("Sign in with single sign-on") : t("Sign in with {name}", { name: info.display_name }),
+    t("Sign in with {name}", { name: info.display_name ?? "OIDC" }),
   );
   button.addEventListener("click", () => {
     button.disabled = true;

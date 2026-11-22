@@ -83,8 +83,90 @@ export function renderStorage(container: HTMLElement): void {
     ),
     errorBox,
     listSlot,
+    uploadLimitSection(),
   );
   void reload();
+}
+
+/** GET /api/admin/settings */
+interface ServerSettings {
+  readonly max_upload_bytes: number;
+  readonly default_max_upload_bytes: number;
+  readonly custom_max_upload: boolean;
+}
+
+/** 以 GB 輸入：1024³ 位元組，與畫面上顯示的大小一致 */
+const GB = 1024 ** 3;
+
+/** 單一檔案的上傳上限：以 GB 輸入，或使用設定檔的值 */
+function uploadLimitSection(): HTMLElement {
+  const input = h("input", {
+    type: "number",
+    class: "dialog-input limit-input",
+    min: "0.001",
+    step: "any",
+    "aria-label": t("Upload limit in GB"),
+    disabled: true,
+  });
+  const save = h("button", { type: "submit", class: "primary", disabled: true }, t("Save"));
+  const reset = h("button", { type: "button", class: "secondary", hidden: true }, t("Use the default"));
+  const hint = h("p", { class: "hint" });
+  const error = h("p", { class: "error", role: "alert" });
+
+  const show = (settings: ServerSettings): void => {
+    input.value = String(Math.round((settings.max_upload_bytes / GB) * 1000) / 1000);
+    input.disabled = false;
+    save.disabled = false;
+    reset.hidden = !settings.custom_max_upload;
+    hint.textContent = settings.custom_max_upload
+      ? t("The default from the configuration file is {size}.", { size: formatSize(settings.default_max_upload_bytes) })
+      : t("This is the default from the configuration file (MANORCLOUD_MAX_UPLOAD_BYTES).");
+  };
+  const load = async (): Promise<void> => {
+    try {
+      show(await api.get<ServerSettings>("/api/admin/settings"));
+    } catch (e) {
+      if (!isHandledGlobally(e)) {
+        error.textContent = messageOf(e);
+      }
+    }
+  };
+  const update = async (bytes: number | null): Promise<void> => {
+    error.textContent = "";
+    save.disabled = true;
+    try {
+      await api.put("/api/admin/settings", { max_upload_bytes: bytes });
+      showToast(t("Upload limit saved. It applies to uploads started from now on."));
+      await load();
+    } catch (e) {
+      save.disabled = false;
+      if (!isHandledGlobally(e)) {
+        error.textContent = messageOf(e);
+      }
+    }
+  };
+
+  const form = h(
+    "form",
+    { class: "settings-group upload-limit" },
+    h("h3", { class: "group-title" }, t("Upload limit")),
+    h("p", { class: "hint" }, t("The largest single file anyone can upload.")),
+    h("div", { class: "limit-row" }, input, h("span", {}, "GB"), save, reset),
+    hint,
+    error,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const gb = Number(input.value);
+    if (!Number.isFinite(gb) || gb <= 0) {
+      error.textContent = t("Enter a size in GB");
+      return;
+    }
+    void update(Math.round(gb * GB));
+  });
+  reset.addEventListener("click", () => void update(null));
+  void load();
+  return form;
 }
 
 function volumeTable(
