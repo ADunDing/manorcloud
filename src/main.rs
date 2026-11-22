@@ -9,6 +9,7 @@ mod gc;
 mod layout;
 mod mover;
 mod quota;
+mod relpath;
 mod rescue;
 mod space;
 mod storage;
@@ -136,8 +137,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Run => {
-            // SAFETY: geteuid 沒有任何前置條件，只是讀取目前行程的有效使用者編號
-            let is_root = unsafe { libc::geteuid() } == 0;
+            let is_root = is_root();
             // systemd 啟動服務時一定會設定 INVOCATION_ID（systemd 232 起）
             let under_systemd = std::env::var_os("INVOCATION_ID").is_some();
             let manual_override = std::env::var("MANORCLOUD_MANUAL_RUN").as_deref() == Ok("1");
@@ -279,6 +279,13 @@ async fn serve() {
     // 登入次數限制：背景定期清除過期的記錄
     state.login_limits.spawn_pruning();
     web::run(state, config.bind_addr, tls).await;
+}
+
+/// 目前是不是以 root 執行
+#[allow(unsafe_code)]
+pub fn is_root() -> bool {
+    // SAFETY: geteuid 沒有任何前置條件，只是讀取目前行程的有效使用者編號
+    unsafe { libc::geteuid() == 0 }
 }
 
 #[cfg(test)]

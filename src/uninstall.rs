@@ -29,8 +29,7 @@ const MAX_ATTEMPTS: usize = 3;
 pub fn run(args: &[OsString]) -> Result<(), String> {
     let purge = parse_args(args)?;
 
-    // SAFETY: geteuid 沒有任何前置條件，只是讀取目前行程的有效使用者編號
-    if unsafe { libc::geteuid() } != 0 {
+    if !crate::is_root() {
         return Err("run with sudo".to_string());
     }
 

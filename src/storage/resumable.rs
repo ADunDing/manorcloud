@@ -119,6 +119,7 @@ pub async fn create_part(dir: &Path, id: &str, size: u64) -> Result<(), PartErro
 ///
 /// 只是最佳化：檔案系統不支援（例如 ZFS）或不是 Linux 時什麼都不做，
 /// 檔案隨寫入長大，結果一樣正確。不用 posix_fallocate：不支援時它會改成逐塊寫入零，非常慢
+#[allow(unsafe_code)]
 async fn preallocate(file: &File, size: u64) {
     #[cfg(target_os = "linux")]
     {
@@ -260,6 +261,7 @@ async fn lock_current(file: File, path: &Path, mode: libc::c_int) -> Result<File
 }
 
 /// 取得檔案鎖（LOCK_EX 或 LOCK_SH），拿不到時立刻回報 Busy，不等待
+#[allow(unsafe_code)]
 fn lock(file: &File, mode: libc::c_int) -> Result<(), PartError> {
     // SAFETY: fd 來自仍然開啟中的 File，在這次呼叫期間一定有效
     let rc = unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) };
@@ -317,6 +319,7 @@ impl PartFile {
 
     /// 請系統在背景把目前為止的資料寫進硬碟，不等它完成。
     /// 只是提示：做不到（例如不是 Linux）也不影響正確性，fsync 仍然在 sync 與 finish 裡
+    #[allow(unsafe_code)]
     async fn start_write_back(&mut self) -> io::Result<()> {
         self.file.flush().await?;
         #[cfg(target_os = "linux")]

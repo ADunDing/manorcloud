@@ -19,8 +19,7 @@ pub const USAGE: &str =
     "usage: sudo -u manorcloud manorcloud reset-2fa [--env-file <file>] <username>";
 
 pub async fn run(args: &[OsString]) -> Result<(), String> {
-    // SAFETY: geteuid 沒有任何前置條件，只是讀取目前行程的有效使用者編號
-    if unsafe { libc::geteuid() } == 0 {
+    if crate::is_root() {
         return Err(
             "run this as the service account, not as root, so the database files \
                     keep the right owner:\n  sudo -u manorcloud manorcloud reset-2fa <username>"

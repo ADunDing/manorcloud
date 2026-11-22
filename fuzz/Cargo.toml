@@ -1,0 +1,46 @@
+# 模糊測試（fuzzing）：用大量隨機產生的輸入，檢查處理外部輸入的程式不會 panic，
+# 而且結果永遠符合安全上的要求（例如路徑不會跑出空間之外）。
+#
+# 需要 cargo-fuzz：cargo install cargo-fuzz --locked
+# 在專案根目錄執行，例如跑 60 秒：
+#   cargo fuzz run rel_path -s none -- -max_total_time=60
+#
+# 每個目標用 #[path] 直接引入 src/ 中的檔案：那些檔案只依賴標準函式庫
+# （或下面列出的套件），不必把整個伺服器做成函式庫。
+[package]
+name = "manorcloud-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# src/files/name.rs 需要：與主程式的版本相同
+unicode-normalization = "0.1.25"
+
+# 獨立的 workspace：不影響主程式的 Cargo.lock 與 cargo test
+[workspace]
+
+[[bin]]
+name = "rel_path"
+path = "fuzz_targets/rel_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_name"
+path = "fuzz_targets/file_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range"
+path = "fuzz_targets/range.rs"
+test = false
+doc = false
+bench = false

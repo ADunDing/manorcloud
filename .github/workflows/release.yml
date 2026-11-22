@@ -24,7 +24,7 @@ jobs:
           - x86_64-unknown-linux-gnu
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -39,12 +39,16 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v7
+      # 發布用的建置不使用快取：快取可能被其他工作流程寫入（cache poisoning），
+      # 發布的檔案只能來自乾淨的下載
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
+          package-manager-cache: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       # 與本機相同的 cross 版本；編譯用的映像由 Cross.toml 固定
       - name: Install cross
@@ -54,7 +58,7 @@ jobs:
       - name: Package
         run: ./package.sh ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz
@@ -74,14 +78,25 @@ jobs:
       attestations: write
     steps:
       # 取得 install.sh：它也要放上 Release，一行安裝從這裡下載它
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
+
+      # SBOM：這個版本用到的所有套件（Rust 與前端）的清單，SPDX 格式。
+      # 之後某個套件被發現漏洞時，可以直接查出哪些版本受影響
+      - name: Create the SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: manorcloud-sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       # 去掉檔名中的版本號：一行安裝用 releases/latest/download/<檔名>，檔名必須固定。
       # manorcloud-0.1.0-aarch64.tar.gz → manorcloud-linux-aarch64.tar.gz
@@ -94,7 +109,7 @@ jobs:
             arch=${arch%.tar.gz}
             cp "$file" "release/manorcloud-linux-$arch.tar.gz"
           done
-          cp install.sh release/
+          cp install.sh manorcloud-sbom.spdx.json release/
           ls -l release
           (cd release && sha256sum * > SHA256SUMS)
           cat release/SHA256SUMS
@@ -103,9 +118,9 @@ jobs:
       # 與 SHA256SUMS 不同，簽章由 GitHub 簽發，換掉 Release 中的檔案的人無法偽造。
       # 驗證：gh attestation verify <檔案> --repo <擁有者>/manorcloud（見 README）
       - name: Sign the release files
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: "release/manorcloud-linux-*.tar.gz, release/install.sh"
+          subject-path: "release/manorcloud-linux-*.tar.gz, release/install.sh, release/manorcloud-sbom.spdx.json"
 
       # 標籤中有連字號（v0.2.0-rc.1）的標記為預先發布版：
       # releases/latest 只指向正式版，一行安裝不會裝到測試版

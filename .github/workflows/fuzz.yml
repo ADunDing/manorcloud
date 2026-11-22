@@ -1,0 +1,50 @@
+# 模糊測試：每週用大量隨機輸入測試處理外部輸入的程式（路徑、檔名、Range 標頭），
+# 找出會讓伺服器 panic 或違反安全規則的輸入。目標與說明在 fuzz/。
+#
+# 找到問題時工作流程失敗，造成問題的輸入會上傳成 artifact（fuzz-crashes），
+# 下載後可以在本機重現：cargo fuzz run <目標> -s none <檔案>
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "53 2 * * 6"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "每個目標執行幾秒"
+        default: "300"
+
+permissions: {}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [rel_path, file_name, range]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # -s none：不用 sanitizer（ManorCloud 幾乎沒有 unsafe），穩定版的 Rust 就能跑
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+        run: cargo fuzz run "$TARGET" -s none -- -max_total_time="$SECONDS_PER_TARGET"
+      - name: Upload the failing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

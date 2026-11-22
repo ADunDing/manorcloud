@@ -148,7 +148,7 @@ pub struct DiskSpace {
 
 /// 路徑所在檔案系統的總容量與可用空間
 // statvfs 欄位的型別依平台而不同（u32 或 u64），一律轉成 u64；在 u64 的平台上 clippy 會說轉換多餘
-#[allow(clippy::useless_conversion)]
+#[allow(clippy::useless_conversion, unsafe_code)]
 pub fn disk_space(path: &Path) -> io::Result<DiskSpace> {
     let c_path = CString::new(path.as_os_str().as_bytes())?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();

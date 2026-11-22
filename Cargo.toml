@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.94"
 license = "AGPL-3.0-or-later"
 
+# unsafe 預設禁止：只有呼叫作業系統（libc）的少數函式明確允許，並在旁邊寫明為什麼安全。
+# 新增的 unsafe 一定要加上 #[allow(unsafe_code)]，在審查時一眼就看得到
+[lints.rust]
+unsafe_code = "deny"
+
 [dependencies]
 argon2 = "0.6.0"
 axum = { version = "0.8.9", features = ["macros", "multipart"] }

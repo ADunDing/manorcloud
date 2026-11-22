@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 use crate::files::name::{numbered_name, validate_file_name};
+pub use crate::relpath::RelPath;
 
 /// ManorCloud 自己的資料夾：每顆硬碟的最上層各有一個
 pub const SYSTEM_DIR: &str = ".manorcloud";
@@ -38,78 +39,6 @@ pub fn is_system_name(name: &str) -> bool {
 /// 以點開頭的隱藏檔（.DS_Store、._相片.jpg）
 pub fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.')
-}
-
-/// 空間裡的一個相對路徑：一串已經檢查過的名稱。空的代表空間的最上層
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RelPath(Vec<String>);
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct InvalidPath;
-
-impl RelPath {
-    /// 解析 `相片/2026/a.jpg`。前後的 `/` 忽略；空字串是最上層
-    pub fn parse(text: &str) -> Result<Self, InvalidPath> {
-        let trimmed = text.trim_matches('/');
-        if trimmed.is_empty() {
-            return Ok(RelPath(Vec::new()));
-        }
-        let mut parts = Vec::new();
-        for part in trimmed.split('/') {
-            if part.is_empty()
-                || part == "."
-                || part == ".."
-                || part.contains(['\0', '\\'])
-                || part.len() > 255
-            {
-                return Err(InvalidPath);
-            }
-            parts.push(part.to_string());
-        }
-        Ok(RelPath(parts))
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn parts(&self) -> &[String] {
-        &self.0
-    }
-
-    /// 最後一段的名稱；最上層沒有
-    pub fn name(&self) -> Option<&str> {
-        self.0.last().map(String::as_str)
-    }
-
-    /// 上一層；最上層沒有
-    pub fn parent(&self) -> Option<RelPath> {
-        (!self.0.is_empty()).then(|| RelPath(self.0[..self.0.len() - 1].to_vec()))
-    }
-
-    /// 底下的一個名稱。名稱必須已經檢查過
-    pub fn child(&self, name: &str) -> RelPath {
-        let mut parts = self.0.clone();
-        parts.push(name.to_string());
-        RelPath(parts)
-    }
-
-    /// 接上另一段相對路徑
-    pub fn join(&self, other: &RelPath) -> RelPath {
-        let mut parts = self.0.clone();
-        parts.extend(other.0.iter().cloned());
-        RelPath(parts)
-    }
-
-    /// 自己是不是 `other` 本身，或在它底下
-    pub fn starts_with(&self, other: &RelPath) -> bool {
-        self.0.starts_with(&other.0)
-    }
-
-    /// `相片/2026/a.jpg`
-    pub fn display(&self) -> String {
-        self.0.join("/")
-    }
 }
 
 /// 一個項目
@@ -138,8 +67,8 @@ fn name_taken() -> io::Error {
 /// `must_exist` 為 false 時，最後一段可以不存在（建立新項目），但上層都必須存在而且是資料夾
 pub fn resolve(root: &Path, rel: &RelPath, must_exist: bool) -> io::Result<PathBuf> {
     let mut path = root.to_path_buf();
-    let last = rel.0.len();
-    for (index, part) in rel.0.iter().enumerate() {
+    let last = rel.parts().len();
+    for (index, part) in rel.parts().iter().enumerate() {
         if is_system_name(part) {
             return Err(not_found("reserved name"));
         }
@@ -836,6 +765,7 @@ impl Drop for Upload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relpath::InvalidPath;
 
     fn rel(text: &str) -> RelPath {
         RelPath::parse(text).unwrap()

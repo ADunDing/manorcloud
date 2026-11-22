@@ -19,13 +19,13 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # 不把存取權杖留在工作目錄中：之後的步驟不需要推送任何東西
           persist-credentials: false
 
       # 前端必須先建置：rust-embed 在編譯時把它嵌入執行檔，build.rs 也會檢查
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -36,26 +36,37 @@ jobs:
           npm --prefix frontend run build
           npm --prefix frontend test
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # rustup 已內建在 GitHub 的執行環境：直接用它，不必多信任一個第三方 action
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
       # shell 腳本的常見錯誤：沒加引號的變數、不可攜的語法等。
       # GitHub 的 Ubuntu 執行環境已內建 shellcheck
       - name: Shell scripts
         run: shellcheck install.sh package.sh
       - name: Format
         run: cargo fmt --check
+      # --locked：只用 Cargo.lock 中的版本。Cargo.lock 與 Cargo.toml 不一致時直接失敗，
+      # 而不是在 CI 裡自動挑新版本：測過的就是發布的
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+
+      # 模糊測試的目標直接引入 src/ 中的檔案：那些檔案改了，這裡要確認目標仍然能編譯
+      # （每週的模糊測試見 fuzz.yml）
+      - name: Fuzz targets compile
+        run: |
+          cargo fmt --manifest-path fuzz/Cargo.toml --check
+          cargo check --locked --manifest-path fuzz/Cargo.toml --bins
 
       # Cargo.toml 的 rust-version 必須真的能編譯：用那個版本實際檢查一次。
       # 這個數字要與 Cargo.toml 保持一致
       - name: Minimum Rust version (1.94)
         run: |
           rustup toolchain install 1.94 --profile minimal
-          cargo +1.94 check --all-targets
+          cargo +1.94 check --locked --all-targets
 
       # .sqlx/ 必須與程式碼中的 SQL 一致。修改了 query! 卻忘記 cargo sqlx prepare，
       # 本機有 app.db 照樣能編譯，只有這裡會發現

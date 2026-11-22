@@ -43,7 +43,7 @@ npm --prefix frontend run build
 #    CI has no app.db. Cross.toml passes this variable into the container and pins the image,
 #    which decides the glibc the binary is linked against.
 export SQLX_OFFLINE=true
-cross build --release --target "$TARGET"
+cross build --release --locked --target "$TARGET"
 
 BINARY="target/$TARGET/release/manorcloud"
 
