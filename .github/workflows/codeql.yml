@@ -1,0 +1,42 @@
+# CodeQL：GitHub 的原始碼靜態分析，找出 SQL 注入、路徑穿越、XSS、不安全的 Cookie 等問題。
+#
+# 分析 Rust 後端、TypeScript 前端與 GitHub Actions 工作流程。結果顯示在 Security → Code scanning；
+# 在 PR 中新增的問題會直接標在那幾行程式碼上。
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 每週一次：CodeQL 的規則持續更新，沒改的程式碼也可能被新規則找到問題
+    - cron: "41 4 * * 3"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          # 直接分析原始碼，不必編譯
+          build-mode: none
+          # 預設規則之外，再加上更多資安相關的規則
+          queries: security-extended
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}

@@ -1,0 +1,56 @@
+# cargo-deny：檢查 ManorCloud 用到的每一個 Rust 套件（CI 的 security.yml 執行）。
+#
+#   cargo deny check              檢查下面所有項目
+#   cargo deny check advisories   只檢查已知漏洞
+#
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# 只看 ManorCloud 會建置的平台：只在 Windows、macOS 用到的套件（與它們的授權、漏洞）與這裡無關
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+# 已知的漏洞與問題，來自 RustSec 漏洞資料庫
+[advisories]
+# 「不再維護」只在 ManorCloud 直接使用時才報告：更深層的套件只能留意，無法自己修正
+unmaintained = "workspace"
+# 不影響 ManorCloud 的公告可以在這裡忽略，一定要寫明理由：
+#   { id = "RUSTSEC-0000-0000", reason = "..." },
+ignore = [
+    # Marvin 攻擊是量測 RSA 私鑰解密的時間來還原私鑰。rsa 套件來自 openidconnect，
+    # 只用身分提供者的公鑰驗證簽章：ManorCloud 從不持有 RSA 私鑰
+    { id = "RUSTSEC-2023-0071", reason = "only RSA signature verification with public keys" },
+    # chrono 只在測試中直接使用：測試用 openidconnect 產生 ID token，它的 API 需要 chrono 的型別。
+    # 不會進入伺服器程式
+    { id = "RUSTSEC-2026-0543", reason = "used only by tests, required by the openidconnect API" },
+]
+
+# 每個套件的授權都必須允許它成為 AGPL-3.0 程式的一部分
+[licenses]
+allow = [
+    "0BSD",
+    "AGPL-3.0-or-later",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# 同一個套件有兩個版本在 Rust 很常見，不是資安問題
+multiple-versions = "allow"
+# 版本寫「*」會接受未來任何版本，包括被植入惡意程式碼的版本
+wildcards = "deny"
+
+# 套件只能來自 crates.io：不接受 git repo 或其他來源
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
