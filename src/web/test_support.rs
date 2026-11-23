@@ -38,6 +38,11 @@ pub struct TestApp {
 impl TestApp {
     /// 建立名為 carol 的已登入使用者，上傳上限為 `limit`
     pub async fn new(pool: SqlitePool, limit: u64) -> Self {
+        // 與正式環境相同的 WAL 模式（見 db::init_pool）：讀取不會被背景的寫入擋住
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await
+            .unwrap();
         let user_id = user::create_user(&pool, "carol", "x").await.unwrap();
         let token = generate_token();
         session::create_session(&pool, user_id, &hash_token(&token), 4_000_000_000)

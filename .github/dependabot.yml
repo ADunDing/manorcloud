@@ -19,6 +19,10 @@ updates:
     schedule:
       interval: monthly
     groups:
+      # RustCrypto 的套件（hmac、sha1、sha2 等）共用同一套 trait，大版本必須一起升級：
+      # 分開成好幾個 PR 時，每一個單獨都無法編譯
+      rustcrypto:
+        patterns: ["hmac", "sha1", "sha2", "digest", "argon2", "password-hash"]
       crates:
         patterns: ["*"]
         update-types: [minor, patch]

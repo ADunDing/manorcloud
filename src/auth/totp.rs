@@ -7,7 +7,7 @@
 //! 手機的驗證器 App 與伺服器各自計算，數字相同就代表手機上有這把密鑰。
 //! SHA-1 在這裡是 HMAC 的一部分，沒有已知的弱點；所有驗證器 App 都只保證支援 SHA-1。
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
