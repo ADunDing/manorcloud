@@ -23,3 +23,20 @@ pub async fn set_max_upload_bytes(
         .await
         .map(|_| ())
 }
+
+/// 是否開放 WebDAV
+pub async fn webdav_enabled(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    let value: Option<bool> =
+        sqlx::query_scalar("SELECT webdav_enabled FROM server_settings WHERE id = 1")
+            .fetch_optional(pool)
+            .await?;
+    Ok(value.unwrap_or(false))
+}
+
+pub async fn set_webdav_enabled(pool: &SqlitePool, enabled: bool) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE server_settings SET webdav_enabled = ? WHERE id = 1")
+        .bind(enabled)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}

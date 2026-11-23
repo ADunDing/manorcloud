@@ -84,6 +84,7 @@ export function renderStorage(container: HTMLElement): void {
     errorBox,
     listSlot,
     uploadLimitSection(),
+    webDavSection(),
   );
   void reload();
 }
@@ -93,6 +94,7 @@ interface ServerSettings {
   readonly max_upload_bytes: number;
   readonly default_max_upload_bytes: number;
   readonly custom_max_upload: boolean;
+  readonly webdav_enabled: boolean;
 }
 
 /** 以 GB 輸入：1024³ 位元組，與畫面上顯示的大小一致 */
@@ -167,6 +169,53 @@ function uploadLimitSection(): HTMLElement {
   reset.addEventListener("click", () => void update(null));
   void load();
   return form;
+}
+
+/** 是否開放 WebDAV：每個人用自己的應用程式密碼連線（Settings → WebDAV） */
+function webDavSection(): HTMLElement {
+  const enabled = h("input", { type: "checkbox", disabled: true });
+  const error = h("p", { class: "error", role: "alert" });
+  enabled.addEventListener("change", () => {
+    error.textContent = "";
+    enabled.disabled = true;
+    const on = enabled.checked;
+    void (async () => {
+      try {
+        await api.put("/api/admin/settings/webdav", { enabled: on });
+        showToast(on ? t("WebDAV is on") : t("WebDAV is off"));
+      } catch (e) {
+        enabled.checked = !on;
+        if (!isHandledGlobally(e)) {
+          error.textContent = messageOf(e);
+        }
+      } finally {
+        enabled.disabled = false;
+      }
+    })();
+  });
+  void (async () => {
+    try {
+      const settings = await api.get<ServerSettings>("/api/admin/settings");
+      enabled.checked = settings.webdav_enabled;
+      enabled.disabled = false;
+    } catch (e) {
+      if (!isHandledGlobally(e)) {
+        error.textContent = messageOf(e);
+      }
+    }
+  })();
+  return h(
+    "section",
+    { class: "settings-group" },
+    h("h3", { class: "group-title" }, t("WebDAV")),
+    h("label", { class: "inline" }, enabled, t("Turn on WebDAV")),
+    h(
+      "p",
+      { class: "hint" },
+      t("People can open their own files as a network drive, or sync apps with them, at {address}. Each person signs in with an app password from Settings → WebDAV. The same rules apply as on the web: deleted items go to the trash, and storage and upload limits apply.", { address: `${window.location.origin}/dav/` }),
+    ),
+    error,
+  );
 }
 
 function volumeTable(

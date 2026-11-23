@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,20 @@ impl UploadLimit {
     pub fn set(&self, custom: Option<u64>) {
         self.current
             .store(custom.unwrap_or(self.config), Ordering::Relaxed);
+    }
+}
+
+/// 是否開放 WebDAV（/dav/）。管理員在管理頁面開關，立即生效
+#[derive(Clone, Debug, Default)]
+pub struct WebDavSwitch(Arc<AtomicBool>);
+
+impl WebDavSwitch {
+    pub fn enabled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, enabled: bool) {
+        self.0.store(enabled, Ordering::Relaxed);
     }
 }
 
@@ -134,6 +148,7 @@ pub struct AppState {
     pub http: HttpClient,
     pub upload_progress: UploadProgress,
     pub trusted_proxies: TrustedProxies,
+    pub webdav: WebDavSwitch,
 }
 
 impl AppState {
@@ -150,6 +165,7 @@ impl AppState {
             http: HttpClient::new(),
             upload_progress: UploadProgress::default(),
             trusted_proxies: TrustedProxies::default(),
+            webdav: WebDavSwitch::default(),
         }
     }
 

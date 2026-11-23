@@ -29,6 +29,7 @@ import {
 } from "./two-factor-view.js";
 import { showToast } from "./toast.js";
 import type { User } from "./types.js";
+import { renderWebDav } from "./webdav-view.js";
 
 interface NavItem {
   readonly href: string;
@@ -42,6 +43,7 @@ interface NavItem {
 const SETTINGS: readonly { section: SettingsSection; label: string; icon: IconName }[] = [
   { section: "account", label: t("Account"), icon: "user" },
   { section: "sign-in", label: t("Sign-in"), icon: "lock" },
+  { section: "webdav", label: t("WebDAV"), icon: "link" },
   { section: "appearance", label: t("Appearance"), icon: "grid" },
 ];
 
@@ -71,6 +73,9 @@ export function renderSettings(
       break;
     case "sign-in":
       renderMySignIn(panel);
+      break;
+    case "webdav":
+      renderWebDav(panel);
       break;
     case "appearance":
       renderAppearance(panel);

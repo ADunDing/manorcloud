@@ -1,4 +1,5 @@
 mod admin;
+mod app_passwords;
 mod assets;
 mod auth;
 mod csrf;
@@ -21,6 +22,8 @@ mod trash;
 mod two_factor;
 mod upload_progress;
 mod uploads;
+mod webdav;
+mod webdav_xml;
 
 #[cfg(test)]
 mod test_support;
@@ -90,6 +93,8 @@ fn app(state: AppState) -> Router {
     Router::new()
         .merge(assets::router())
         .merge(api_router())
+        // WebDAV 不在 api_router 中：它有自己的登入方式，CSRF 的檢查另外套用
+        .merge(webdav::router())
         .with_state(state)
 }
 
@@ -112,6 +117,7 @@ fn api_router() -> Router<AppState> {
         .merge(sso::router())
         .merge(two_factor::router())
         .merge(storage::router())
+        .merge(app_passwords::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }
 

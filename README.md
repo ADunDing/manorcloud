@@ -27,6 +27,9 @@ dependencies, and it runs comfortably on a Raspberry Pi.
   structure is kept
 - **Share links**: share a file or folder with people who don't have an account, optionally
   with a password and an expiry date. Recipients can browse and download, nothing else
+- **WebDAV**: open your files as a network drive in Finder or File Explorer, or sync apps such
+  as Obsidian, Joplin, KeePassXC and rclone with them. Turned off until an administrator turns
+  it on; each device signs in with its own app password
 - **Storage limits**: an administrator can limit how much space each member uses (their files
   plus their trash)
 - **English and Traditional Chinese**: follows the browser's language, or choose one in
@@ -183,6 +186,26 @@ longer need them.
 ManorCloud serves plain HTTP by default and is meant for your home network. **Do not expose it
 to the internet** without HTTPS: either set `MANORCLOUD_TLS_CERT` and `MANORCLOUD_TLS_KEY`, or put
 a reverse proxy such as Caddy in front of it and set `MANORCLOUD_SECURE_COOKIES=true`.
+
+### WebDAV
+
+An administrator turns it on in Administration → Storage. Then each person creates an app
+password in Settings → WebDAV (one per device or app) and connects with:
+
+| Setting  | Value                                       |
+|----------|---------------------------------------------|
+| Address  | `https://your-server/dav/`                  |
+| Username | their ManorCloud username                   |
+| Password | the app password, not their login password  |
+
+- **macOS**: Finder → Go → Connect to Server (⌘K)
+- **Windows**: File Explorer → This PC → Map network drive. Windows only sends passwords over
+  HTTPS, and limits files to 50 MB unless you raise `FileSizeLimitInBytes` in the registry
+- **rclone**: `rclone config`, storage type `webdav`, vendor `owncloud` (keeps modification times)
+
+WebDAV follows the same rules as the web interface: deleted items go to the trash, storage and
+upload limits apply, and people only reach their own files. Saving over an existing file replaces
+it, as apps do every time they save.
 
 ## Everyday tasks
 

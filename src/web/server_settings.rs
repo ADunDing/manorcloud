@@ -2,17 +2,23 @@
 //!
 //!   GET /api/admin/settings    目前的設定
 //!   PUT /api/admin/settings    修改：{"max_upload_bytes": 位元組數，或 null 使用設定檔的值}
+//!   PUT /api/admin/settings/webdav  開關 WebDAV：{"enabled": true}
 //!
 //! 修改立即生效，不需要重新啟動。
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, put},
+};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use super::{
     error::AppError,
     extract::AdminUser,
-    state::{AppState, UploadLimit},
+    state::{AppState, UploadLimit, WebDavSwitch},
 };
 use crate::db::settings;
 
@@ -20,7 +26,9 @@ use crate::db::settings;
 const MIN_UPLOAD_BYTES: u64 = 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/admin/settings", get(show).put(update))
+    Router::new()
+        .route("/api/admin/settings", get(show).put(update))
+        .route("/api/admin/settings/webdav", put(set_webdav))
 }
 
 #[derive(Serialize)]
@@ -31,18 +39,22 @@ struct SettingsResponse {
     default_max_upload_bytes: u64,
     /// 是否在管理頁面另外設定了
     custom_max_upload: bool,
+    /// 是否開放 WebDAV
+    webdav_enabled: bool,
 }
 
 async fn show(
     _admin: AdminUser,
     State(pool): State<SqlitePool>,
     State(limit): State<UploadLimit>,
+    State(webdav): State<WebDavSwitch>,
 ) -> Result<Json<SettingsResponse>, AppError> {
     let custom = settings::max_upload_bytes(&pool).await?;
     Ok(Json(SettingsResponse {
         max_upload_bytes: limit.get(),
         default_max_upload_bytes: limit.config(),
         custom_max_upload: custom.is_some(),
+        webdav_enabled: webdav.enabled(),
     }))
 }
 
@@ -68,6 +80,23 @@ async fn update(
     }
     settings::set_max_upload_bytes(&pool, req.max_upload_bytes).await?;
     limit.set(req.max_upload_bytes);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebDavRequest {
+    enabled: bool,
+}
+
+async fn set_webdav(
+    _admin: AdminUser,
+    State(pool): State<SqlitePool>,
+    State(webdav): State<WebDavSwitch>,
+    Json(req): Json<WebDavRequest>,
+) -> Result<StatusCode, AppError> {
+    settings::set_webdav_enabled(&pool, req.enabled).await?;
+    webdav.set(req.enabled);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -134,5 +163,27 @@ mod tests {
             ),
             (Some(MIB), Some(false))
         );
+    }
+
+    #[sqlx::test]
+    async fn administrators_turn_webdav_on_and_off(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let on = Some(json!({"enabled": true}));
+        let (status, _) = t
+            .json(Method::PUT, "/api/admin/settings/webdav", on.clone())
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        t.make_admin().await;
+
+        let (_, body) = t.json(Method::GET, "/api/admin/settings", None).await;
+        assert_eq!(body["webdav_enabled"], false);
+        let (status, _) = t.json(Method::PUT, "/api/admin/settings/webdav", on).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, body) = t.json(Method::GET, "/api/admin/settings", None).await;
+        assert_eq!(body["webdav_enabled"], true);
+        assert!(t.state.webdav.enabled());
+        let (_, body) = t.json(Method::GET, "/api/config", None).await;
+        assert_eq!(body["webdav"], true);
+        assert!(crate::db::settings::webdav_enabled(&t.pool).await.unwrap());
     }
 }

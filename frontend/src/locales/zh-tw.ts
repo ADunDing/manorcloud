@@ -552,10 +552,46 @@ const UI: Readonly<Record<string, string>> = {
   "A folder on a disk connected to this server. It must already exist, and ManorCloud must be allowed to write to it.":
     "接在這台伺服器上的硬碟裡的資料夾。這個資料夾必須已經存在，而且 ManorCloud 要有寫入權限。",
   "Enter a name and a folder": "請輸入名稱和資料夾",
+
+  // ==================== WebDAV ====================
+  WebDAV: "WebDAV",
+  "WebDAV is turned off. Ask your administrator to turn it on in Administration → Storage.":
+    "WebDAV 尚未開啟。請管理員到「管理 → 儲存空間」開啟。",
+  Connect: "連線",
+  "Open your files as a network drive in Finder (Go → Connect to Server) or File Explorer (Map network drive), or sync apps such as Obsidian, Joplin, KeePassXC and rclone with them.":
+    "在 Finder（前往 → 連接伺服器）或檔案總管（連線網路磁碟機）中把你的檔案當成網路磁碟開啟，或讓 Obsidian、Joplin、KeePassXC、rclone 等 App 同步到這裡。",
+  Address: "網址",
+  "Address copied": "已複製網址",
+  "Username copied": "已複製使用者名稱",
+  "For the password, create an app password below. Your login password doesn't work here.":
+    "密碼請在下方建立一組應用程式密碼。登入 ManorCloud 的密碼在這裡不能用。",
+  "App passwords": "應用程式密碼",
+  "Create one for each device or app. If a device is lost, revoke just that one.":
+    "每台裝置或每個 App 各建立一組。裝置遺失時，只要撤銷那一組。",
+  "The app password for {name}. Copy it now: it won't be shown again.":
+    "這是 {name} 的應用程式密碼。請現在複製：之後不會再顯示。",
+  "App password copied": "已複製應用程式密碼",
+  "Last used": "最後使用",
+  "Not used yet": "尚未使用",
+  Revoke: "撤銷",
+  "Revoke app password?": "撤銷應用程式密碼？",
+  "Devices and apps using {name} will no longer be able to connect.":
+    "使用 {name} 的裝置與 App 將無法再連線。",
+  "App password revoked": "已撤銷應用程式密碼",
+  "Turn on WebDAV": "開啟 WebDAV",
+  "WebDAV is on": "WebDAV 已開啟",
+  "WebDAV is off": "WebDAV 已關閉",
+  "People can open their own files as a network drive, or sync apps with them, at {address}. Each person signs in with an app password from Settings → WebDAV. The same rules apply as on the web: deleted items go to the trash, and storage and upload limits apply.":
+    "每個人都能在 {address} 把自己的檔案當成網路磁碟開啟，或讓 App 同步到這裡，用「設定 → WebDAV」中的應用程式密碼登入。規則與網頁相同：刪除的項目會進垃圾桶，空間上限與上傳上限照樣適用。",
 };
 
 /** 伺服器的錯誤訊息（src/ 中的 Rust 程式） */
 const SERVER: Readonly<Record<string, string>> = {
+  "WebDAV is turned off. Ask your administrator to turn it on": "WebDAV 尚未開啟，請管理員開啟",
+  "Enter a name of up to 100 characters": "請輸入 100 個字元以內的名稱",
+  "You can have up to 50 app passwords. Revoke one you no longer use first":
+    "應用程式密碼最多 50 組，請先撤銷不再使用的",
+  "App password not found": "找不到這組應用程式密碼",
   "A folder can't be copied or moved into itself": "資料夾不能複製或移動到自己裡面",
   "A username may only contain lowercase letters, digits, underscores and hyphens":
     "使用者名稱只能包含小寫英文字母、數字、底線和連字號",

@@ -276,6 +276,16 @@ async fn serve() {
         Ok(None) => {}
         Err(e) => eprintln!("cannot read the upload limit set in Administration: {e}"),
     }
+    // 管理頁面設定的 WebDAV 開關
+    match db::settings::webdav_enabled(&state.pool).await {
+        Ok(enabled) => {
+            state.webdav.set(enabled);
+            if enabled {
+                println!("WebDAV: on, at /dav/");
+            }
+        }
+        Err(e) => eprintln!("cannot read whether WebDAV is on: {e}"),
+    }
     // 登入次數限制：背景定期清除過期的記錄
     state.login_limits.spawn_pruning();
     web::run(state, config.bind_addr, tls).await;

@@ -35,7 +35,7 @@ use super::{
     download::{ArchiveItem, MAX_ARCHIVE_ITEMS, archive_response, file_response},
     error::AppError,
     extract::{CurrentUser, InSpace},
-    state::{AppState, UploadLimit},
+    state::{AppState, UploadLimit, WebDavSwitch},
 };
 use crate::{
     db::{trash as trash_db, user as user_db},
@@ -501,8 +501,18 @@ async fn remove(
 ) -> Result<Json<DeleteResponse>, AppError> {
     let rel = parse_path(&query.path)?;
     space.check_modify(&rel).map_err(denied)?;
+    let trash_id = move_to_trash(&pool, &space, &rel).await?;
+    Ok(Json(DeleteResponse { trash_id }))
+}
+
+/// 把一個項目放進垃圾桶，回傳垃圾桶中的編號。呼叫前先用 `check_modify` 確認可以刪除
+pub(super) async fn move_to_trash(
+    pool: &SqlitePool,
+    space: &Space,
+    rel: &RelPath,
+) -> Result<i64, AppError> {
     let root = space.root.clone();
-    let abs = space.abs(&rel);
+    let abs = space.abs(rel);
     let path = blocking(move || tree::resolve(&root, &abs, true)).await?;
 
     // 先寫紀錄，再搬進垃圾桶：中途失敗只會留下一筆找不到檔案的紀錄
@@ -512,7 +522,7 @@ async fn remove(
         Ok((meta.is_dir(), tree::tree_size(&measured)))
     })
     .await?;
-    let id = trash_db::add(&pool, space.trash, &rel.display(), is_dir, size).await?;
+    let id = trash_db::add(pool, space.trash, &rel.display(), is_dir, size).await?;
     let target = storage::trash_path(&space.root, id);
     let moved = blocking(move || {
         std::fs::create_dir_all(target.parent().expect("trash_path has a parent"))?;
@@ -520,10 +530,10 @@ async fn remove(
     })
     .await;
     if let Err(e) = moved {
-        trash_db::remove(&pool, id).await?;
+        trash_db::remove(pool, id).await?;
         return Err(e);
     }
-    Ok(Json(DeleteResponse { trash_id: id }))
+    Ok(id)
 }
 
 // ==================== 一般上傳 ====================
@@ -617,12 +627,19 @@ pub(super) fn multipart_error(e: MultipartError) -> AppError {
 struct ConfigResponse {
     /// 單一檔案的上傳上限；前端用它在送出前先檢查，不必傳到一半才收到 413
     max_upload_bytes: u64,
+    /// 是否開放 WebDAV：設定頁面依此顯示應用程式密碼
+    webdav: bool,
 }
 
 /// GET /api/config。需要登入：沒有理由對未登入的人公開伺服器的設定
-async fn config(_user: CurrentUser, State(limit): State<UploadLimit>) -> Json<ConfigResponse> {
+async fn config(
+    _user: CurrentUser,
+    State(limit): State<UploadLimit>,
+    State(webdav): State<WebDavSwitch>,
+) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         max_upload_bytes: limit.get(),
+        webdav: webdav.enabled(),
     })
 }
 
