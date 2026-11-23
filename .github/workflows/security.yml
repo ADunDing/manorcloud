@@ -1,6 +1,6 @@
 # 資安檢查：相依套件的已知漏洞與授權、GitHub Actions 工作流程本身的安全問題。
 #
-# 除了 push 與 PR，每週也跑一次：程式沒有改，相依套件也可能在之後被發現漏洞。
+# 除了 push 與 PR，每天也跑一次：程式沒有改，相依套件也可能在之後被發現漏洞。
 # 發現的問題會讓這個工作流程失敗；zizmor 的結果另外顯示在 Security → Code scanning。
 name: Security
 
@@ -9,8 +9,8 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # 每週一 03:17 UTC（避開整點，GitHub 在整點的排程常延遲）
-    - cron: "17 3 * * 1"
+    # 每天 03:17 UTC（台灣 11:17；避開整點，GitHub 在整點的排程常延遲）
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions: {}
