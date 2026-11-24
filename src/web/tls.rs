@@ -44,8 +44,9 @@ pub fn load(cert: &Path, key: &Path) -> Result<Arc<ServerConfig>, String> {
         .with_no_client_auth()
         .with_single_cert(certs, key_der)
         .map_err(|e| format!("the certificate and private key do not match: {e}"))?;
-    // 伺服器只提供 HTTP/1.1
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // 優先使用 HTTP/2：瀏覽器能在同一條連線上同時傳送多個上傳的分段。
+    // 不支援的用戶端（curl --http1.1、舊的程式）照樣用 HTTP/1.1
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }
 

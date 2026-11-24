@@ -1,6 +1,6 @@
 [package]
 name = "manorcloud"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.94"
 license = "AGPL-3.0-or-later"
@@ -12,7 +12,7 @@ unsafe_code = "deny"
 
 [dependencies]
 argon2 = "0.6.0"
-axum = { version = "0.8.9", features = ["macros", "multipart"] }
+axum = { version = "0.8.9", features = ["http2", "macros", "multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 base64 = "0.23.1"
 getrandom = "0.4.3"
