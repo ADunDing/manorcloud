@@ -40,6 +40,10 @@ const CONTENT_SECURITY_POLICY: &str = concat!(
     "form-action 'self'"
 );
 
+/// 關閉的瀏覽器功能（Permissions-Policy）：`()` 代表任何來源都不能使用
+const PERMISSIONS_POLICY: &str =
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()";
+
 /// 前端靜態檔案的路由。所有回應（包含 404、405）都會經過 `security_headers`。
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -105,6 +109,24 @@ async fn security_headers(request: Request, next: Next) -> Response {
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
     );
+    // 本站的檔案只給本站的頁面使用：其他網站不能用 <script>、<img> 載入它們
+    // （防範 Spectre 這類旁路攻擊讀到內容）
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    // 頁面只載入明確允許被嵌入的資源。ManorCloud 只用本站的資源（CSP 也是如此），
+    // 不受影響；搭配上面兩個標頭，頁面在瀏覽器中與其他網站完全隔離
+    headers.insert(
+        HeaderName::from_static("cross-origin-embedder-policy"),
+        HeaderValue::from_static("require-corp"),
+    );
+    // ManorCloud 用不到的瀏覽器功能一律關閉：就算頁面被注入了腳本，也無法開啟相機、麥克風等。
+    // 複製到剪貼簿與全螢幕預覽要用到，不在清單中
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static(PERMISSIONS_POLICY),
+    );
     // 每次都向伺服器確認，更新程式後不會卡在舊版的 JS
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 
@@ -131,6 +153,15 @@ mod tests {
             "nosniff"
         );
         assert_eq!(header_str(headers, header::REFERRER_POLICY), "same-origin");
+        for (name, value) in [
+            ("cross-origin-opener-policy", "same-origin"),
+            ("cross-origin-resource-policy", "same-origin"),
+            ("cross-origin-embedder-policy", "require-corp"),
+        ] {
+            assert_eq!(headers[name], value, "{name}");
+        }
+        let permissions = headers["permissions-policy"].to_str().unwrap();
+        assert!(permissions.contains("camera=()"), "{permissions}");
     }
 
     #[sqlx::test]
