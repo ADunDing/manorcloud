@@ -51,10 +51,33 @@ docker run -d --name manorcloud --restart unless-stopped --stop-timeout 35 \
 docker logs manorcloud
 ```
 
-The log shows the first administrator's password. Settings below go in as `-e NAME=value`. To
-upgrade, `docker pull ghcr.io/adunding/manorcloud` and recreate the container; your files stay
-in the `manorcloud` volume. For more disks, mount them into the container
-(`-v /mnt/disk2:/mnt/disk2`) and give them to its user with `sudo chown 65532:65532 /mnt/disk2`.
+Or with Docker Compose, in `compose.yaml`:
+
+```yaml
+services:
+  manorcloud:
+    image: ghcr.io/adunding/manorcloud
+    restart: unless-stopped
+    stop_grace_period: 35s
+    ports:
+      - "3000:3000"
+    volumes:
+      - manorcloud:/var/lib/manorcloud
+      # - /mnt/disk2:/mnt/disk2
+
+volumes:
+  manorcloud:
+```
+
+```sh
+docker compose up -d
+docker compose logs manorcloud
+```
+
+The log shows the first administrator's password. Settings below go in as `-e NAME=value`
+(Compose: `environment:`). To upgrade, `docker compose pull && docker compose up -d`, or pull and
+recreate the container; your files stay in the `manorcloud` volume. For more disks, mount them
+into the container and give them to its user with `sudo chown 65532:65532 /mnt/disk2`.
 
 ## Configuration
 
