@@ -229,8 +229,12 @@ fn prepare_folder(raw: &str, taken: &[(String, PathBuf)]) -> Result<PathBuf, App
     if !given.is_absolute() {
         return Err(bad("Enter a full path that starts with /"));
     }
+    let quoted = shell_quote(raw);
     let path = given.canonicalize().map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => bad("That folder doesn't exist"),
+        io::ErrorKind::NotFound => AppError::BadRequest(format!(
+            "That folder doesn't exist. Create it on the server with: \
+             sudo mkdir -p {quoted} && sudo chown manorcloud: {quoted}"
+        )),
         io::ErrorKind::PermissionDenied => bad("ManorCloud isn't allowed to open that folder"),
         _ => AppError::internal(format!("cannot resolve {raw}: {e}")),
     })?;
@@ -251,19 +255,37 @@ fn prepare_folder(raw: &str, taken: &[(String, PathBuf)]) -> Result<PathBuf, App
         }
     }
 
-    // 實際寫入一次：權限、唯讀掛載、systemd 的 ReadWritePaths 限制都會在這裡出現
+    // 實際寫入一次：權限、唯讀掛載、systemd 的 ReadWritePaths 限制都會在這裡出現。
+    // 寫不進去時直接給要在伺服器上執行的指令，照著複製貼上就好
     let writable = storage::mark_volume(&path).and_then(|()| storage::init_dirs(&path));
     if let Err(e) = writable {
         return Err(match e.kind() {
-            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => bad(
-                "ManorCloud can't write to that folder. Make sure the account ManorCloud runs as \
-                 (manorcloud when installed as a service) owns it, and allow the folder with \
-                 `sudo systemctl edit manorcloud` (ReadWritePaths=)",
-            ),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+                let quoted = shell_quote(&path.to_string_lossy());
+                let mut message = format!(
+                    "ManorCloud can't write to that folder. Give it to ManorCloud on the server \
+                     with: sudo chown manorcloud: {quoted}"
+                );
+                if !WRITABLE_BY_DEFAULT.iter().any(|dir| path.starts_with(dir)) {
+                    message.push_str(
+                        ". Folders outside /mnt, /media and /srv must also be allowed with \
+                         sudo systemctl edit manorcloud (ReadWritePaths=)",
+                    );
+                }
+                AppError::BadRequest(message)
+            }
             _ => AppError::internal(format!("cannot prepare {}: {e}", path.display())),
         });
     }
     Ok(path)
+}
+
+/// 服務預設可以寫入的地方（install.sh 的 ReadWritePaths）：硬碟與 NAS 通常掛載在這裡
+const WRITABLE_BY_DEFAULT: [&str; 3] = ["/mnt", "/media", "/srv"];
+
+/// 指令中的路徑：用單引號包起來，空白與特殊字元都不會被 shell 解讀
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// 硬碟上還有沒有檔案（`.manorcloud`、`lost+found` 與空的 `users` 不算）

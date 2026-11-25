@@ -16,7 +16,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     extract::{ConnectInfo, FromRef, FromRequestParts},
@@ -382,17 +382,38 @@ mod tests {
 
 // ==================== 使用者的 IP ====================
 
-/// 放在前面的反向代理的位址（MANORCLOUD_TRUSTED_PROXIES）
-#[derive(Clone, Default)]
-pub struct TrustedProxies(Arc<[IpRange]>);
+/// 放在前面的反向代理的位址。管理員在管理頁面修改，立即生效
+#[derive(Clone)]
+pub struct TrustedProxies(Arc<RwLock<Arc<[IpRange]>>>);
+
+impl Default for TrustedProxies {
+    fn default() -> Self {
+        TrustedProxies::new(Vec::new())
+    }
+}
 
 impl TrustedProxies {
     pub fn new(ranges: Vec<IpRange>) -> Self {
-        TrustedProxies(ranges.into())
+        TrustedProxies(Arc::new(RwLock::new(ranges.into())))
     }
 
-    fn trusts(&self, ip: IpAddr) -> bool {
-        self.0.iter().any(|range| range.contains(ip))
+    /// 目前的清單。鎖只在複製參照的瞬間持有
+    pub fn list(&self) -> Arc<[IpRange]> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn set(&self, ranges: Vec<IpRange>) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = ranges.into();
+    }
+
+    pub(super) fn trusts(&self, ip: IpAddr) -> bool {
+        self.list().iter().any(|range| range.contains(ip))
     }
 
     /// 使用者真正的 IP。

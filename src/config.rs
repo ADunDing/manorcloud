@@ -3,6 +3,9 @@
 //! - 有設定但不合法（包含不是 UTF-8）：回傳錯誤，程式不啟動。
 //!   設定寫錯卻默默改用預設值，管理者會以為設定已生效。
 //!
+//! 設定檔只放「讀資料庫之前就要知道」的設定：監聽的位址、資料與資料庫的位置、TLS。
+//! 其他設定都在管理頁面修改（存在資料庫的 server_settings）。
+//!
 //! 設定的「來源」可以替換：伺服器讀取環境變數（由 systemd 從設定檔載入），
 //! 匯出工具則自己讀取設定檔。兩者共用 Config::load，驗證規則只有一份。
 //!
@@ -15,31 +18,25 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use crate::storage::DEFAULT_MAX_UPLOAD_BYTES;
-
 const DATA_DIR_VAR: &str = "MANORCLOUD_DATA_DIR";
 const DEFAULT_DATA_DIR: &str = "./data";
 
 const DATABASE_URL_VAR: &str = "MANORCLOUD_DATABASE_URL";
 const DEFAULT_DATABASE_URL: &str = "sqlite://app.db";
 
-const MAX_UPLOAD_VAR: &str = "MANORCLOUD_MAX_UPLOAD_BYTES";
-
 const BIND_VAR: &str = "MANORCLOUD_BIND";
 /// 預設只監聽本機：要讓區網其他裝置連入，必須在設定檔中明確寫出 0.0.0.0
 /// install.sh 的 DEFAULT_BIND 必須與它一致（安裝完成時顯示的位址）
 const DEFAULT_BIND: &str = "127.0.0.1:3000";
 
-const SECURE_COOKIES_VAR: &str = "MANORCLOUD_SECURE_COOKIES";
-
 const TLS_CERT_VAR: &str = "MANORCLOUD_TLS_CERT";
 const TLS_KEY_VAR: &str = "MANORCLOUD_TLS_KEY";
 
-const TRUSTED_PROXIES_VAR: &str = "MANORCLOUD_TRUSTED_PROXIES";
-
-const MAX_PENDING_UPLOADS_VAR: &str = "MANORCLOUD_MAX_PENDING_UPLOADS";
-/// 每個使用者最多幾個未完成的上傳：放棄的上傳不能無限累積佔用磁碟
-const DEFAULT_MAX_PENDING_UPLOADS: u32 = 5;
+// 舊版的設定，現在改在管理頁面設定（見 Legacy）
+pub const MAX_UPLOAD_VAR: &str = "MANORCLOUD_MAX_UPLOAD_BYTES";
+pub const MAX_PENDING_UPLOADS_VAR: &str = "MANORCLOUD_MAX_PENDING_UPLOADS";
+pub const TRUSTED_PROXIES_VAR: &str = "MANORCLOUD_TRUSTED_PROXIES";
+pub const SECURE_COOKIES_VAR: &str = "MANORCLOUD_SECURE_COOKIES";
 
 /// 依名稱取得設定值。與 `std::env::var` 相同的形狀，方便直接替換
 pub type Lookup<'a> = &'a dyn Fn(&str) -> Result<String, VarError>;
@@ -50,19 +47,27 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// 資料庫連線字串。刻意不叫 DATABASE_URL：那個名稱留給 sqlx 的巨集在編譯時使用
     pub database_url: String,
-    /// 單一檔案的上傳大小上限（位元組）
-    pub max_upload_bytes: u64,
     /// 監聽的位址與埠號
     pub bind_addr: SocketAddr,
-    /// Session Cookie 是否加上 Secure（只能在 HTTPS 下開啟）
-    pub secure_cookies: bool,
-    /// 每個使用者最多幾個未完成（可續傳）的上傳
-    pub max_pending_uploads: u32,
     /// 直接提供 HTTPS 時的憑證與私鑰；沒有設定時只提供 HTTP
     pub tls: Option<TlsFiles>,
-    /// 放在前面的反向代理（nginx、Caddy）的位址：只有從這些位址來的連線，
-    /// 才採用 X-Forwarded-For 中的使用者 IP
-    pub trusted_proxies: Vec<IpRange>,
+    /// 設定檔中還留著的舊設定
+    pub legacy: Legacy,
+}
+
+/// 舊版放在設定檔、現在改在管理頁面設定的值。
+///
+/// 升級後第一次啟動時，管理頁面還沒有設定的項目會搬進資料庫
+/// （web::server_settings::load_settings），之後設定檔的這幾行就沒有作用了。
+/// 值仍然要合法：寫錯的值不能默默被忽略。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Legacy {
+    pub max_upload_bytes: Option<u64>,
+    pub max_pending_uploads: Option<u32>,
+    pub trusted_proxies: Option<Vec<IpRange>>,
+    /// MANORCLOUD_SECURE_COOKIES 還在設定檔裡。現在由程式自己判斷連線是不是 HTTPS，
+    /// 這一行只會被提醒可以刪掉
+    pub secure_cookies: bool,
 }
 
 /// 一個 IP 位址或網段，例如 127.0.0.1、172.18.0.0/16、fd00::/8
@@ -128,6 +133,32 @@ impl IpRange {
     }
 }
 
+/// 以逗號分隔的位址或網段，例如 `127.0.0.1, 172.18.0.0/16`。空白的項目略過。
+/// 錯誤訊息直接給使用者看（管理頁面），指出是哪一項
+pub fn parse_ip_ranges(text: &str) -> Result<Vec<IpRange>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            IpRange::parse(item).ok_or_else(|| {
+                format!(
+                    "Enter IP addresses or ranges separated by commas, \
+                     e.g. 127.0.0.1, 172.18.0.0/16 (not valid: {item})"
+                )
+            })
+        })
+        .collect()
+}
+
+/// 寫回文字（存進資料庫、顯示在管理頁面）
+pub fn format_ip_ranges(ranges: &[IpRange]) -> String {
+    ranges
+        .iter()
+        .map(IpRange::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// PEM 格式的憑證鏈與私鑰檔案路徑
 #[derive(Debug, Clone, PartialEq)]
 pub struct TlsFiles {
@@ -150,20 +181,18 @@ impl Config {
             .map(|v| v.trim().to_string())
             .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_string());
 
-        let tls = parse_tls(lookup(TLS_CERT_VAR), lookup(TLS_KEY_VAR))?;
-        // 直接提供 HTTPS 時，Cookie 一定只走 HTTPS
-        let secure_cookies =
-            parse_bool(SECURE_COOKIES_VAR, lookup(SECURE_COOKIES_VAR))? || tls.is_some();
-
         Ok(Config {
             data_dir,
             database_url,
-            max_upload_bytes: parse_max_upload_bytes(lookup(MAX_UPLOAD_VAR))?,
             bind_addr: parse_bind_addr(lookup(BIND_VAR))?,
-            secure_cookies,
-            max_pending_uploads: parse_max_pending_uploads(lookup(MAX_PENDING_UPLOADS_VAR))?,
-            tls,
-            trusted_proxies: parse_trusted_proxies(lookup(TRUSTED_PROXIES_VAR))?,
+            tls: parse_tls(lookup(TLS_CERT_VAR), lookup(TLS_KEY_VAR))?,
+            legacy: Legacy {
+                max_upload_bytes: parse_max_upload_bytes(lookup(MAX_UPLOAD_VAR))?,
+                max_pending_uploads: parse_max_pending_uploads(lookup(MAX_PENDING_UPLOADS_VAR))?,
+                trusted_proxies: parse_trusted_proxies(lookup(TRUSTED_PROXIES_VAR))?,
+                secure_cookies: read_env_string(SECURE_COOKIES_VAR, lookup(SECURE_COOKIES_VAR))?
+                    .is_some(),
+            },
         })
     }
 }
@@ -248,9 +277,9 @@ fn read_env_string(name: &str, raw: Result<String, VarError>) -> Result<Option<S
     }
 }
 
-fn parse_max_upload_bytes(raw: Result<String, VarError>) -> Result<u64, String> {
+fn parse_max_upload_bytes(raw: Result<String, VarError>) -> Result<Option<u64>, String> {
     let Some(value) = read_env_string(MAX_UPLOAD_VAR, raw)? else {
-        return Ok(DEFAULT_MAX_UPLOAD_BYTES);
+        return Ok(None);
     };
     let value = value.trim();
 
@@ -258,7 +287,7 @@ fn parse_max_upload_bytes(raw: Result<String, VarError>) -> Result<u64, String> 
         Ok(0) | Err(_) => Err(format!(
             "{MAX_UPLOAD_VAR} must be a positive integer (in bytes), got: {value}"
         )),
-        Ok(n) => Ok(n),
+        Ok(n) => Ok(Some(n)),
     }
 }
 
@@ -296,29 +325,19 @@ fn parse_tls(
 }
 
 /// 以逗號分隔的位址或網段，例如 127.0.0.1,172.18.0.0/16
-fn parse_trusted_proxies(raw: Result<String, VarError>) -> Result<Vec<IpRange>, String> {
+fn parse_trusted_proxies(raw: Result<String, VarError>) -> Result<Option<Vec<IpRange>>, String> {
     let Some(value) = read_env_string(TRUSTED_PROXIES_VAR, raw)? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(|item| {
-            IpRange::parse(item).ok_or_else(|| {
-                format!(
-                    "{TRUSTED_PROXIES_VAR} must be IP addresses or ranges separated by commas, \
-                     e.g. 127.0.0.1,172.18.0.0/16, got: {item}"
-                )
-            })
-        })
-        .collect()
+    parse_ip_ranges(&value)
+        .map(Some)
+        .map_err(|e| format!("{TRUSTED_PROXIES_VAR}: {e}"))
 }
 
 /// 必須是正整數。0 不允許：那等於關閉大檔案的上傳，而設定寫成 0 多半是誤會
-fn parse_max_pending_uploads(raw: Result<String, VarError>) -> Result<u32, String> {
+fn parse_max_pending_uploads(raw: Result<String, VarError>) -> Result<Option<u32>, String> {
     let Some(value) = read_env_string(MAX_PENDING_UPLOADS_VAR, raw)? else {
-        return Ok(DEFAULT_MAX_PENDING_UPLOADS);
+        return Ok(None);
     };
     let value = value.trim();
 
@@ -326,23 +345,7 @@ fn parse_max_pending_uploads(raw: Result<String, VarError>) -> Result<u32, Strin
         Ok(0) | Err(_) => Err(format!(
             "{MAX_PENDING_UPLOADS_VAR} must be a positive integer, got: {value}"
         )),
-        Ok(n) => Ok(n),
-    }
-}
-
-/// 只接受明確的寫法（不分大小寫）；寫錯一律報錯，
-/// 避免 `ture` 之類的拼字錯誤被默默當成 false，讓管理者以為設定已生效。
-fn parse_bool(name: &str, raw: Result<String, VarError>) -> Result<bool, String> {
-    let Some(value) = read_env_string(name, raw)? else {
-        return Ok(false);
-    };
-
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" => Ok(true),
-        "false" | "0" | "no" => Ok(false),
-        other => Err(format!(
-            "{name} must be true or false (1, 0, yes and no are also accepted), got: {other}"
-        )),
+        Ok(n) => Ok(Some(n)),
     }
 }
 
@@ -382,22 +385,34 @@ mod tests {
 
         assert_eq!(config.data_dir, PathBuf::from("./data"));
         assert_eq!(config.database_url, "sqlite://app.db");
-        assert_eq!(config.max_upload_bytes, DEFAULT_MAX_UPLOAD_BYTES);
         assert!(config.bind_addr.ip().is_loopback());
-        assert!(!config.secure_cookies);
-        assert_eq!(config.max_pending_uploads, 5);
         assert_eq!(config.tls, None);
-        assert!(config.trusted_proxies.is_empty());
+        assert_eq!(config.legacy, Legacy::default());
     }
 
     #[test]
-    fn trusted_proxies_are_addresses_or_ranges() {
-        let config = load_from(&[(
-            "MANORCLOUD_TRUSTED_PROXIES",
-            " 127.0.0.1, 172.18.0.0/16 ,::1 ",
-        )])
+    fn old_settings_are_kept_for_moving_to_administration() {
+        let config = load_from(&[
+            ("MANORCLOUD_MAX_UPLOAD_BYTES", " 42 "),
+            ("MANORCLOUD_MAX_PENDING_UPLOADS", "8"),
+            ("MANORCLOUD_TRUSTED_PROXIES", "192.168.10.200"),
+            ("MANORCLOUD_SECURE_COOKIES", "true"),
+        ])
         .unwrap();
-        let proxies = config.trusted_proxies;
+
+        let legacy = config.legacy;
+        assert_eq!(legacy.max_upload_bytes, Some(42));
+        assert_eq!(legacy.max_pending_uploads, Some(8));
+        assert_eq!(
+            legacy.trusted_proxies,
+            Some(vec![IpRange::parse("192.168.10.200").unwrap()])
+        );
+        assert!(legacy.secure_cookies);
+    }
+
+    #[test]
+    fn ip_ranges_are_addresses_or_ranges() {
+        let proxies = parse_ip_ranges(" 127.0.0.1, 172.18.0.0/16 ,::1, ").unwrap();
         let ip = |text: &str| text.parse::<IpAddr>().unwrap();
 
         assert_eq!(proxies.len(), 3);
@@ -409,10 +424,16 @@ mod tests {
         assert!(!proxies[1].contains(ip("172.19.0.1")));
         assert!(proxies[2].contains(ip("::1")));
         assert!(!proxies[2].contains(ip("127.0.0.1")));
+
+        assert_eq!(format_ip_ranges(&proxies), "127.0.0.1, 172.18.0.0/16, ::1");
+        assert_eq!(parse_ip_ranges(""), Ok(Vec::new()));
+        for bad in ["nginx", "10.0.0.0/33", "127.0.0.1, x"] {
+            assert!(parse_ip_ranges(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
-    fn tls_files_turn_on_secure_cookies() {
+    fn tls_files_are_read() {
         let config = load_from(&[
             ("MANORCLOUD_TLS_CERT", "/etc/manorcloud/tls/cert.pem"),
             ("MANORCLOUD_TLS_KEY", " /etc/manorcloud/tls/key.pem "),
@@ -422,7 +443,6 @@ mod tests {
         let tls = config.tls.unwrap();
         assert_eq!(tls.cert, PathBuf::from("/etc/manorcloud/tls/cert.pem"));
         assert_eq!(tls.key, PathBuf::from("/etc/manorcloud/tls/key.pem"));
-        assert!(config.secure_cookies);
     }
 
     #[test]
@@ -431,22 +451,17 @@ mod tests {
             ("MANORCLOUD_DATA_DIR", " /srv/data "),
             ("MANORCLOUD_DATABASE_URL", "sqlite:///srv/x.db"),
             ("MANORCLOUD_BIND", "0.0.0.0:3000"),
-            ("MANORCLOUD_SECURE_COOKIES", "true"),
-            ("MANORCLOUD_MAX_PENDING_UPLOADS", "8"),
         ])
         .unwrap();
 
         assert_eq!(config.data_dir, PathBuf::from("/srv/data"));
         assert_eq!(config.database_url, "sqlite:///srv/x.db");
         assert_eq!(config.bind_addr.to_string(), "0.0.0.0:3000");
-        assert!(config.secure_cookies);
-        assert_eq!(config.max_pending_uploads, 8);
     }
 
     #[test]
     fn any_invalid_value_stops_loading() {
         for pair in [
-            ("MANORCLOUD_SECURE_COOKIES", "ture"),
             ("MANORCLOUD_BIND", "localhost:3000"),
             ("MANORCLOUD_MAX_UPLOAD_BYTES", "10GB"),
             ("MANORCLOUD_MAX_PENDING_UPLOADS", "0"),
@@ -504,7 +519,7 @@ mod tests {
     #[test]
     fn env_file_values_pass_the_same_validation() {
         // 設定檔中的值與環境變數用同一套規則驗證
-        let values = parse_env_file("MANORCLOUD_SECURE_COOKIES=ture\n");
+        let values = parse_env_file("MANORCLOUD_BIND=localhost\n");
         let result =
             Config::load(&|name: &str| values.get(name).cloned().ok_or(VarError::NotPresent));
 
@@ -522,11 +537,8 @@ mod tests {
 
     #[test]
     fn max_upload_values() {
-        assert_eq!(
-            parse_max_upload_bytes(unset()),
-            Ok(DEFAULT_MAX_UPLOAD_BYTES)
-        );
-        assert_eq!(parse_max_upload_bytes(set(" 42 ")), Ok(42));
+        assert_eq!(parse_max_upload_bytes(unset()), Ok(None));
+        assert_eq!(parse_max_upload_bytes(set(" 42 ")), Ok(Some(42)));
         for value in ["0", "-1", "10GB", "1.5", "abc"] {
             assert!(parse_max_upload_bytes(set(value)).is_err(), "{value}");
         }
@@ -544,22 +556,9 @@ mod tests {
     }
 
     #[test]
-    fn bool_values() {
-        for value in ["true", "TRUE", "1", "yes", " Yes "] {
-            assert_eq!(parse_bool("X", set(value)), Ok(true), "{value}");
-        }
-        for value in ["false", "False", "0", "no"] {
-            assert_eq!(parse_bool("X", set(value)), Ok(false), "{value}");
-        }
-        for value in ["ture", "flase", "on", "2", "enabled"] {
-            assert!(parse_bool("X", set(value)).is_err(), "{value}");
-        }
-    }
-
-    #[test]
     fn max_pending_uploads_values() {
-        assert_eq!(parse_max_pending_uploads(unset()), Ok(5));
-        assert_eq!(parse_max_pending_uploads(set(" 12 ")), Ok(12));
+        assert_eq!(parse_max_pending_uploads(unset()), Ok(None));
+        assert_eq!(parse_max_pending_uploads(set(" 12 ")), Ok(Some(12)));
         for value in ["0", "-1", "five", "1.5"] {
             let error = parse_max_pending_uploads(set(value)).unwrap_err();
             assert!(error.is_ascii(), "{error}");

@@ -1,9 +1,12 @@
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use axum::extract::FromRef;
+use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
+use axum::http::{header, request::Parts};
 
 use super::extract::TrustedProxies;
 use super::upload_progress::UploadProgress;
@@ -13,20 +16,20 @@ use crate::auth::limiter::{self, LoginLimiter};
 
 /// 單一檔案的上傳大小上限（位元組）。
 ///
-/// 預設是設定檔的 MANORCLOUD_MAX_UPLOAD_BYTES；管理員可以在管理頁面改成其他值
-/// （存在資料庫的 server_settings，啟動時載入）。所有請求共用同一個值，修改後立即生效。
+/// 管理員在管理頁面設定（存在資料庫的 server_settings，啟動時載入）；沒有設定時是預設值。
+/// 所有請求共用同一個值，修改後立即生效。
 #[derive(Clone, Debug)]
 pub struct UploadLimit {
-    /// 設定檔的值
-    config: u64,
+    /// 管理頁面沒有設定時的值
+    default: u64,
     current: Arc<AtomicU64>,
 }
 
 impl UploadLimit {
-    pub fn new(config: u64) -> Self {
+    pub fn new(default: u64) -> Self {
         UploadLimit {
-            config,
-            current: Arc::new(AtomicU64::new(config)),
+            default,
+            current: Arc::new(AtomicU64::new(default)),
         }
     }
 
@@ -35,15 +38,15 @@ impl UploadLimit {
         self.current.load(Ordering::Relaxed)
     }
 
-    /// 設定檔的值（管理頁面沒有另外設定時使用）
-    pub fn config(&self) -> u64 {
-        self.config
+    /// 管理頁面沒有設定時的值
+    pub fn default_value(&self) -> u64 {
+        self.default
     }
 
-    /// 管理頁面設定的值；None 回到設定檔的值
+    /// 管理頁面設定的值；None 回到預設值
     pub fn set(&self, custom: Option<u64>) {
         self.current
-            .store(custom.unwrap_or(self.config), Ordering::Relaxed);
+            .store(custom.unwrap_or(self.default), Ordering::Relaxed);
     }
 }
 
@@ -61,17 +64,80 @@ impl WebDavSwitch {
     }
 }
 
-/// 每個使用者最多幾個未完成（可續傳）的上傳
-#[derive(Clone, Copy, Debug)]
-pub struct PendingUploadLimit(pub u32);
+/// 每個使用者最多幾個未完成（可續傳）的上傳：放棄的上傳不能無限累積佔用磁碟。
+/// 管理員在管理頁面修改，立即生效
+#[derive(Clone, Debug)]
+pub struct PendingUploadLimit(Arc<AtomicU32>);
 
-/// 未設定時的預設值，與 config 的預設相同
-const DEFAULT_PENDING_UPLOAD_LIMIT: u32 = 5;
+/// 管理頁面沒有設定時的值
+pub const DEFAULT_PENDING_UPLOAD_LIMIT: u32 = 5;
 
-/// Session Cookie 是否加上 `Secure`（只在 HTTPS 中送出）。
-/// 同樣用專屬型別：`State<bool>` 看不出是哪一個設定。
+impl Default for PendingUploadLimit {
+    fn default() -> Self {
+        PendingUploadLimit(Arc::new(AtomicU32::new(DEFAULT_PENDING_UPLOAD_LIMIT)))
+    }
+}
+
+impl PendingUploadLimit {
+    pub fn get(&self) -> u32 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 管理頁面設定的值；None 回到預設值
+    pub fn set(&self, custom: Option<u32>) {
+        self.0.store(
+            custom.unwrap_or(DEFAULT_PENDING_UPLOAD_LIMIT),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// ManorCloud 自己提供 HTTPS（設定檔有 MANORCLOUD_TLS_CERT 與 MANORCLOUD_TLS_KEY）：
+/// 所有連線都是加密的
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ServesTls(pub bool);
+
+/// Session Cookie 是否加上 `Secure`（只在 HTTPS 中送出），每個請求自己判斷，不需要設定：
+///
+/// 1. ManorCloud 自己提供 HTTPS
+/// 2. 瀏覽器送來的 `Origin` 是 `https://`。登入、登出、修改密碼都是 POST，瀏覽器一定會帶上它
+/// 3. 信任的反向代理說使用者連到它用的是 HTTPS（`X-Forwarded-Proto: https`）
+///
+/// 都不是時不加：http 連線中，瀏覽器會丟掉 Secure 的 Cookie，使用者就登不進去。
+/// `Origin` 可以被非瀏覽器的程式偽造，但那只影響它自己拿到的 Cookie，不會影響別人
 #[derive(Clone, Copy, Debug)]
 pub struct CookieSecure(pub bool);
+
+impl<S> FromRequestParts<S> for CookieSecure
+where
+    ServesTls: FromRef<S>,
+    TrustedProxies: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if ServesTls::from_ref(state).0 {
+            return Ok(CookieSecure(true));
+        }
+        if let Some(origin) = parts.headers.get(header::ORIGIN) {
+            return Ok(CookieSecure(origin.as_bytes().starts_with(b"https://")));
+        }
+        let peer = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .map(|ConnectInfo(addr)| addr.ip());
+        let from_proxy = peer.is_some_and(|ip| TrustedProxies::from_ref(state).trusts(ip));
+        // 經過好幾層代理時，第一個值是使用者連到最外層代理的方式
+        let https = parts
+            .headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"));
+        Ok(CookieSecure(from_proxy && https))
+    }
+}
 
 /// 對外連線用的 HTTP 用戶端（目前只有 SSO：向身分提供者讀取設定、交換 token）。
 ///
@@ -133,7 +199,7 @@ impl LoginLimits {
 ///
 /// axum 每次提取 `State` 都會 clone，所以每個欄位都必須便宜可 clone：
 /// `SqlitePool` 內部本來就是共享的，`data_dir` 用 `Arc<Path>` 避免每次複製路徑字串，
-/// 設定值是 Copy 的小型值，`LoginLimits`、`HttpClient` 與 `UploadProgress` 內部是 `Arc`。
+/// 管理頁面可以修改的設定（上傳上限、反向代理等）內部是 `Arc`，所有請求看到同一份。
 ///
 /// `FromRef` 讓 handler 可以只提取需要的欄位，例如 `State<SqlitePool>` 或
 /// `State<UploadLimit>`，不必拿整個 `AppState`。
@@ -143,7 +209,7 @@ pub struct AppState {
     pub data_dir: Arc<Path>,
     pub upload_limit: UploadLimit,
     pub pending_upload_limit: PendingUploadLimit,
-    pub cookie_secure: CookieSecure,
+    pub serves_tls: ServesTls,
     pub login_limits: LoginLimits,
     pub http: HttpClient,
     pub upload_progress: UploadProgress,
@@ -152,15 +218,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// 其他設定使用預設值，正式環境透過 `with_*` 設定。
+    /// 其他設定使用預設值；正式環境啟動時再從資料庫載入（server_settings::load_settings）。
     /// 簽名維持三個參數，既有的測試都不需要修改。
     pub fn new(pool: SqlitePool, data_dir: PathBuf, max_upload_bytes: u64) -> Self {
         AppState {
             pool,
             data_dir: Arc::from(data_dir),
             upload_limit: UploadLimit::new(max_upload_bytes),
-            pending_upload_limit: PendingUploadLimit(DEFAULT_PENDING_UPLOAD_LIMIT),
-            cookie_secure: CookieSecure(false),
+            pending_upload_limit: PendingUploadLimit::default(),
+            serves_tls: ServesTls(false),
             login_limits: LoginLimits::default(),
             http: HttpClient::new(),
             upload_progress: UploadProgress::default(),
@@ -169,18 +235,13 @@ impl AppState {
         }
     }
 
-    pub fn with_secure_cookies(mut self, secure: bool) -> Self {
-        self.cookie_secure = CookieSecure(secure);
+    pub fn with_tls(mut self, serves_tls: bool) -> Self {
+        self.serves_tls = ServesTls(serves_tls);
         self
     }
 
-    pub fn with_trusted_proxies(mut self, proxies: TrustedProxies) -> Self {
-        self.trusted_proxies = proxies;
-        self
-    }
-
-    pub fn with_max_pending_uploads(mut self, limit: u32) -> Self {
-        self.pending_upload_limit = PendingUploadLimit(limit);
+    pub fn with_max_pending_uploads(self, limit: u32) -> Self {
+        self.pending_upload_limit.set(Some(limit));
         self
     }
 }

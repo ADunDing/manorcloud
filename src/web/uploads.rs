@@ -329,7 +329,7 @@ async fn create(
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     State(limit): State<UploadLimit>,
-    State(PendingUploadLimit(max_pending)): State<PendingUploadLimit>,
+    State(max_pending): State<PendingUploadLimit>,
     Json(req): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<UploadResponse>), UploadError> {
     // 1. 資料夾、檔名與大小
@@ -376,7 +376,7 @@ async fn create(
         size: req.size,
         file_modified: req.file_modified,
     };
-    match uploads_db::create_upload(&pool, &new, max_pending).await {
+    match uploads_db::create_upload(&pool, &new, max_pending.get()).await {
         Ok(upload) => Ok((StatusCode::CREATED, Json(upload.into()))),
         Err(e) => {
             // 沒有寫入紀錄：剛建立的暫存檔沒有用處，盡力刪除（失敗的話垃圾回收會處理）

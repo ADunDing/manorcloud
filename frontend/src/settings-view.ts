@@ -6,7 +6,7 @@
 import { copyText } from "./clipboard.js";
 import { languageSetting, setLanguage, t, tNodes, type LanguageSetting } from "./i18n.js";
 import { renderAdmin } from "./admin-view.js";
-import { renderStorage } from "./storage-view.js";
+import { renderStorage, type ServerSettings } from "./storage-view.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { renderChangeCredentials } from "./auth-view.js";
 import { confirmDialog } from "./dialogs.js";
@@ -481,7 +481,9 @@ function renderAppearance(panel: HTMLElement): void {
 const ADMIN: readonly { section: AdminSection; label: string; icon: IconName }[] = [
   { section: "users", label: t("Users"), icon: "users" },
   { section: "storage", label: t("Storage"), icon: "disk" },
-  { section: "sign-in", label: t("Sign-in"), icon: "lock" },
+  { section: "two-factor", label: t("Two-factor authentication"), icon: "shield" },
+  { section: "sso", label: t("Single sign-on"), icon: "key" },
+  { section: "proxy", label: t("Reverse proxy"), icon: "link" },
 ];
 
 /**
@@ -511,18 +513,22 @@ export function renderAdministration(
     case "storage":
       renderStorage(panel);
       break;
-    case "sign-in":
+    case "two-factor":
+      renderRequirement(panel);
+      break;
+    case "sso":
       renderSsoSettings(panel);
+      break;
+    case "proxy":
+      renderTrustedProxies(panel);
       break;
   }
 }
 
-/** Administration → Sign-in：是否強制 2FA，以及 SSO（OpenID Connect）的設定 */
+/** Administration → Single sign-on：SSO（OpenID Connect）的設定 */
 function renderSsoSettings(page: HTMLElement): void {
-  const requirement = h("section", { class: "settings-group" });
   const panel = h("div", {});
-  page.replaceChildren(h("h2", { class: "section-title" }, t("Sign-in")), requirement, panel);
-  renderRequirement(requirement);
+  page.replaceChildren(h("h2", { class: "section-title" }, t("Single sign-on")), panel);
   panel.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let current: AdminSso;
@@ -619,7 +625,6 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const form = h(
     "form",
     { method: "post", class: "auth-form embedded settings-form" },
-    h("h3", { class: "group-title" }, t("Single sign-on")),
     h(
       "p",
       { class: "hint" },
@@ -700,7 +705,7 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
 
 /** 是否強制每個用密碼登入的人開啟 2FA */
 function renderRequirement(section: HTMLElement): void {
-  const title = h("h3", { class: "group-title" }, t("Two-factor authentication"));
+  const title = h("h2", { class: "section-title" }, t("Two-factor authentication"));
   section.replaceChildren(title, h("p", { class: "muted" }, t("Loading…")));
   void (async () => {
     let current: { require_two_factor: boolean };
@@ -745,6 +750,76 @@ function renderRequirement(section: HTMLElement): void {
           if (!isHandledGlobally(error)) {
             errorBox.textContent = messageOf(error);
           }
+          save.disabled = false;
+        }
+      })();
+    });
+    section.replaceChildren(title, form);
+  })();
+}
+
+/**
+ * 反向代理的位址：登入次數限制才能算在每個訪客頭上，而不是全部算在代理頭上。
+ * 顯示這個請求的連線來自哪裡：放在代理後面時就是代理的位址，照著填就對了
+ */
+function renderTrustedProxies(section: HTMLElement): void {
+  const title = h("h2", { class: "section-title" }, t("Reverse proxy"));
+  section.replaceChildren(title, h("p", { class: "muted" }, t("Loading…")));
+  void (async () => {
+    let current: ServerSettings;
+    try {
+      current = await api.get<ServerSettings>("/api/admin/settings");
+    } catch (error) {
+      if (!isHandledGlobally(error)) {
+        section.replaceChildren(title, h("p", { class: "error", role: "alert" }, messageOf(error)));
+      }
+      return;
+    }
+    const input = h("input", {
+      type: "text",
+      value: current.trusted_proxies,
+      placeholder: "192.168.1.2",
+      maxlength: 1000,
+      spellcheck: "false",
+      "aria-label": t("Reverse proxy addresses"),
+    });
+    const errorBox = h("p", { class: "error", role: "alert" });
+    const save = h("button", { type: "submit", class: "primary" }, t("Save"));
+    const form = h(
+      "form",
+      { method: "post", class: "auth-form embedded settings-form" },
+      h(
+        "p",
+        { class: "hint" },
+        t("If people reach ManorCloud through a reverse proxy such as nginx or Caddy, enter its address. Failed logins are then counted for each visitor, instead of locking everyone out together. Separate several addresses or ranges with commas."),
+      ),
+      h("div", { class: "field-row" }, input, save),
+      h(
+        "p",
+        { class: "hint" },
+        tNodes("This page reached ManorCloud from {address}. If that's your reverse proxy, enter it here.", {
+          address: h("strong", {}, current.connection_from),
+        }),
+      ),
+      errorBox,
+    );
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      save.disabled = true;
+      errorBox.textContent = "";
+      void (async () => {
+        try {
+          const saved = await api.put<{ trusted_proxies: string }>(
+            "/api/admin/settings/trusted-proxies",
+            { trusted_proxies: input.value },
+          );
+          input.value = saved.trusted_proxies;
+          showToast(t("Saved"));
+        } catch (error) {
+          if (!isHandledGlobally(error)) {
+            errorBox.textContent = messageOf(error);
+          }
+        } finally {
           save.disabled = false;
         }
       })();

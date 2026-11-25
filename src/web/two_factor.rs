@@ -149,7 +149,7 @@ struct RecoveryCodesResponse {
 async fn enable(
     me: SessionUser,
     State(pool): State<SqlitePool>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     jar: CookieJar,
     Json(req): Json<CodeRequest>,
 ) -> Result<(CookieJar, Json<RecoveryCodesResponse>), AppError> {

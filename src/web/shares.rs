@@ -365,6 +365,7 @@ struct UnlockRequest {
 async fn unlock(
     State(state): State<AppState>,
     ClientIp(client): ClientIp,
+    CookieSecure(secure): CookieSecure,
     UrlPath(token): UrlPath<String>,
     jar: CookieJar,
     Json(req): Json<UnlockRequest>,
@@ -373,7 +374,6 @@ async fn unlock(
         pool,
         data_dir,
         login_limits: limits,
-        cookie_secure: CookieSecure(secure),
         ..
     } = state;
     let (share, _, _) = open(&pool, &data_dir, &token).await?;

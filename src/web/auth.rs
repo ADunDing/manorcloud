@@ -279,7 +279,7 @@ pub(super) async fn start_session(
     let cookie = Cookie::build((SESSION_COOKIE, token))
         .http_only(true)
         .same_site(SameSite::Lax)
-        // 只在設定為 HTTPS 時開啟：http 連線中，瀏覽器會丟掉 Secure 的 Cookie
+        // 只在 HTTPS 連線中開啟（見 CookieSecure）：http 連線中，瀏覽器會丟掉 Secure 的 Cookie
         .secure(secure)
         .path(COOKIE_PATH)
         .max_age(time::Duration::days(SESSION_DAYS));
@@ -312,7 +312,7 @@ struct LoginRequest {
 /// 同一個 IP 或同一個帳號失敗太多次時暫時鎖定，回傳 429 與 Retry-After（見 auth::limiter）。
 async fn login(
     State(pool): State<SqlitePool>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     State(limits): State<LoginLimits>,
     ClientIp(client): ClientIp,
     jar: CookieJar,
@@ -418,7 +418,7 @@ struct TwoFactorRequest {
 /// - 429：與密碼相同的登入次數限制
 async fn login_two_factor(
     State(pool): State<SqlitePool>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     State(limits): State<LoginLimits>,
     ClientIp(client): ClientIp,
     jar: CookieJar,
@@ -527,7 +527,7 @@ pub(super) async fn verify_second_factor(
 /// 不使用 extractor：必須修改密碼的使用者也要能登出。
 async fn logout(
     State(pool): State<SqlitePool>,
-    State(CookieSecure(secure)): State<CookieSecure>,
+    CookieSecure(secure): CookieSecure,
     jar: CookieJar,
 ) -> Result<(StatusCode, CookieJar), AppError> {
     // 1. 有帶 Cookie 才需要刪資料庫；刪不到東西也不算錯誤
@@ -584,7 +584,7 @@ async fn update_credentials(
     me: SessionUser,
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     jar: CookieJar,
     Json(req): Json<CredentialsRequest>,
 ) -> Result<(CookieJar, Json<UserResponse>), AppError> {
@@ -1183,5 +1183,45 @@ mod tests {
             let (status, _, _) = login(&t, "dave", DAVE_PASSWORD).await;
             assert_eq!(status, StatusCode::FORBIDDEN);
         }
+    }
+
+    // ==================== Secure Cookie ====================
+
+    /// 帶著這些標頭登入，回傳 session 的 Set-Cookie 有沒有 Secure
+    async fn secure_after_login(t: &TestApp, headers: &[(&str, &str)]) -> bool {
+        let mut builder = request(Method::POST, "/api/login", None)
+            .header(header::CONTENT_TYPE, "application/json");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let body = format!(r#"{{"username":"dave","password":"{DAVE_PASSWORD}"}}"#);
+        let (status, headers, _) = t.send(builder.body(Body::from(body)).unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|v| v.starts_with(SESSION_COOKIE))
+            .unwrap()
+            .split(';')
+            .any(|part| part.trim().eq_ignore_ascii_case("secure"))
+    }
+
+    #[sqlx::test]
+    async fn the_session_cookie_is_secure_only_over_https(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        create_dave(&t).await;
+        let proto = ("x-forwarded-proto", "https");
+
+        // 瀏覽器告訴我們它開的是 https:// 還是 http:// 的網頁
+        assert!(secure_after_login(&t, &[("origin", "https://localhost:3000")]).await);
+        assert!(!secure_after_login(&t, &[("origin", "http://localhost:3000")]).await);
+        // 沒有 Origin 時，只相信信任的反向代理說的 X-Forwarded-Proto
+        assert!(!secure_after_login(&t, &[proto]).await);
+        t.state
+            .trusted_proxies
+            .set(vec![crate::config::IpRange::parse("192.168.1.10").unwrap()]);
+        assert!(secure_after_login(&t, &[proto]).await);
+        assert!(!secure_after_login(&t, &[]).await);
     }
 }

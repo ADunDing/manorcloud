@@ -354,6 +354,9 @@ RestartSec=5
 
 NoNewPrivileges=yes
 ProtectSystem=strict
+# Writable besides /var/lib/manorcloud: where disks and NAS shares are usually mounted, so a
+# storage location there only has to be owned by manorcloud. "-": ignored if it doesn't exist
+ReadWritePaths=-/mnt -/media -/srv
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -409,25 +412,7 @@ MANORCLOUD_DATABASE_URL=sqlite:///var/lib/manorcloud/manorcloud.db
 #   ReadWritePaths=/your/new/path
 MANORCLOUD_DATA_DIR=/var/lib/manorcloud/data
 
-# Maximum size of a single upload, in bytes (default: 10 GiB). Uncomment to change.
-# A limit set in Administration > Storage takes priority over this value.
-#MANORCLOUD_MAX_UPLOAD_BYTES=10737418240
-
-# Unfinished uploads each user may have at once (default: 5). Uncomment to change.
-# An upload that makes no progress for 24 hours is deleted automatically. Together with
-# the upload limit, this bounds the disk space that abandoned uploads can take.
-#MANORCLOUD_MAX_PENDING_UPLOADS=5
-
-# Send the session cookie over HTTPS only.
-# Set to true ONLY after HTTPS is configured: with plain http:// it prevents logging in.
-# Not needed when the TLS settings below are used: it is then always on.
-MANORCLOUD_SECURE_COOKIES=false
-
-# Behind a reverse proxy (nginx, Caddy, ...): its address, so that ManorCloud uses the
-# visitor's address from X-Forwarded-For instead of the proxy's. Without it, everyone appears
-# to come from the proxy and failed logins by one person lock out all of them.
-# Addresses or ranges separated by commas. Only list proxies you control.
-#MANORCLOUD_TRUSTED_PROXIES=127.0.0.1
+# Everything else (upload limit, reverse proxy, WebDAV, ...) is set in Administration.
 
 # Serve HTTPS directly with your own certificate (PEM files; the certificate file may
 # include the chain). Set both, or neither for plain HTTP. The files must be readable by

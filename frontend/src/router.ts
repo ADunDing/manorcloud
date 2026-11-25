@@ -5,12 +5,12 @@
 //   #/disk/{disk}/files/…    管理員：一顆硬碟的最上層（disk 是儲存位置的編號，資料目錄是 default）
 //   #/disk/{disk}/trash      那一顆硬碟上的垃圾桶
 //   #/settings/{section}     個人設定：account、sign-in、webdav、appearance
-//   #/admin/{section}        管理（只有管理員）：users、storage、sign-in
+//   #/admin/{section}        管理（只有管理員）：users、storage、two-factor、sso、proxy
 //
 // 不認得的網址一律回到 My files；不認得的區塊回到該頁的第一個區塊。
 
 export type SettingsSection = "account" | "sign-in" | "webdav" | "appearance";
-export type AdminSection = "users" | "storage" | "sign-in";
+export type AdminSection = "users" | "storage" | "two-factor" | "sso" | "proxy";
 
 /** 一組檔案在哪裡：自己的 My files，或管理員看到的一顆硬碟 */
 export type Location =
@@ -27,7 +27,7 @@ type Route =
   | { readonly view: "admin"; readonly section: AdminSection };
 
 const SETTINGS_SECTIONS: readonly SettingsSection[] = ["account", "sign-in", "webdav", "appearance"];
-const ADMIN_SECTIONS: readonly AdminSection[] = ["users", "storage", "sign-in"];
+const ADMIN_SECTIONS: readonly AdminSection[] = ["users", "storage", "two-factor", "sso", "proxy"];
 
 export const TRASH_HREF = "#/trash";
 export const SHARED_HREF = "#/shared";

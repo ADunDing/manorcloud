@@ -84,23 +84,96 @@ export function renderStorage(container: HTMLElement): void {
     errorBox,
     listSlot,
     uploadLimitSection(),
+    pendingUploadsSection(),
     webDavSection(),
   );
   void reload();
 }
 
 /** GET /api/admin/settings */
-interface ServerSettings {
+export interface ServerSettings {
   readonly max_upload_bytes: number;
   readonly default_max_upload_bytes: number;
   readonly custom_max_upload: boolean;
+  readonly max_pending_uploads: number;
+  readonly default_max_pending_uploads: number;
+  readonly trusted_proxies: string;
+  readonly connection_from: string;
   readonly webdav_enabled: boolean;
 }
 
 /** 以 GB 輸入：1024³ 位元組，與畫面上顯示的大小一致 */
 const GB = 1024 ** 3;
 
-/** 單一檔案的上傳上限：以 GB 輸入，或使用設定檔的值 */
+/** 每人未完成的上傳數最多可以設定成多少，與伺服器相同 */
+const MAX_PENDING_UPLOADS = 100;
+
+/** 每個人最多幾個未完成的上傳 */
+function pendingUploadsSection(): HTMLElement {
+  const input = h("input", {
+    type: "number",
+    class: "dialog-input limit-input",
+    min: "1",
+    max: String(MAX_PENDING_UPLOADS),
+    step: "1",
+    "aria-label": t("Unfinished uploads per person"),
+    disabled: true,
+  });
+  const save = h("button", { type: "submit", class: "primary", disabled: true }, t("Save"));
+  const error = h("p", { class: "error", role: "alert" });
+
+  const load = async (): Promise<void> => {
+    try {
+      const settings = await api.get<ServerSettings>("/api/admin/settings");
+      input.value = String(settings.max_pending_uploads);
+      input.disabled = false;
+      save.disabled = false;
+    } catch (e) {
+      if (!isHandledGlobally(e)) {
+        error.textContent = messageOf(e);
+      }
+    }
+  };
+
+  const form = h(
+    "form",
+    { class: "settings-group upload-limit" },
+    h("h3", { class: "group-title" }, t("Unfinished uploads")),
+    h(
+      "p",
+      { class: "hint" },
+      t("How many interrupted uploads each person can keep, to continue later. Uploads with no progress for 24 hours are deleted automatically."),
+    ),
+    h("div", { class: "limit-row" }, input, save),
+    error,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const count = Number(input.value);
+    if (!Number.isInteger(count) || count < 1 || count > MAX_PENDING_UPLOADS) {
+      error.textContent = t("Enter a number from 1 to {max}", { max: MAX_PENDING_UPLOADS });
+      return;
+    }
+    error.textContent = "";
+    save.disabled = true;
+    void (async () => {
+      try {
+        await api.put("/api/admin/settings/pending-uploads", { max_pending_uploads: count });
+        showToast(t("Saved"));
+      } catch (e) {
+        if (!isHandledGlobally(e)) {
+          error.textContent = messageOf(e);
+        }
+      } finally {
+        save.disabled = false;
+      }
+    })();
+  });
+  void load();
+  return form;
+}
+
+/** 單一檔案的上傳上限：以 GB 輸入，或使用預設值 */
 function uploadLimitSection(): HTMLElement {
   const input = h("input", {
     type: "number",
@@ -121,8 +194,8 @@ function uploadLimitSection(): HTMLElement {
     save.disabled = false;
     reset.hidden = !settings.custom_max_upload;
     hint.textContent = settings.custom_max_upload
-      ? t("The default from the configuration file is {size}.", { size: formatSize(settings.default_max_upload_bytes) })
-      : t("This is the default from the configuration file (MANORCLOUD_MAX_UPLOAD_BYTES).");
+      ? t("The default is {size}.", { size: formatSize(settings.default_max_upload_bytes) })
+      : t("This is the default.");
   };
   const load = async (): Promise<void> => {
     try {

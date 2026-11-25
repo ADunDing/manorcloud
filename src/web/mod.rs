@@ -28,7 +28,7 @@ mod webdav_xml;
 #[cfg(test)]
 mod test_support;
 
-pub use extract::TrustedProxies;
+pub use server_settings::load_settings;
 pub use state::AppState;
 
 use axum::{Router, middleware};

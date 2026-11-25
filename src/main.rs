@@ -209,20 +209,6 @@ async fn serve() {
     std::fs::create_dir_all(&config.data_dir).expect("failed to create the data directory");
     println!("version: {}", env!("CARGO_PKG_VERSION"));
     println!("data directory: {}", config.data_dir.display());
-    println!("upload limit: {} bytes", config.max_upload_bytes);
-    println!("secure cookies: {}", config.secure_cookies);
-    if !config.trusted_proxies.is_empty() {
-        let proxies: Vec<String> = config
-            .trusted_proxies
-            .iter()
-            .map(|r| r.to_string())
-            .collect();
-        println!("trusted proxies: {}", proxies.join(", "));
-    }
-    println!(
-        "unfinished uploads per user: {}",
-        config.max_pending_uploads
-    );
 
     let pool = db::init_pool(&config.database_url).await;
 
@@ -263,29 +249,10 @@ async fn serve() {
     // 看門狗：定期確認資料庫連線正常後回報 systemd，卡死時由 systemd 重啟
     systemd::spawn_watchdog(pool.clone());
 
-    let state = web::AppState::new(pool, config.data_dir, config.max_upload_bytes)
-        .with_secure_cookies(config.secure_cookies)
-        .with_max_pending_uploads(config.max_pending_uploads)
-        .with_trusted_proxies(web::TrustedProxies::new(config.trusted_proxies.clone()));
-    // 管理頁面設定的上傳上限：取代設定檔的值
-    match db::settings::max_upload_bytes(&state.pool).await {
-        Ok(Some(bytes)) => {
-            state.upload_limit.set(Some(bytes));
-            println!("upload limit set in Administration: {bytes} bytes");
-        }
-        Ok(None) => {}
-        Err(e) => eprintln!("cannot read the upload limit set in Administration: {e}"),
-    }
-    // 管理頁面設定的 WebDAV 開關
-    match db::settings::webdav_enabled(&state.pool).await {
-        Ok(enabled) => {
-            state.webdav.set(enabled);
-            if enabled {
-                println!("WebDAV: on, at /dav/");
-            }
-        }
-        Err(e) => eprintln!("cannot read whether WebDAV is on: {e}"),
-    }
+    let state = web::AppState::new(pool, config.data_dir, storage::DEFAULT_MAX_UPLOAD_BYTES)
+        .with_tls(tls.is_some());
+    // 管理頁面的設定（上傳上限、反向代理、WebDAV 等）；設定檔中還留著的舊設定搬進資料庫
+    web::load_settings(&state, &config.legacy).await;
     // 登入次數限制：背景定期清除過期的記錄
     state.login_limits.spawn_pruning();
     web::run(state, config.bind_addr, tls).await;

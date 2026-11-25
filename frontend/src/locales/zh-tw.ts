@@ -530,8 +530,18 @@ const UI: Readonly<Record<string, string>> = {
   "The largest single file anyone can upload.": "單一檔案最大可以上傳多少。",
   "Upload limit in GB": "上傳上限（GB）",
   "Use the default": "使用預設值",
-  "The default from the configuration file is {size}.": "設定檔的預設值是 {size}。",
-  "This is the default from the configuration file (MANORCLOUD_MAX_UPLOAD_BYTES).": "目前使用設定檔的預設值（MANORCLOUD_MAX_UPLOAD_BYTES）。",
+  "The default is {size}.": "預設值是 {size}。",
+  "This is the default.": "目前使用預設值。",
+  "Unfinished uploads per person": "每人未完成的上傳數",
+  "How many interrupted uploads each person can keep, to continue later. Uploads with no progress for 24 hours are deleted automatically.":
+    "每個人最多可以保留幾個中斷的上傳，之後再接著傳。24 小時沒有進度的上傳會自動刪除。",
+  "Enter a number from 1 to {max}": "請輸入 1 到 {max} 之間的數字",
+  "Reverse proxy": "反向代理",
+  "Reverse proxy addresses": "反向代理的位址",
+  "If people reach ManorCloud through a reverse proxy such as nginx or Caddy, enter its address. Failed logins are then counted for each visitor, instead of locking everyone out together. Separate several addresses or ranges with commas.":
+    "如果大家是透過 nginx、Caddy 這類反向代理連到 ManorCloud，請填入它的位址。這樣登入失敗的次數會分別計算每個訪客，而不會把所有人一起鎖在外面。有好幾個位址或網段時，以逗號分隔。",
+  "This page reached ManorCloud from {address}. If that's your reverse proxy, enter it here.":
+    "這個頁面是從 {address} 連到 ManorCloud 的。如果那是你的反向代理，就填入這個位址。",
   "Upload limit saved. It applies to uploads started from now on.": "已儲存上傳上限，之後開始的上傳都會套用。",
   "Enter a size in GB": "請輸入 GB 數",
   "{name} usage": "{name} 的使用量",
@@ -587,6 +597,7 @@ const UI: Readonly<Record<string, string>> = {
 
 /** 伺服器的錯誤訊息（src/ 中的 Rust 程式） */
 const SERVER: Readonly<Record<string, string>> = {
+  "Enter a number from 1 to 100": "請輸入 1 到 100 之間的數字",
   "WebDAV is turned off. Ask your administrator to turn it on": "WebDAV 尚未開啟，請管理員開啟",
   "Enter a name of up to 100 characters": "請輸入 100 個字元以內的名稱",
   "You can have up to 50 app passwords. Revoke one you no longer use first":

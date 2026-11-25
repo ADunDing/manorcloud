@@ -110,7 +110,7 @@ struct StartResponse {
 async fn start_login(
     State(pool): State<SqlitePool>,
     State(HttpClient(http)): State<HttpClient>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     jar: CookieJar,
 ) -> Result<(CookieJar, Json<StartResponse>), AppError> {
     begin_flow(&pool, &http, cookie_secure, jar, None).await
@@ -121,7 +121,7 @@ async fn start_link(
     user: CurrentUser,
     State(pool): State<SqlitePool>,
     State(HttpClient(http)): State<HttpClient>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     jar: CookieJar,
 ) -> Result<(CookieJar, Json<StartResponse>), AppError> {
     if sso::sign_in_methods(&pool, user.id).await?.sso_linked {
@@ -239,10 +239,18 @@ enum Done {
 async fn callback(
     State(pool): State<SqlitePool>,
     State(HttpClient(http)): State<HttpClient>,
-    State(cookie_secure): State<CookieSecure>,
+    cookie_secure: CookieSecure,
     jar: CookieJar,
     Query(query): Query<CallbackQuery>,
 ) -> (CookieJar, Redirect) {
+    // 身分提供者跳轉回來是跨網站的 GET，瀏覽器不會帶 Origin：
+    // 另外看設定的 ManorCloud 網址，那就是使用者正在用的網址（回呼網址由它組成）
+    let public_https = matches!(
+        sso::load_settings(&pool).await,
+        Ok(Some(settings)) if settings.public_url.starts_with("https://")
+    );
+    let cookie_secure = CookieSecure(cookie_secure.0 || public_https);
+
     // 流程的 Cookie 不論結果如何都清除：每個流程只能用一次
     let flow_state = jar
         .get(FLOW_COOKIE)
