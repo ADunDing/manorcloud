@@ -73,3 +73,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+
+  # 已經發布的容器映像檔：基底（distroless）的套件之後被發現漏洞、而且已經有修正版時失敗，
+  # 提醒發布新版本。還沒有修正版的只列出、不擋：發布新版本也修不了。
+  # 只在排程與手動執行時跑：映像檔跟這次 push 的程式無關
+  image-scan:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Scan the published image
+        run: |
+          docker run --rm aquasec/trivy:0.76.2 image --exit-code 1 --ignore-unfixed \
+            --severity HIGH,CRITICAL ghcr.io/adunding/manorcloud:latest

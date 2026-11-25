@@ -10,7 +10,9 @@
 #
 # 基底是 distroless：只有 glibc、libgcc 與 CA 憑證（SSO 連線需要），沒有 shell 與套件管理程式。
 # nonroot 版本以 UID 65532 執行：ManorCloud 本來就拒絕以 root 執行。
-FROM gcr.io/distroless/cc-debian13:nonroot
+#
+# 基底固定到摘要（@sha256:...）：每次建置用的都是同一份，Dependabot 也才看得出它有更新、開 PR
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de
 
 LABEL org.opencontainers.image.source="https://github.com/ADunDing/manorcloud" \
       org.opencontainers.image.description="Lightweight self-hosted cloud storage" \

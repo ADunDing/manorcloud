@@ -187,6 +187,14 @@ jobs:
           fi
           docker rm -f test
 
+      # 推送之前先掃描：基底的套件有已經修正的高風險漏洞就停下來，
+      # 先合併 Dependabot 更新基底的 PR 再發布。還沒有修正版的只列出、不擋
+      - name: Scan the image
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.76.2 image --exit-code 1 --ignore-unfixed \
+            --severity HIGH,CRITICAL manorcloud:test
+
       # 正式版同時標上 latest；有連字號的測試版（v0.4.0-rc.1）只有版本號
       - name: Publish the image
         id: push
