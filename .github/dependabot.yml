@@ -36,9 +36,3 @@ updates:
       npm:
         patterns: ["*"]
         update-types: [minor, patch]
-
-  # 容器映像檔的基底（Dockerfile 的 FROM）：glibc、CA 憑證的安全更新
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: monthly
