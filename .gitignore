@@ -8,5 +8,6 @@ cookies.txt
 /fresh*.db*
 /fresh-data/
 /dist/
+/docker/
 /frontend/public/icons/
 /frontend/public/vendor/

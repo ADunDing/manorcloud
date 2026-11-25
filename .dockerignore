@@ -1,0 +1,3 @@
+# 建置只需要 release.yml 準備好的 docker/，其他檔案都不送進建置環境
+*
+!docker/

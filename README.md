@@ -13,7 +13,7 @@ browser. A single program with no dependencies that runs comfortably on a Raspbe
 ## Requirements
 
 64-bit Linux (x86_64 or ARM64) with systemd and glibc 2.34 or later: Ubuntu 22.04, Debian 12,
-Raspberry Pi OS (64-bit) bookworm or newer.
+Raspberry Pi OS (64-bit) bookworm or newer. Or anything that runs Docker.
 
 ## Install
 
@@ -43,18 +43,31 @@ gh attestation verify manorcloud-linux-aarch64.tar.gz --repo ADunDing/manorcloud
 
 </details>
 
+### Docker
+
+```sh
+docker run -d --name manorcloud --restart unless-stopped --stop-timeout 35 \
+  -p 3000:3000 -v manorcloud:/var/lib/manorcloud ghcr.io/adunding/manorcloud
+docker logs manorcloud
+```
+
+The log shows the first administrator's password. Settings below go in as `-e NAME=value`. To
+upgrade, `docker pull ghcr.io/adunding/manorcloud` and recreate the container; your files stay
+in the `manorcloud` volume. For more disks, mount them into the container
+(`-v /mnt/disk2:/mnt/disk2`) and give them to its user with `sudo chown 65532:65532 /mnt/disk2`.
+
 ## Configuration
 
 Almost everything is set in **Administration** in the browser. Only these are in
 `/etc/manorcloud/manorcloud.env` (then `sudo systemctl restart manorcloud`):
 
-| Setting                   | Default                                      | Meaning                                  |
-|---------------------------|----------------------------------------------|------------------------------------------|
-| `MANORCLOUD_BIND`         | `127.0.0.1:3000`                             | Use `0.0.0.0:3000` for other devices     |
-| `MANORCLOUD_DATA_DIR`     | `/var/lib/manorcloud/data`                   | Where files are stored                   |
-| `MANORCLOUD_DATABASE_URL` | `sqlite:///var/lib/manorcloud/manorcloud.db` | Must be on a local disk                  |
-| `MANORCLOUD_TLS_CERT`     | (none)                                       | PEM certificate, to serve HTTPS directly |
-| `MANORCLOUD_TLS_KEY`      | (none)                                       | Its private key                          |
+| Setting                   | Default                                      | Meaning                                    |
+|---------------------------|----------------------------------------------|--------------------------------------------|
+| `MANORCLOUD_BIND`         | `127.0.0.1:3000`                             | Use `0.0.0.0:3000` for other devices       |
+| `MANORCLOUD_DATA_DIR`     | `/var/lib/manorcloud/data`                   | Where files are stored                     |
+| `MANORCLOUD_DATABASE_URL` | `sqlite:///var/lib/manorcloud/manorcloud.db` | Must be on a local disk                    |
+| `MANORCLOUD_TLS_CERT`     | (none)                                       | PEM certificate, to serve HTTPS directly   |
+| `MANORCLOUD_TLS_KEY`      | (none)                                       | Its private key                            |
 
 ### More disks
 
@@ -86,12 +99,12 @@ connect to `https://your-server/dav/` with your username and that password.
 
 ## Everyday tasks
 
-| Task                  | Command                                                       |
-|-----------------------|---------------------------------------------------------------|
-| Upgrade               | Run the install command again; nothing is lost                |
-| Status / logs         | `systemctl status manorcloud` / `journalctl -u manorcloud -f` |
-| Uninstall, keep files | `sudo manorcloud uninstall`                                   |
-| Uninstall, delete all | `sudo manorcloud uninstall --purge`                           |
+| Task                    | Command                                             |
+|-------------------------|-----------------------------------------------------|
+| Upgrade                 | Run the install command again; nothing is lost      |
+| Status / logs           | `systemctl status manorcloud` / `journalctl -u manorcloud -f` |
+| Uninstall, keep files   | `sudo manorcloud uninstall`                         |
+| Uninstall, delete all   | `sudo manorcloud uninstall --purge`                 |
 
 ## License
 
