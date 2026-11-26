@@ -24,7 +24,8 @@ jobs:
           # 不把存取權杖留在工作目錄中：之後的步驟不需要推送任何東西
           persist-credentials: false
 
-      # 前端必須先建置：rust-embed 在編譯時把它嵌入執行檔，build.rs 也會檢查
+      # 前端必須先建置：rust-embed 在編譯時把它嵌入執行檔，build.rs 也會檢查。
+      # npm test 會先執行 npm run build，不必另外建置
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -33,7 +34,6 @@ jobs:
       - name: Frontend
         run: |
           npm --prefix frontend ci
-          npm --prefix frontend run build
           npm --prefix frontend test
 
       # rustup 已內建在 GitHub 的執行環境：直接用它，不必多信任一個第三方 action
@@ -44,7 +44,7 @@ jobs:
       # shell 腳本的常見錯誤：沒加引號的變數、不可攜的語法等。
       # GitHub 的 Ubuntu 執行環境已內建 shellcheck
       - name: Shell scripts
-        run: shellcheck install.sh package.sh
+        run: shellcheck install.sh package.sh build.sh
       - name: Format
         run: cargo fmt --check
       # --locked：只用 Cargo.lock 中的版本。Cargo.lock 與 Cargo.toml 不一致時直接失敗，
