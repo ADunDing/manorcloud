@@ -47,6 +47,12 @@ jobs:
         run: shellcheck install.sh package.sh build.sh
       - name: Format
         run: cargo fmt --check
+      # Cargo.toml 中沒用到的依賴：只會拖慢編譯、擴大供應鏈的範圍。
+      # 會一起檢查 fuzz/；誤判的依賴在該 Cargo.toml 的 [package.metadata.cargo-machete] 中忽略
+      - name: Unused dependencies
+        run: |
+          cargo install cargo-machete --version 0.10.1 --locked
+          cargo machete
       # --locked：只用 Cargo.lock 中的版本。Cargo.lock 與 Cargo.toml 不一致時直接失敗，
       # 而不是在 CI 裡自動挑新版本：測過的就是發布的
       - name: Clippy

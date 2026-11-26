@@ -16,6 +16,11 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+# cargo machete 只掃描這個資料夾的原始碼，看不到用 #[path] 引入的 src/ 檔案，
+# 會誤判 unicode-normalization 沒用到
+[package.metadata.cargo-machete]
+ignored = ["unicode-normalization"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 # src/files/name.rs 需要：與主程式的版本相同
