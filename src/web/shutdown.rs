@@ -2,7 +2,7 @@
 //!
 //! 不能無限等待：一個正在上傳 10 GB 的連線會讓重新開機卡住很久。
 //! 超過時限仍未完成的請求，在執行環境關閉時被取消；
-//! 被取消的上傳，其 TempBlob 隨之 Drop，暫存檔立刻刪除。
+//! 被取消的上傳，其 tree::Upload 隨之 Drop，暫存檔立刻刪除。
 
 use std::future::{Future, IntoFuture};
 use std::io;

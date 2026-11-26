@@ -155,7 +155,7 @@ fn main() -> ExitCode {
             let runtime = runtime();
             runtime.block_on(serve());
             // 超過時限被中斷的請求，它們的工作在這裡被取消：
-            // 上傳中的 TempBlob 隨之 Drop，暫存檔立刻刪除，不必等 24 小時後的垃圾回收。
+            // 上傳中的 tree::Upload 隨之 Drop，暫存檔立刻刪除，不必等 24 小時後的垃圾回收。
             // 最多等 5 秒，不讓背景的阻塞工作（例如 fsync）拖住關機
             runtime.shutdown_timeout(Duration::from_secs(5));
             ExitCode::SUCCESS

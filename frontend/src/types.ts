@@ -62,7 +62,6 @@ export interface ServerConfig {
   readonly max_upload_bytes: number;
 }
 
-/** GET /api/storage 的回應：檔案所在硬碟的容量（位元組）。對應 Rust 端 web/files.rs 的 StorageResponse */
 /** 垃圾桶中的一個項目（GET /api/trash） */
 export interface TrashItem {
   readonly id: number;
@@ -76,6 +75,7 @@ export interface TrashItem {
   readonly location: readonly string[];
 }
 
+/** GET /api/storage 的回應：檔案所在硬碟的容量（位元組）。對應 Rust 端 web/spaces.rs 的 StorageResponse */
 export interface StorageInfo {
   readonly total_bytes: number;
   readonly available_bytes: number;

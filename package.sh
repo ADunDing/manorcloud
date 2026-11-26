@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build an installation package: the frontend, the cross-compiled binary, the installer and
-# the last-resort export script, in one archive.
+# Build an installation package: the cross-compiled binary (with the frontend embedded in it)
+# and the installer, in one archive.
 #
 # Usage:
 #   ./package.sh aarch64-unknown-linux-gnu     ARM64 (Raspberry Pi, RK3528, ...)
