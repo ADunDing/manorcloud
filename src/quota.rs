@@ -17,7 +17,7 @@ use sqlx::SqlitePool;
 use crate::{
     db::{trash as trash_db, user as user_db},
     space::{self, SpaceError, SpaceKey},
-    tree::{self, RelPath},
+    tree,
 };
 
 /// 計算出的用量保留多久
@@ -55,7 +55,8 @@ pub async fn usage(pool: &SqlitePool, data_dir: &Path, user_id: i64) -> Result<u
     }
     let space = space::resolve(pool, data_dir, user_id, false, SpaceKey::Me).await?;
     let root = space.root.clone();
-    let base = space.abs(&RelPath::default());
+    // My files 本身的位置（不經過 abs：My files 不是掛載，abs 不會拒絕它）
+    let base = space.base.clone();
     let files = tokio::task::spawn_blocking(move || {
         tree::resolve(&root, &base, true)
             .map(|path| tree::tree_size(&path))

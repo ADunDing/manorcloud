@@ -144,6 +144,11 @@ fn status(code: StatusCode) -> Response {
     code.into_response()
 }
 
+/// WebDAV 只提供自己的 My files，abs 不會拒絕；萬一拒絕，當成不存在
+fn not_found(_: crate::space::OutOfReach) -> Response {
+    status(StatusCode::NOT_FOUND)
+}
+
 fn app_error(e: AppError) -> Response {
     e.into_response()
 }
@@ -193,7 +198,7 @@ struct Found {
 /// 找出一個項目；不存在（或是符號連結、特殊檔案）時是 None
 async fn find(space: &Space, rel: &RelPath) -> Result<Option<Found>, Response> {
     let root = space.root.clone();
-    let abs = space.abs(rel);
+    let abs = space.abs(rel).map_err(not_found)?;
     blocking(move || match tree::resolve(&root, &abs, true) {
         Ok(path) => {
             let meta = std::fs::symlink_metadata(&path)?;
@@ -331,7 +336,7 @@ async fn get(cx: &Ctx, rel: &RelPath, head: bool) -> DavResult {
     }
     let name = rel.name().unwrap_or_default().to_string();
     let root = cx.space.root.clone();
-    let abs = cx.space.abs(rel);
+    let abs = cx.space.abs(rel).map_err(not_found)?;
     let (file, meta, etag) = blocking(move || {
         let (file, meta) = tree::open_file(&root, &abs)?;
         let etag = tree::etag(&tree::resolve(&root, &abs, true)?, &meta);
@@ -444,9 +449,10 @@ async fn propfind(cx: &Ctx, rel: &RelPath, body: Body) -> DavResult {
         let space = cx.space.clone();
         let dir = rel.clone();
         let path = found.path.clone();
+        let abs_dir = space.abs(&dir).map_err(not_found)?;
         let listed = blocking(move || {
             let mut items = Vec::new();
-            for entry in tree::list(&space.root, &space.abs(&dir))? {
+            for entry in tree::list(&space.root, &abs_dir)? {
                 if space.is_ignored(&dir, &entry.name) {
                     continue;
                 }
@@ -599,7 +605,7 @@ async fn mkcol(cx: &Ctx, rel: &RelPath, body: Body) -> DavResult {
     }
     let (parent, name, _) = new_item(cx, rel).await?;
     let root = cx.space.root.clone();
-    let abs = cx.space.abs(&parent);
+    let abs = cx.space.abs(&parent).map_err(not_found)?;
     match blocking(move || tree::create_dir(&root, &abs, &name)).await {
         Ok(_) => Ok(status(StatusCode::CREATED)),
         // 只差大小寫的名稱已經存在
@@ -699,7 +705,10 @@ async fn copy_or_move(cx: &Ctx, from: &RelPath, moving: bool) -> DavResult {
             _ => dir.path.join(&name),
         };
         let root = cx.space.root.clone();
-        let (abs_from, abs_parent) = (cx.space.abs(from), cx.space.abs(&to_parent));
+        let (abs_from, abs_parent) = (
+            cx.space.abs(from).map_err(not_found)?,
+            cx.space.abs(&to_parent).map_err(not_found)?,
+        );
         blocking(move || {
             if replace {
                 // 同一個資料夾系統內的 rename 會一次換掉舊的檔案

@@ -112,6 +112,13 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
+/// 掛載的人碰不到的路徑：與不存在的項目回應相同
+impl From<crate::space::OutOfReach> for AppError {
+    fn from(_: crate::space::OutOfReach) -> Self {
+        AppError::NotFound("Item not found".to_string())
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,

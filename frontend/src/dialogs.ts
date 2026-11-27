@@ -342,7 +342,8 @@ export async function chooseArchiveFormat(title: string): Promise<ArchiveFormat 
   return choice === "separate" ? undefined : choice;
 }
 
-function choice(
+/** 單選的一個選項：粗體的名稱，下面一行說明 */
+export function choice(
   input: HTMLInputElement,
   label: string,
   hint: string,

@@ -1564,7 +1564,14 @@ select.dialog-input {
     padding-right: 0.4rem;
 }
 
-/* 儲存位置的掛載對象：每人一列，名稱與權限的下拉選單 */
+/* 儲存位置的用途（人員對話框最上方） */
+.dialog-legend {
+    margin-bottom: 8px;
+    padding: 0;
+    font-weight: 600;
+}
+
+/* 儲存位置的人員：每人一列，名稱與權限的下拉選單 */
 .mount-list {
     margin: 0;
     padding: 0;

@@ -20,7 +20,6 @@ import type {
   ResetPasswordResponse,
   StorageMove,
   StorageOverview,
-  StorageVolume,
   User,
 } from "./types.js";
 
@@ -353,7 +352,7 @@ class AdminView {
       }
     }
 
-    // 儲存位置：自己的也可以換
+    // 搬移中：重試、停止
     entries.push(...this.storageEntries(user));
     if (user.role !== "admin") {
       entries.push({
@@ -398,22 +397,14 @@ class AdminView {
     return h("div", { class: "row-menu-wrap" }, button, menu);
   }
 
-  /** 選單中與儲存位置有關的項目：依搬移的狀態而不同 */
+  /**
+   * 選單中與搬移有關的項目（搬移中才有）。
+   * 更換位置在 Administration → Storage 每顆硬碟的人員對話框
+   */
   private storageEntries(user: ManagedUser): MenuEntry[] {
     const move = this.moveOf(user);
     if (move === undefined) {
-      const onlyOne = this.storage.volumes.length < 2;
-      return [
-        {
-          label: t("Change storage"),
-          icon: "disk",
-          disabled: onlyOne,
-          title: onlyOne
-            ? t("Add another storage in Administration → Storage first")
-            : undefined,
-          onSelect: () => void this.changeStorage(user),
-        },
-      ];
+      return [];
     }
     const entries: MenuEntry[] = [];
     if (move.error !== null) {
@@ -564,29 +555,6 @@ class AdminView {
   }
 
   // ---------- 儲存位置 ----------
-
-  private async changeStorage(user: ManagedUser): Promise<void> {
-    const current = this.volumeOf(user);
-    const target = await chooseVolume(
-      user.username,
-      this.storage.volumes,
-      current,
-    );
-    if (target === undefined) {
-      return;
-    }
-    this.perform(async () => {
-      const result = await api.put<{ moving: boolean }>(
-        `/api/admin/users/${user.id}/storage`,
-        { volume_id: target },
-      );
-      showToast(
-        result.moving
-          ? t("Moving {name}'s files to {target}", { name: user.username, target: this.volumeName(target) })
-          : t("{name}'s files are now kept in {target}", { name: user.username, target: this.volumeName(target) }),
-      );
-    });
-  }
 
   private async cancelMove(user: ManagedUser): Promise<void> {
     const confirmed = await confirmDialog({
@@ -760,75 +728,6 @@ async function copyPassword(
   }
   field.select();
   status.textContent = t("Selected. Press Ctrl+C (⌘C on a Mac) to copy");
-}
-
-/**
- * 選擇新的儲存位置。回傳位置的編號（null 是資料目錄）；取消時回傳 undefined
- */
-function chooseVolume(
-  username: string,
-  volumes: readonly StorageVolume[],
-  current: number | null,
-): Promise<number | null | undefined> {
-  return new Promise((resolve) => {
-    let result: number | null | undefined;
-    const options = volumes.map((volume) => {
-      const free =
-        volume.available_bytes === null
-          ? t("not available")
-          : t("{size} free", { size: formatSize(volume.available_bytes) });
-      return h(
-        "option",
-        {
-          value: volume.id === null ? "" : String(volume.id),
-          selected: volume.id === current,
-          disabled: volume.id === current || volume.available_bytes === null,
-        },
-        volume.id === current ? t("{name} ({free}, current)", { name: volume.name, free }) : `${volume.name} (${free})`,
-      );
-    });
-    const select = h("select", { class: "dialog-input" }, options);
-    // 預設選第一個可以選的，而不是目前的位置
-    const firstFree = options.find((option) => !option.disabled);
-    if (firstFree !== undefined) {
-      firstFree.selected = true;
-    }
-    const cancel = h("button", { type: "button", class: "secondary" }, t("Cancel"));
-    const confirm = h(
-      "button",
-      { type: "submit", class: "primary", disabled: firstFree === undefined },
-      t("Move files"),
-    );
-    const title = t("Change where {name}'s files are kept", { name: username });
-    const form = h(
-      "form",
-      { method: "dialog", class: "dialog-form" },
-      h("h2", { class: "dialog-title" }, title),
-      h(
-        "p",
-        { class: "dialog-message" },
-        t("Their files are copied to the new storage in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled."),
-      ),
-      h("label", { class: "dialog-field" }, t("Storage"), select),
-      h("div", { class: "dialog-actions" }, cancel, confirm),
-    );
-    const dialog = h("dialog", { class: "dialog", "aria-label": title }, form);
-
-    cancel.addEventListener("click", () => dialog.close());
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      result = select.value === "" ? null : Number(select.value);
-      dialog.close();
-    });
-    dialog.addEventListener("close", () => {
-      dialog.remove();
-      resolve(result);
-    });
-
-    document.body.append(dialog);
-    dialog.showModal();
-    select.focus();
-  });
 }
 
 function messageOf(error: unknown): string {

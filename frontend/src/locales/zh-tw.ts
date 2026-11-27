@@ -36,9 +36,7 @@ const UI: Readonly<Record<string, string>> = {
   "Nothing to change": "沒有需要變更的內容",
   "Type {text} to confirm": "輸入 {text} 以確認",
   "Enter a name": "請輸入名稱",
-  "not available": "無法使用",
   "Not available": "無法使用",
-  "{size} free": "剩餘 {size}",
   "{free} free of {total}": "剩餘 {free}，共 {total}",
   "{done} of {total}": "{done} / {total}",
   "{s} s": "{s} 秒",
@@ -470,8 +468,6 @@ const UI: Readonly<Record<string, string>> = {
   "Turn off 2FA": "關閉兩步驟驗證",
   "Delete user": "刪除使用者",
   "Actions for {name}": "{name} 的操作",
-  "Change storage": "變更儲存空間",
-  "Add another storage in Administration → Storage first": "請先在「管理 → 儲存空間」新增其他儲存空間",
   "Retry moving files": "重試移動檔案",
   "Stop moving files": "停止移動檔案",
   "The new member gets a temporary password and must change it when they first log in.":
@@ -492,8 +488,6 @@ const UI: Readonly<Record<string, string>> = {
   "They'll be logged out on every device and can log in with just their password. Use this when they've lost their phone and their recovery codes.":
     "對方會在所有裝置上被登出，之後只要密碼就能登入。適合在對方遺失手機和復原碼時使用。",
   "Two-factor authentication turned off for {name}": "已關閉 {name} 的兩步驟驗證",
-  "Moving {name}'s files to {target}": "正在把 {name} 的檔案移動到 {target}",
-  "{name}'s files are now kept in {target}": "{name} 的檔案現在存放在 {target}",
   "Stop moving files?": "要停止移動檔案嗎？",
   "{name}'s files stay where they are now. Anything already copied to the new location is cleaned up later.":
     "{name} 的檔案會留在目前的位置，已經複製到新位置的部分稍後會清除。",
@@ -513,7 +507,6 @@ const UI: Readonly<Record<string, string>> = {
     "已重設 {name} 的密碼。這組臨時密碼只會顯示一次，請記下來交給對方。對方第一次登入時必須修改。",
   "I've noted it, close": "我記下來了，關閉",
   "Selected. Press Ctrl+C (⌘C on a Mac) to copy": "已選取。按 Ctrl+C（Mac 是 ⌘C）複製",
-  "{name} ({free}, current)": "{name}（{free}，目前位置）",
   "Move files": "移動檔案",
   "Space used": "已使用",
   "{used} of {limit}": "{used} / {limit}",
@@ -523,9 +516,6 @@ const UI: Readonly<Record<string, string>> = {
     "檔案和垃圾桶最多可以使用的空間，單位 GB。留空則不限制。",
   "Enter a number of GB, or leave it empty for no limit": "請輸入 GB 數，或留空表示不限制",
   "Storage limit saved": "已儲存空間上限",
-  "Change where {name}'s files are kept": "變更 {name} 的檔案存放位置",
-  "Their files are copied to the new storage in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.":
-    "檔案會在背景複製到新的儲存空間。完成前對方可以瀏覽和下載，但無法上傳；未完成的上傳會被取消。",
 
   // ==================== 管理：儲存空間 ====================
   "Add storage": "新增儲存空間",
@@ -551,24 +541,50 @@ const UI: Readonly<Record<string, string>> = {
   "Remove {name}?": "要移除 {name} 嗎？",
   "Remove {name}": "移除 {name}",
   "Removed {name}": "已移除 {name}",
-  "Mounted for 1 person": "已掛載給 1 個人",
-  "Mounted for {count} people": "已掛載給 {count} 個人",
-  "Choose who can use {name}": "選擇誰可以使用 {name}",
-  "Someone's own files are on this storage, so it can't be mounted for people":
-    "有人的個人檔案放在這個儲存空間，所以無法掛載給其他人",
-  "Who can use {name}": "誰可以使用 {name}",
-  "The whole storage appears in their sidebar. Files there are shared by everyone you choose and don't count toward their storage limit.":
-    "整個儲存空間會出現在他們的側邊欄。裡面的檔案由你選擇的所有人共用，不算進他們的空間配額。",
-  "There are no members yet. Add people in Users first.": "還沒有任何成員，請先在「使用者」中新增。",
-  "Access for {name}": "{name} 的權限",
+  "Use the people button on a storage to choose whose files are kept there and who else can use it. To use another disk or a NAS share, mount it on this computer first, then add it here.":
+    "在每個儲存空間按人員按鈕，選擇誰的檔案放在那裡、還有誰可以使用。要使用其他硬碟或 NAS 共用資料夾，請先掛載到這台電腦，再在這裡新增。",
+  "Choose who uses {name}": "選擇誰使用 {name}",
+  "Delete \"{name}\" permanently?": "要永久刪除「{name}」嗎？",
+  "Delete {count} items permanently?": "要永久刪除 {count} 個項目嗎？",
+  "This storage is shared with members and has no trash. Deleted items can't be restored.":
+    "這個儲存空間分享給成員使用，沒有垃圾桶。刪除後無法復原。",
+  "Delete permanently": "永久刪除",
+  "\"{name}\" deleted permanently": "已永久刪除「{name}」",
+  "{count} items deleted permanently": "已永久刪除 {count} 個項目",
+  "Shared with 1 member": "分享給 1 位成員",
+  "Shared with {count} members": "分享給 {count} 位成員",
+  "Members' own files": "存放成員的個人檔案",
+  "Use this storage to": "用途",
+  "Keep members' own files": "存放成員的個人檔案",
+  "Each person sees only their own files: this is their My files.": "每個人只看得到自己的檔案，也就是他們的 My files。",
+  "Share with members": "分享給成員",
+  "Everyone you choose sees the files on this storage in their sidebar. It has no trash: deleting is permanent.":
+    "你選的人都會在側邊欄看到這個儲存空間的檔案。沒有垃圾桶：刪除就是永久刪除。",
+  "{people}: their own files are kept on this storage. Keep them on another storage first.":
+    "{people} 的個人檔案放在這個儲存空間。請先把他們的個人檔案放到其他儲存空間。",
+  "Administrators can already see every storage.": "管理員本來就能看到每一個儲存空間。",
+  "Share {name} with members?": "要把 {name} 分享給成員嗎？",
+  "It has no trash: files deleted there can't be restored. Its users folder, which only has what was left when people's files were moved away, is removed.":
+    "分享的儲存空間沒有垃圾桶，刪除的檔案無法復原。它的 users 資料夾會被清除，裡面只剩成員的檔案搬走後留下的內容。",
+  "Stop sharing {name}?": "要停止分享 {name} 嗎？",
+  "Nobody it's shared with can open it any more. The files on the disk stay where they are.":
+    "原本分享的成員都無法再開啟它。硬碟上的檔案會留在原處。",
+  "Can view": "可檢視",
+  "Can edit": "可編輯",
+  "Who uses {name}": "誰使用 {name}",
+  "{name} on this storage": "{name} 在這個儲存空間的權限",
+  "Their files are being moved": "他的檔案正在搬移中",
+  "To move their files away, choose Keep their files here on another storage":
+    "要把他的檔案搬走，請在另一個儲存空間選擇「個人檔案放這裡」",
+  "Keep their files here": "個人檔案放這裡",
+  "(administrator)": "（管理員）",
+  "Move files to {name}?": "要把檔案搬到 {name} 嗎？",
+  "{people}: their files are copied to {name} in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.":
+    "{people}：他們的檔案會在背景複製到 {name}。完成之前可以瀏覽與下載，但不能上傳；未完成的上傳會被取消。",
   "No access": "無法使用",
-  "Read only": "唯讀",
-  "Read and write": "可讀寫",
   "Added {name}": "已新增 {name}",
   "ManorCloud stops showing this storage, but the files on the disk stay where they are: add the same folder again to see them. Its shared links stop working, and items in its Trash can no longer be restored.":
     "ManorCloud 不再顯示這個儲存空間，但硬碟上的檔案都會留在原處：重新加入同一個資料夾就能再看到它們。它的分享連結會失效，垃圾桶中的項目也無法再還原。",
-  "Each person's files are kept in one location. To put someone's files on another disk, use Change storage in Users. To use another disk or a NAS share, mount it on this computer first, then add it here.":
-    "每個人的檔案存放在一個位置。要把某人的檔案放到其他硬碟，請在「使用者」使用「變更儲存空間」。要使用其他硬碟或 NAS 共用資料夾，請先掛載到這台電腦，再到這裡新增。",
   Space: "空間",
   People: "人數",
   "(data directory)": "（資料目錄）",
@@ -638,13 +654,14 @@ const SERVER: Readonly<Record<string, string>> = {
     "ManorCloud 沒有權限修改這裡，請檢查資料夾的權限",
   "More data than the declared file size": "資料超過宣告的檔案大小",
   "Move everyone's files to another storage before removing this one": "移除前請先把所有人的檔案移到其他儲存空間",
-  "That storage is shared with people as a mount, so nobody's own files can go there":
-    "這個儲存空間已經掛載給其他人，所以不能放任何人的個人檔案",
-  "Someone's own files are on this storage. Move them to another storage first":
-    "有人的個人檔案放在這個儲存空間，請先把它們移到其他儲存空間",
   "A storage can only be shared with members. Administrators can already see every storage":
-    "儲存空間只能掛載給成員。管理員本來就能看到每一個儲存空間",
-  "A storage can be shared with at most 1000 people": "一個儲存空間最多只能掛載給 1000 個人",
+    "儲存空間只能分享給成員。管理員本來就能看到每一個儲存空間",
+  "A storage can be shared with at most 1000 people": "一個儲存空間最多只能分享給 1000 個人",
+  "Set this storage to Share with members first": "請先把這個儲存空間的用途設為「分享給成員」",
+  "That storage is shared with members, so nobody's own files can be kept there":
+    "這個儲存空間分享給成員使用，不能放任何人的個人檔案",
+  "Some people's own files are kept on this storage. Keep them on another storage first":
+    "有成員的個人檔案放在這個儲存空間，請先把它們放到其他儲存空間",
   "You can open and download files here, but not change them": "你可以開啟與下載這裡的檔案，但不能修改",
   "Files are being copied or moved here. Try again when that's finished":
     "這裡有檔案正在複製或移動，請等完成後再試",

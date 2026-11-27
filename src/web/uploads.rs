@@ -132,6 +132,12 @@ enum UploadError {
     },
 }
 
+impl From<crate::space::OutOfReach> for UploadError {
+    fn from(e: crate::space::OutOfReach) -> Self {
+        UploadError::App(e.into())
+    }
+}
+
 impl From<AppError> for UploadError {
     fn from(e: AppError) -> Self {
         UploadError::App(e)
@@ -348,7 +354,7 @@ async fn create(
 
     // 2. 資料夾必須存在。依照同名的選擇提早檢查，不必傳完才發現；完成時會再檢查一次
     let root = space.root.clone();
-    let abs = space.abs(&dir);
+    let abs = space.abs(&dir)?;
     let target = blocking(move || tree::resolve_dir(&root, &abs)).await?;
     if name_taken(target, name.clone(), req.on_conflict).await? {
         return Err(UploadError::NameConflict);
@@ -627,7 +633,7 @@ async fn complete(
         None => upload.name.clone(),
     };
     let root = space.root.clone();
-    let abs = space.abs(&dir);
+    let abs = space.abs(&dir)?;
     let target = blocking(move || tree::resolve_dir(&root, &abs))
         .await
         .map_err(|e| match e {

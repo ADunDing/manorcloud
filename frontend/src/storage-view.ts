@@ -1,12 +1,14 @@
 // Administration → Storage：檔案可以放在哪些硬碟。
 //
-// 每個人的檔案放在其中一個位置，在 Users 的「⋯」選單中更換。
+// 每顆硬碟一個「人員」對話框，一個地方設定完所有事。最上方先選用途：
+//   存放成員的個人檔案：每個人選「無法使用」或「個人檔案放這裡」（他的 My files 搬過來）
+//   分享給成員：整顆硬碟出現在選定成員的側邊欄，各自「可檢視」或「可編輯」；沒有垃圾桶
+// Default（資料目錄）永遠是存放個人檔案。
 // 「Default」是設定中的資料目錄，永遠存在、不能刪除。
-// 其他位置可以整個掛載給一般使用者（人像按鈕），出現在他們的側邊欄。
 
 import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
-import { confirmDialog } from "./dialogs.js";
+import { choice, confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
 import { formatSize } from "./format.js";
 import { icon } from "./icons.js";
@@ -22,8 +24,8 @@ export function renderStorage(container: HTMLElement): void {
 
   const reload = async (): Promise<void> => {
     try {
-      const overview = await api.get<StorageOverview>("/api/admin/storage");
-      listSlot.replaceChildren(volumeTable(overview.volumes, remove, share));
+      overview = await api.get<StorageOverview>("/api/admin/storage");
+      listSlot.replaceChildren(volumeTable(overview.volumes, remove, setUp));
     } catch (error) {
       if (!isHandledGlobally(error)) {
         listSlot.replaceChildren(h("p", { class: "error", role: "alert" }, messageOf(error)));
@@ -31,9 +33,11 @@ export function renderStorage(container: HTMLElement): void {
     }
   };
 
-  const share = async (volume: StorageVolume): Promise<void> => {
+  let overview: StorageOverview = { volumes: [], users: [], moves: [] };
+
+  const setUp = async (volume: StorageVolume): Promise<void> => {
     errorBox.textContent = "";
-    if (await mountDialog(volume)) {
+    if (await peopleDialog(volume, overview)) {
       showToast(t("Saved"));
       await reload();
     }
@@ -87,7 +91,7 @@ export function renderStorage(container: HTMLElement): void {
       "p",
       { class: "hint storage-intro" },
       t(
-        "Each person's files are kept in one location. To put someone's files on another disk, use Change storage in Users. To use another disk or a NAS share, mount it on this computer first, then add it here.",
+        "Use the people button on a storage to choose whose files are kept there and who else can use it. To use another disk or a NAS share, mount it on this computer first, then add it here.",
       ),
     ),
     errorBox,
@@ -303,7 +307,7 @@ function webDavSection(): HTMLElement {
 function volumeTable(
   volumes: readonly StorageVolume[],
   remove: (volume: StorageVolume) => Promise<void>,
-  share: (volume: StorageVolume) => Promise<void>,
+  setUp: (volume: StorageVolume) => Promise<void>,
 ): HTMLElement {
   return h(
     "div",
@@ -336,20 +340,20 @@ function volumeTable(
               {},
               volume.name,
               volume.id === null ? h("span", { class: "muted" }, ` ${t("(data directory)")}`) : null,
-              volume.mounted > 0
-                ? h(
-                    "div",
-                    { class: "hint" },
-                    volume.mounted === 1
-                      ? t("Mounted for 1 person")
-                      : t("Mounted for {count} people", { count: volume.mounted }),
-                  )
-                : null,
+              h(
+                "div",
+                { class: "hint" },
+                volume.shared
+                  ? volume.mounted === 1
+                    ? t("Shared with 1 member")
+                    : t("Shared with {count} members", { count: volume.mounted })
+                  : t("Members' own files"),
+              ),
             ),
             h("td", {}, h("code", { class: "path" }, volume.path)),
             h("td", { class: "space-cell" }, spaceMeter(volume)),
             h("td", {}, String(volume.users)),
-            h("td", { class: "actions-cell" }, shareButton(volume, share), removeButton(volume, remove)),
+            h("td", { class: "actions-cell" }, peopleButton(volume, setUp), removeButton(volume, remove)),
           ),
         ),
       ),
@@ -393,55 +397,145 @@ function spaceMeter(volume: StorageVolume): HTMLElement {
   );
 }
 
-/** 掛載給使用者。有人的 My files 在這裡時不能掛載：那裡的 users 資料夾是他們的私人檔案 */
-function shareButton(
+/** 這顆硬碟的人員設定：誰的個人檔案放這裡、掛載給誰 */
+function peopleButton(
   volume: StorageVolume,
-  share: (volume: StorageVolume) => Promise<void>,
-): HTMLElement | null {
-  if (volume.id === null) {
-    return null;
-  }
-  const hasPeople = volume.users > 0;
-  const label = t("Choose who can use {name}", { name: volume.name });
+  setUp: (volume: StorageVolume) => Promise<void>,
+): HTMLElement {
+  const label = t("Choose who uses {name}", { name: volume.name });
   return h(
     "button",
-    {
-      type: "button",
-      class: "icon-button row-menu",
-      disabled: hasPeople,
-      title: hasPeople ? t("Someone's own files are on this storage, so it can't be mounted for people") : label,
-      "aria-label": label,
-      onClick: () => void share(volume),
-    },
+    { type: "button", class: "icon-button row-menu", title: label, "aria-label": label, onClick: () => void setUp(volume) },
     icon("users", 18),
   );
 }
 
-type Access = "none" | "read" | "write";
+/** 每個人在這顆硬碟上的角色。view、edit 只在分享給成員時；home 只在存放個人檔案時 */
+type Access = "none" | "view" | "edit" | "home";
 
 /**
- * 選擇這個位置掛載給哪些一般使用者，各自唯讀或可以修改。
- * 儲存成功時回傳 true；Cancel、Esc 回傳 false
+ * 這顆硬碟的人員。最上方先選用途，下面每個人的選項跟著用途改變：
+ *
+ * - 存放成員的個人檔案：每個人「無法使用」或「個人檔案放這裡」（他的 My files 搬過來）。
+ *   個人檔案已經在這裡、或正在搬移的人不能在這裡改：要搬走，打開另一顆硬碟選「個人檔案放這裡」
+ * - 分享給成員：每個成員「無法使用」「可檢視」或「可編輯」。管理員本來就看得到每一顆硬碟。
+ *   還有人的個人檔案在這裡時不能改成分享
+ *
+ * Default（資料目錄）永遠是存放個人檔案，不顯示用途。
+ * 儲存成功（至少一部分）時回傳 true；Cancel、Esc 回傳 false
  */
-function mountDialog(volume: StorageVolume): Promise<boolean> {
+function peopleDialog(volume: StorageVolume, overview: StorageOverview): Promise<boolean> {
   return new Promise((resolve) => {
     let saved = false;
     const list = h("ul", { class: "mount-list" }, h("li", { class: "muted" }, t("Loading…")));
+    const warning = h("p", { class: "error", role: "alert" });
     const error = h("p", { class: "error", role: "alert" });
     const cancel = h("button", { type: "button", class: "secondary" }, t("Cancel"));
     const save = h("button", { type: "submit", class: "primary", disabled: true }, t("Save"));
-    const title = t("Who can use {name}", { name: volume.name });
-    const choices: { readonly userId: number; readonly select: HTMLSelectElement }[] = [];
+    const title = t("Who uses {name}", { name: volume.name });
+    const canShare = volume.id !== null;
+
+    const personalInput = h("input", { type: "radio", name: "purpose", value: "personal", checked: !volume.shared });
+    const sharedInput = h("input", { type: "radio", name: "purpose", value: "shared", checked: volume.shared });
+    const purpose = canShare
+      ? h(
+          "fieldset",
+          { class: "choices" },
+          h("legend", { class: "dialog-legend" }, t("Use this storage to")),
+          choice(personalInput, t("Keep members' own files"), t("Each person sees only their own files: this is their My files.")),
+          choice(
+            sharedInput,
+            t("Share with members"),
+            t("Everyone you choose sees the files on this storage in their sidebar. It has no trash: deleting is permanent."),
+          ),
+        )
+      : null;
+
+    // 每個人在兩種用途下各自的選擇：切換用途再切回來時保留
+    let users: ManagedUser[] = [];
+    const personal = new Map<number, Access>();
+    const shared = new Map<number, Access>();
+    const homeOf = (user: ManagedUser): number | null =>
+      overview.users.find((entry) => entry.user_id === user.id)?.volume_id ?? null;
+    const isMoving = (user: ManagedUser): boolean => overview.moves.some((move) => move.user_id === user.id);
+    // 個人檔案在這裡（或正在搬過來）的人：有他們時不能改成分享
+    const keptHere = (): ManagedUser[] =>
+      users.filter(
+        (user) =>
+          homeOf(user) === volume.id || overview.moves.some((m) => m.user_id === user.id && m.target_volume_id === volume.id),
+      );
+    const isShared = (): boolean => sharedInput.checked;
+
+    const render = (): void => {
+      warning.textContent = "";
+      if (isShared()) {
+        const kept = keptHere();
+        if (kept.length > 0) {
+          warning.textContent = t("{people}: their own files are kept on this storage. Keep them on another storage first.", {
+            people: kept.map((user) => user.username).join(", "),
+          });
+        }
+        const members = users.filter((user) => user.role === "member");
+        list.replaceChildren(
+          ...members.map((user) => row(user, shared, ["none", "view", "edit"], false)),
+          h("li", { class: "muted" }, t("Administrators can already see every storage.")),
+        );
+        save.disabled = kept.length > 0;
+      } else {
+        list.replaceChildren(
+          ...users.map((user) => {
+            const locked = personal.get(user.id) === "home" && homeOf(user) === volume.id;
+            return row(user, personal, ["none", "home"], locked || isMoving(user));
+          }),
+        );
+        save.disabled = false;
+      }
+    };
+
+    const row = (
+      user: ManagedUser,
+      choices: Map<number, Access>,
+      values: readonly Access[],
+      locked: boolean,
+    ): HTMLElement => {
+      const current = choices.get(user.id) ?? "none";
+      const select = h(
+        "select",
+        {
+          class: "dialog-input",
+          "aria-label": t("{name} on this storage", { name: user.username }),
+          disabled: locked,
+          title: isMoving(user)
+            ? t("Their files are being moved")
+            : locked
+              ? t("To move their files away, choose Keep their files here on another storage")
+              : null,
+        },
+        values.map((value) => option(value, current)),
+      );
+      select.addEventListener("change", () => choices.set(user.id, select.value as Access));
+      return h(
+        "li",
+        {},
+        h(
+          "span",
+          { class: "mount-name" },
+          user.username,
+          user.role === "admin" ? h("span", { class: "muted" }, ` ${t("(administrator)")}`) : null,
+        ),
+        select,
+      );
+    };
+
+    personalInput.addEventListener("change", render);
+    sharedInput.addEventListener("change", render);
 
     const form = h(
       "form",
       { method: "dialog", class: "dialog-form" },
       h("h2", { class: "dialog-title" }, title),
-      h(
-        "p",
-        { class: "dialog-message" },
-        t("The whole storage appears in their sidebar. Files there are shared by everyone you choose and don't count toward their storage limit."),
-      ),
+      purpose,
+      warning,
       list,
       error,
       h("div", { class: "dialog-actions" }, cancel, save),
@@ -450,31 +544,19 @@ function mountDialog(volume: StorageVolume): Promise<boolean> {
 
     void (async () => {
       try {
-        const [users, grants] = await Promise.all([
+        const [all, grants] = await Promise.all([
           api.get<ManagedUser[]>("/api/admin/users"),
-          api.get<{ user_id: number; writable: boolean }[]>(`/api/admin/storage/${volume.id}/mounts`),
+          canShare
+            ? api.get<{ user_id: number; writable: boolean }[]>(`/api/admin/storage/${volume.id}/mounts`)
+            : Promise.resolve([]),
         ]);
-        const members = users.filter((user) => user.role === "member");
-        if (members.length === 0) {
-          list.replaceChildren(h("li", { class: "muted" }, t("There are no members yet. Add people in Users first.")));
-          return;
+        users = all;
+        for (const user of users) {
+          personal.set(user.id, homeOf(user) === volume.id ? "home" : "none");
+          const grant = grants.find((g) => g.user_id === user.id);
+          shared.set(user.id, grant === undefined ? "none" : grant.writable ? "edit" : "view");
         }
-        list.replaceChildren(
-          ...members.map((user) => {
-            const grant = grants.find((g) => g.user_id === user.id);
-            const current: Access = grant === undefined ? "none" : grant.writable ? "write" : "read";
-            const select = h(
-              "select",
-              { class: "dialog-input", "aria-label": t("Access for {name}", { name: user.username }) },
-              option("none", t("No access"), current),
-              option("read", t("Read only"), current),
-              option("write", t("Read and write"), current),
-            );
-            choices.push({ userId: user.id, select });
-            return h("li", {}, h("span", { class: "mount-name" }, user.username), select);
-          }),
-        );
-        save.disabled = false;
+        render();
       } catch (e) {
         if (!isHandledGlobally(e)) {
           list.replaceChildren();
@@ -488,20 +570,87 @@ function mountDialog(volume: StorageVolume): Promise<boolean> {
       event.preventDefault();
       save.disabled = true;
       error.textContent = "";
-      const grants = choices
-        .filter((choice) => choice.select.value !== "none")
-        .map((choice) => ({ user_id: choice.userId, writable: choice.select.value === "write" }));
       void (async () => {
+        const toShared = isShared();
+        const purposeChanged = canShare && toShared !== volume.shared;
+        const moving = toShared
+          ? []
+          : users.filter((user) => personal.get(user.id) === "home" && homeOf(user) !== volume.id);
+
+        // 1. 確認：改變用途、搬移檔案
+        if (purposeChanged) {
+          const confirmed = await confirmDialog(
+            toShared
+              ? {
+                  title: t("Share {name} with members?", { name: volume.name }),
+                  message: t("It has no trash: files deleted there can't be restored. Its users folder, which only has what was left when people's files were moved away, is removed."),
+                  confirmLabel: t("Share"),
+                }
+              : {
+                  title: t("Stop sharing {name}?", { name: volume.name }),
+                  message: t("Nobody it's shared with can open it any more. The files on the disk stay where they are."),
+                  confirmLabel: t("Stop sharing"),
+                  danger: true,
+                },
+          );
+          if (!confirmed) {
+            save.disabled = false;
+            return;
+          }
+        }
+        if (moving.length > 0) {
+          const confirmed = await confirmDialog({
+            title: t("Move files to {name}?", { name: volume.name }),
+            message: t("{people}: their files are copied to {name} in the background. Until it's done they can browse and download, but not upload. Unfinished uploads are cancelled.", {
+              people: moving.map((user) => user.username).join(", "),
+              name: volume.name,
+            }),
+            confirmLabel: t("Move files"),
+          });
+          if (!confirmed) {
+            save.disabled = false;
+            return;
+          }
+        }
+
+        // 2. 用途，然後分享的對象或搬移
+        const failures: string[] = [];
         try {
-          await api.put(`/api/admin/storage/${volume.id}/mounts`, { grants });
-          saved = true;
-          dialog.close();
+          if (purposeChanged) {
+            await api.put(`/api/admin/storage/${volume.id}/purpose`, { shared: toShared });
+            saved = true;
+          }
+          if (toShared) {
+            const grants = users
+              .filter((user) => user.role === "member" && (shared.get(user.id) ?? "none") !== "none")
+              .map((user) => ({ user_id: user.id, writable: shared.get(user.id) === "edit" }));
+            await api.put(`/api/admin/storage/${volume.id}/mounts`, { grants });
+            saved = true;
+          }
+          for (const user of moving) {
+            try {
+              await api.put(`/api/admin/users/${user.id}/storage`, { volume_id: volume.id });
+              saved = true;
+            } catch (e) {
+              if (isHandledGlobally(e)) {
+                return;
+              }
+              failures.push(`${user.username}: ${messageOf(e)}`);
+            }
+          }
         } catch (e) {
           if (!isHandledGlobally(e)) {
             error.textContent = messageOf(e);
           }
           save.disabled = false;
+          return;
         }
+        if (failures.length > 0) {
+          error.textContent = failures.join(" · ");
+          save.disabled = false;
+          return;
+        }
+        dialog.close();
       })();
     });
     dialog.addEventListener("close", () => {
@@ -515,8 +664,15 @@ function mountDialog(volume: StorageVolume): Promise<boolean> {
   });
 }
 
-function option(value: Access, label: string, current: Access): HTMLOptionElement {
-  return h("option", { value, selected: value === current }, label);
+const ACCESS_LABELS: Readonly<Record<Access, () => string>> = {
+  none: () => t("No access"),
+  view: () => t("Can view"),
+  edit: () => t("Can edit"),
+  home: () => t("Keep their files here"),
+};
+
+function option(value: Access, current: Access): HTMLOptionElement {
+  return h("option", { value, selected: value === current }, ACCESS_LABELS[value]());
 }
 
 function removeButton(

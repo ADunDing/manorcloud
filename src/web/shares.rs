@@ -165,7 +165,7 @@ async fn create(
     }
 
     let root = space.root.clone();
-    let abs = space.abs(&rel);
+    let abs = space.abs(&rel)?;
     let is_dir = blocking(move || {
         Ok(std::fs::symlink_metadata(tree::resolve(&root, &abs, true)?)?.is_dir())
     })
@@ -291,7 +291,7 @@ fn inside(share: &Share, space: &Space, rel: &RelPath, sub: &str) -> Result<RelP
     if sub.parts().iter().any(|part| tree::is_hidden_name(part)) {
         return Err(AppError::NotFound("Item not found".to_string()));
     }
-    Ok(space.abs(&rel.join(&sub)))
+    Ok(space.abs(&rel.join(&sub))?)
 }
 
 #[derive(Serialize)]
@@ -328,7 +328,7 @@ async fn info(
         }));
     }
     let root = space.root.clone();
-    let abs = space.abs(&rel);
+    let abs = space.abs(&rel)?;
     let kind = share.kind.clone();
     let size = blocking(move || {
         let meta = std::fs::symlink_metadata(tree::resolve(&root, &abs, true)?)?;

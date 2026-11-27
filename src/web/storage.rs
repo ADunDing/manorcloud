@@ -3,6 +3,7 @@
 //!   GET    /api/admin/storage                       所有位置、每個人在哪裡、搬移的進度
 //!   POST   /api/admin/storage                       新增位置
 //!   DELETE /api/admin/storage/{id}                  移除位置（沒有人使用時）；硬碟上的檔案不動
+//!   PUT    /api/admin/storage/{id}/purpose          用途：存放成員的個人檔案，或分享給成員
 //!   PUT    /api/admin/users/{id}/storage            更換使用者的位置
 //!   POST   /api/admin/users/{id}/storage/retry      重試失敗的搬移
 //!   DELETE /api/admin/users/{id}/storage/move       取消搬移，檔案留在原處
@@ -28,12 +29,13 @@ use crate::{
     db::{
         mounts as mounts_db,
         storage::{
-            self as storage_db, AddVolumeError, DeleteVolumeError, StartMove, StartMoveError,
+            self as storage_db, AddVolumeError, DeleteVolumeError, SetSharedError, StartMove,
+            StartMoveError,
         },
         trash as trash_db,
     },
     folders, mover,
-    storage::{self, resumable},
+    storage::{self, USERS_DIR, resumable},
     tree,
 };
 
@@ -44,6 +46,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/storage", get(overview).post(add_volume))
         .route("/api/admin/storage/{id}", delete(delete_volume))
+        .route("/api/admin/storage/{id}/purpose", put(set_purpose))
         .route("/api/admin/users/{id}/storage", put(change_location))
         .route("/api/admin/users/{id}/storage/retry", post(retry))
         .route("/api/admin/users/{id}/storage/move", delete(cancel))
@@ -65,6 +68,8 @@ struct VolumeItem {
     users: usize,
     /// 掛載給了幾個人
     mounted: usize,
+    /// 用途：false 存放成員的個人檔案；true 分享給成員
+    shared: bool,
 }
 
 #[derive(Serialize)]
@@ -119,16 +124,17 @@ async fn overview(
         &data_dir,
         count(None),
         0,
+        false,
     ));
     for v in volumes {
         let users = count(Some(v.id));
-        let shared = mounted(v.id);
         items.push(volume_item(
             Some(v.id),
             v.name,
             Path::new(&v.path),
             users,
-            shared,
+            mounted(v.id),
+            v.shared,
         ));
     }
 
@@ -162,6 +168,7 @@ fn volume_item(
     path: &Path,
     users: usize,
     mounted: usize,
+    shared: bool,
 ) -> VolumeItem {
     // 資料目錄沒有標記檔；其他位置沒有標記檔代表硬碟沒有掛載，容量顯示為無法使用
     let ready = id.is_none() || storage::volume_ready(path);
@@ -174,6 +181,7 @@ fn volume_item(
         available_bytes: space.map(|s| s.available),
         users,
         mounted,
+        shared,
     }
 }
 
@@ -241,7 +249,14 @@ async fn add_volume(
 
     Ok((
         StatusCode::CREATED,
-        Json(volume_item(Some(volume.id), volume.name, &path, 0, 0)),
+        Json(volume_item(
+            Some(volume.id),
+            volume.name,
+            &path,
+            0,
+            0,
+            false,
+        )),
     ))
 }
 
@@ -342,6 +357,60 @@ async fn delete_volume(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ==================== 用途 ====================
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PurposeRequest {
+    /// true：分享給成員；false：存放成員的個人檔案
+    shared: bool,
+}
+
+/// PUT /api/admin/storage/{id}/purpose。
+///
+/// 改成分享給成員時，硬碟上的 `users` 資料夾會被清除：這時已經確認沒有任何人的 My files
+/// 在這裡、也沒有進行中的搬移，裡面只剩搬走之後留下的空資料夾或取消搬移時的殘留。
+/// 改回存放個人檔案時，取消所有人的分享，硬碟上的檔案不動
+async fn set_purpose(
+    admin: AdminUser,
+    State(pool): State<SqlitePool>,
+    UrlPath(id): UrlPath<i64>,
+    Json(req): Json<PurposeRequest>,
+) -> Result<StatusCode, AppError> {
+    let volume = storage_db::find_volume(&pool, id)
+        .await?
+        .ok_or_else(volume_not_found)?;
+    storage_db::set_shared(&pool, id, req.shared)
+        .await
+        .map_err(|e| match e {
+            SetSharedError::NotFound => volume_not_found(),
+            SetSharedError::HasPeople => AppError::Conflict(
+                "Some people's own files are kept on this storage. Keep them on another storage first"
+                    .to_string(),
+            ),
+            SetSharedError::Db(e) => AppError::internal(e),
+        })?;
+    let root = PathBuf::from(&volume.path);
+    if req.shared && storage::volume_ready(&root) {
+        let users = root.join(USERS_DIR);
+        blocking(move || match tree::remove_path(&users) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        })
+        .await?;
+    }
+    println!(
+        "storage: location {id} is now {} (by administrator {})",
+        if req.shared {
+            "shared with members"
+        } else {
+            "for people's own files"
+        },
+        admin.id
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ==================== 更換使用者的位置 ====================
 
 fn start_move_error(e: StartMoveError) -> AppError {
@@ -356,8 +425,8 @@ fn start_move_error(e: StartMoveError) -> AppError {
         StartMoveError::FolderTaken => {
             AppError::Conflict("Someone else already has a folder with that name there".to_string())
         }
-        StartMoveError::Mounted => AppError::Conflict(
-            "That storage is shared with people as a mount, so nobody's own files can go there"
+        StartMoveError::Shared => AppError::Conflict(
+            "That storage is shared with members, so nobody's own files can be kept there"
                 .to_string(),
         ),
         StartMoveError::Db(e) => AppError::internal(e),
@@ -854,5 +923,63 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["items"][0]["name"], "debian.iso");
+    }
+
+    #[sqlx::test]
+    async fn switching_the_purpose(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        t.make_admin().await;
+        let disk = tempfile::tempdir().unwrap();
+        let volume = add(&t, disk.path()).await;
+        let jerry = t.other_user("jerry").await;
+        std::fs::write(disk.path().join("README.txt"), b"keep").unwrap();
+        let uri = format!("/api/admin/storage/{volume}/purpose");
+
+        // jerry 的 My files 在這裡：不能改成分享
+        storage_db::set_volume(&t.pool, jerry, Some(volume))
+            .await
+            .unwrap();
+        let (status, body) = t
+            .json(Method::PUT, &uri, Some(json!({"shared": true})))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // 搬走之後可以：users 資料夾（只剩殘留）被清除，其他檔案不動
+        storage_db::set_volume(&t.pool, jerry, None).await.unwrap();
+        std::fs::create_dir_all(disk.path().join("users/jerry/old")).unwrap();
+        std::fs::write(disk.path().join("users/jerry/old/a.txt"), b"x").unwrap();
+        let (status, _) = t
+            .json(Method::PUT, &uri, Some(json!({"shared": true})))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!disk.path().join("users").exists());
+        assert_eq!(
+            std::fs::read(disk.path().join("README.txt")).unwrap(),
+            b"keep"
+        );
+        let (_, overview) = t.json(Method::GET, "/api/admin/storage", None).await;
+        assert_eq!(overview["volumes"][1]["shared"], true);
+
+        // 分享改回存放個人檔案：取消所有人的分享
+        crate::db::mounts::set_for_volume(
+            &t.pool,
+            volume,
+            &[crate::db::mounts::Grant {
+                user_id: jerry,
+                can_write: true,
+            }],
+        )
+        .await
+        .unwrap();
+        let (status, _) = t
+            .json(Method::PUT, &uri, Some(json!({"shared": false})))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            crate::db::mounts::of_volume(&t.pool, volume)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

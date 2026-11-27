@@ -9,7 +9,7 @@
 import { t, tNodes } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
-import { chooseArchiveFormat, chooseDownload, nameDialog, type ArchiveFormat } from "./dialogs.js";
+import { chooseArchiveFormat, chooseDownload, confirmDialog, nameDialog, type ArchiveFormat } from "./dialogs.js";
 import {
   DRAG_TYPE,
   FileList,
@@ -86,10 +86,12 @@ interface Place {
   readonly space: Space;
   /** 路徑最前面的名稱：My files 或硬碟的名稱 */
   readonly rootLabel: string;
+  /** false：分享給成員的硬碟沒有垃圾桶，刪除就是永久刪除，刪除前要先確認 */
+  readonly trash: boolean;
 }
 
 /** 目前的檔案空間。同時只有一個資料夾畫面，下載與還原等輔助函式都以它為準 */
-let place: Place = { location: MY_FILES, space: null, rootLabel: t("My files") };
+let place: Place = { location: MY_FILES, space: null, rootLabel: t("My files"), trash: true };
 /** 複製、移動時可以選擇的目的地：管理員是 My files 與每一顆硬碟，一般使用者只有 My files */
 let places: readonly FolderPlace[] = [place];
 /** space= 的值 → 顯示的名稱，給傳輸面板使用 */
@@ -220,7 +222,7 @@ async function load(container: HTMLElement, options: BrowserOptions): Promise<vo
       return;
     }
 
-    place = { location: options.location, space, rootLabel };
+    place = { location: options.location, space, rootLabel, trash: listing.trash };
     places = choices.some((choice) => choice.space === space) ? choices : [place, ...choices];
     const view = new FolderView(container, options.path, listing);
     current = view;
@@ -830,12 +832,27 @@ class FolderView {
 
   /**
    * 刪除：放進垃圾桶，不需要確認（與 Google Drive 相同）。
-   * 誤刪的代價很低：左下角的通知可以立刻 Undo，之後也能從垃圾桶還原
+   * 誤刪的代價很低：左下角的通知可以立刻 Undo，之後也能從垃圾桶還原。
+   * 分享給成員的硬碟沒有垃圾桶：先確認，刪除之後無法復原
    */
   private async deleteSelected(): Promise<void> {
     const selected = this.list.selectedItems();
     const [first] = selected;
     if (first === undefined) {
+      return;
+    }
+    if (!place.trash) {
+      if (!(await confirmPermanentDelete(selected))) {
+        return;
+      }
+      let deleted = 0;
+      await this.each(selected, (done, total) => t("Deleted {done} of {total} items.", { done, total }), async (item) => {
+        await api.delete(apiUrl("/api/files", place.space, { path: this.itemPath(item) }));
+        deleted += 1;
+      });
+      if (deleted > 0) {
+        showToast(deletedMessage(first, deleted));
+      }
       return;
     }
     const trashed: number[] = [];
@@ -1791,23 +1808,33 @@ class SearchView implements View {
     });
   }
 
-  /** 放進垃圾桶，與資料夾中的刪除相同：通知可以 Undo。刪除後回到開始搜尋的資料夾 */
+  /**
+   * 放進垃圾桶，與資料夾中的刪除相同：通知可以 Undo（沒有垃圾桶的硬碟先確認）。
+   * 刪除後回到開始搜尋的資料夾
+   */
   private async deleteSelected(): Promise<void> {
     const selected = this.list?.selectedItems() ?? [];
     const [first] = selected;
     if (first === undefined || this.busy) {
       return;
     }
+    if (!place.trash && !(await confirmPermanentDelete(selected))) {
+      return;
+    }
     this.busy = true;
     this.errorBox.textContent = "";
     const trashed: number[] = [];
+    let deleted = 0;
     let firstError: unknown = null;
     for (const item of selected) {
       try {
-        const result = await api.delete<{ trash_id: number }>(
+        const result = await api.delete<{ trash_id: number | null }>(
           apiUrl("/api/files", place.space, { path: this.itemPath(item) }),
         );
-        trashed.push(result.trash_id);
+        deleted += 1;
+        if (result.trash_id !== null) {
+          trashed.push(result.trash_id);
+        }
       } catch (error) {
         if (isHandledGlobally(error)) {
           this.busy = false;
@@ -1820,13 +1847,15 @@ class SearchView implements View {
     if (firstError !== null) {
       errorAfterReload =
         selected.length > 1
-          ? `${t("Deleted {done} of {total} items.", { done: trashed.length, total: selected.length })} ${messageOf(firstError)}`
+          ? `${t("Deleted {done} of {total} items.", { done: deleted, total: selected.length })} ${messageOf(firstError)}`
           : messageOf(firstError);
     }
     // 回到開始搜尋的資料夾
     refreshStorage();
     this.backToFolder();
-    if (trashed.length > 0) {
+    if (!place.trash && deleted > 0) {
+      showToast(deletedMessage(first, deleted));
+    } else if (trashed.length > 0) {
       const message =
         trashed.length === 1
           ? t("\"{name}\" moved to trash", { name: first.name })
@@ -1837,6 +1866,26 @@ class SearchView implements View {
       });
     }
   }
+}
+
+/** 沒有垃圾桶的硬碟：刪除前確認。確認時回傳 true */
+function confirmPermanentDelete(items: readonly FileItem[]): Promise<boolean> {
+  const [first] = items;
+  return confirmDialog({
+    title:
+      items.length === 1 && first !== undefined
+        ? t("Delete \"{name}\" permanently?", { name: first.name })
+        : t("Delete {count} items permanently?", { count: items.length }),
+    message: t("This storage is shared with members and has no trash. Deleted items can't be restored."),
+    confirmLabel: t("Delete permanently"),
+    danger: true,
+  });
+}
+
+function deletedMessage(first: FileItem, count: number): string {
+  return count === 1
+    ? t("\"{name}\" deleted permanently", { name: first.name })
+    : t("{count} items deleted permanently", { count });
 }
 
 // ==================== 上傳資料夾 ====================

@@ -120,9 +120,8 @@ async fn set_for_volume(
             SetMountsError::VolumeNotFound => {
                 AppError::NotFound("Storage not found".to_string())
             }
-            SetMountsError::HasPeople => AppError::Conflict(
-                "Someone's own files are on this storage. Move them to another storage first"
-                    .to_string(),
+            SetMountsError::NotShared => AppError::Conflict(
+                "Set this storage to Share with members first".to_string(),
             ),
             SetMountsError::NotAMember => AppError::BadRequest(
                 "A storage can only be shared with members. Administrators can already see every storage"
@@ -147,15 +146,20 @@ mod tests {
 
     /// 管理員 alice 新增一個位置（裡面已經有檔案），回傳位置的編號。
     /// 目前登入的 carol 是一般使用者
+    /// 用途是分享給成員的位置，裡面已經有檔案
     async fn disk_with_files(t: &TestApp, disk: &std::path::Path) -> i64 {
         std::fs::create_dir(disk.join("iso")).unwrap();
         std::fs::write(disk.join("iso/debian.iso"), b"debian").unwrap();
         crate::storage::mark_volume(disk).unwrap();
         crate::storage::init_dirs(disk).unwrap();
-        crate::db::storage::add_volume(&t.pool, "iso", &disk.display().to_string())
+        let id = crate::db::storage::add_volume(&t.pool, "iso", &disk.display().to_string())
             .await
             .unwrap()
-            .id
+            .id;
+        crate::db::storage::set_shared(&t.pool, id, true)
+            .await
+            .unwrap();
+        id
     }
 
     async fn grant(t: &TestApp, volume: i64, writable: bool) {
@@ -308,29 +312,32 @@ mod tests {
             b"hello"
         );
 
-        // 刪除的項目進入那顆硬碟共用的垃圾桶，可以還原
+        // 分享的位置沒有垃圾桶：畫面先確認，刪除就是永久刪除
+        let (_, listing) = t
+            .json(
+                Method::GET,
+                &format!("/api/files?path=iso&space={volume}"),
+                None,
+            )
+            .await;
+        assert_eq!(listing["trash"], false);
         let (status, body) = t
             .json(
                 Method::DELETE,
-                &format!("/api/files?path=iso/a.txt&space={volume}"),
+                &format!("/api/files?path=iso&space={volume}"),
                 None,
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["trash_id"], Value::Null);
+        assert!(!disk.path().join("iso").exists());
         let (_, trash) = t
             .json(Method::GET, &format!("/api/trash?space={volume}"), None)
             .await;
-        assert_eq!(trash[0]["name"], "a.txt");
-        let id = trash[0]["id"].as_i64().unwrap();
-        let (status, _) = t
-            .json(
-                Method::POST,
-                &format!("/api/trash/{id}/restore?space={volume}"),
-                None,
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(disk.path().join("iso/a.txt").exists());
+        assert_eq!(trash, json!([]));
+        let in_trash = std::fs::read_dir(crate::storage::trash_dir(disk.path()))
+            .map_or(0, |items| items.count());
+        assert_eq!(in_trash, 0);
     }
 
     #[sqlx::test]
@@ -384,7 +391,7 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        // 掛載的位置不能放任何人的 My files
+        // 分享的位置不能放任何人的 My files
         let (status, body) = t
             .json(
                 Method::PUT,
@@ -393,5 +400,90 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    /// 分享的位置上不會有人的 My files；萬一硬碟上還留著 users（例如手動放回去），
+    /// 掛載的人用任何方式都碰不到（Space::abs 這道防線）
+    #[sqlx::test]
+    async fn a_mount_cannot_reach_peoples_own_files(pool: SqlitePool) {
+        let t = TestApp::new(pool, MIB).await;
+        let disk = tempfile::tempdir().unwrap();
+        let volume = disk_with_files(&t, disk.path()).await;
+        std::fs::create_dir_all(disk.path().join("users/jerry/私人")).unwrap();
+        std::fs::write(disk.path().join("users/jerry/私人/日記.txt"), b"secret").unwrap();
+        std::fs::write(disk.path().join("users/jerry/photo.png"), b"png").unwrap();
+        grant(&t, volume, true).await;
+
+        let get = |uri: String| {
+            let t = &t;
+            async move {
+                t.send(
+                    request(Method::GET, &uri, Some(&t.cookie))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .0
+            }
+        };
+        let not_found = StatusCode::NOT_FOUND;
+        for uri in [
+            format!("/api/files?path=users&space={volume}"),
+            format!("/api/files?path=users/jerry&space={volume}"),
+            format!("/api/files/content?path=users/jerry/私人/日記.txt&space={volume}"),
+            format!("/api/archive?names=users&space={volume}"),
+            format!("/api/archive?path=users&names=jerry&space={volume}"),
+            format!(
+                "/api/files/thumbnail?path=users/jerry/photo.png&size=small&v=1&space={volume}"
+            ),
+            format!("/api/search?path=users&q=日記&space={volume}"),
+        ] {
+            assert_eq!(get(uri.clone()).await, not_found, "{uri}");
+        }
+
+        // 從最上層搜尋：找不到 users 裡面的檔案
+        let (status, body) = t
+            .json(
+                Method::GET,
+                &format!("/api/search?q=日記&space={volume}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.to_string().contains("日記"), "{body}");
+
+        // 複製到自己的 My files、分享連結：都拒絕
+        let (status, _) = t
+            .json(
+                Method::POST,
+                "/api/transfers",
+                Some(
+                    json!({"kind": "copy", "from_space": volume.to_string(), "from_path": "users",
+                            "names": ["jerry"], "to_space": "me"}),
+                ),
+            )
+            .await;
+        assert_eq!(status, not_found);
+        let (status, _) = t
+            .json(
+                Method::POST,
+                &format!("/api/shares?space={volume}"),
+                Some(json!({"path": "users/jerry"})),
+            )
+            .await;
+        assert_ne!(status, StatusCode::CREATED);
+        // 改名、刪除也碰不到
+        let (status, _) = t
+            .json(
+                Method::DELETE,
+                &format!("/api/files?path=users/jerry/photo.png&space={volume}"),
+                None,
+            )
+            .await;
+        assert_ne!(status, StatusCode::OK);
+        assert!(disk.path().join("users/jerry/photo.png").exists());
+
+        // 他自己照常使用 My files
+        assert!(disk.path().join("users/jerry/私人/日記.txt").exists());
     }
 }

@@ -106,7 +106,7 @@ async fn restore(
 
     let source = storage::trash_path(&space.root, id);
     let root = space.root.clone();
-    let abs_parent = space.abs(&parent);
+    let abs_parent = space.abs(&parent)?;
     let placed = blocking(move || {
         if std::fs::symlink_metadata(&source).is_err() {
             return Err(std::io::Error::new(

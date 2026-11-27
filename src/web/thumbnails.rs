@@ -35,7 +35,7 @@ async fn thumbnail(
     InSpace { space, .. }: InSpace,
     Query(query): Query<ThumbnailQuery>,
 ) -> Result<Response, AppError> {
-    let rel = space.abs(&parse_path(&query.path)?);
+    let rel = space.abs(&parse_path(&query.path)?)?;
     let size = match query.size.as_deref() {
         None => Size::Small,
         Some(text) => Size::parse(text)

@@ -53,6 +53,8 @@ export interface ApiItem {
 export interface Listing {
   /** 這個資料夾不能修改時的原因；可以修改時是 null */
   readonly read_only: string | null;
+  /** false：分享給成員的硬碟沒有垃圾桶，刪除就是永久刪除 */
+  readonly trash: boolean;
   readonly items: readonly ApiItem[];
 }
 
@@ -105,6 +107,8 @@ export interface StorageVolume {
   readonly users: number;
   /** 掛載給了幾個人 */
   readonly mounted: number;
+  /** 用途：false 存放成員的個人檔案；true 分享給成員 */
+  readonly shared: boolean;
 }
 
 /** 掛載給自己的儲存位置。對應 Rust 端 web/mounts.rs 的 MountItem */

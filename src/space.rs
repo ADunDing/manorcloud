@@ -10,8 +10,8 @@
 //!
 //! 硬碟的最上層（管理員看到的樣子）有一個 `users` 資料夾，裡面是每位使用者的 My files：
 //! 管理員可以開啟與下載，但不能修改（他自己在那裡的資料夾除外）。
-//! 掛載的位置上不會有任何人的 My files（db::mounts 的不變條件），
-//! 掛載的人也看不到 `users` 資料夾（多一道防線）。
+//! 掛載的位置上也可能放著某些人的 My files：掛載的人看不到 `users` 資料夾（is_ignored），
+//! 也碰不到裡面的任何路徑（abs）。
 
 use std::path::{Path, PathBuf};
 
@@ -71,6 +71,8 @@ pub struct Space {
     pub own_folder: Option<String>,
     /// 掛載給一般使用者的位置：`users` 資料夾不顯示，檔案不算進配額
     pub mount: bool,
+    /// 刪除的項目放進垃圾桶。分享給成員的位置沒有垃圾桶：刪除就是永久刪除
+    pub keeps_trash: bool,
 }
 
 #[derive(Debug)]
@@ -96,10 +98,21 @@ pub const USERS_READ_ONLY: &str =
 /// 唯讀的掛載不能修改的原因
 pub const MOUNT_READ_ONLY: &str = "You can open and download files here, but not change them";
 
+/// 掛載的人碰不到的路徑：硬碟最上層的 `users`，裡面是其他人的 My files。
+/// 回應時當成「找不到」，不透露那裡有沒有東西
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutOfReach;
+
 impl Space {
-    /// 空間中的路徑 → 相對於根目錄的路徑
-    pub fn abs(&self, rel: &RelPath) -> RelPath {
-        self.base.join(rel)
+    /// 空間中的路徑 → 相對於根目錄的路徑。
+    ///
+    /// 每一個檔案操作都經過這裡，所以掛載的人不能碰 `users` 的規則只在這裡檢查一次：
+    /// 讀取、下載、打包、縮圖、複製的來源都擋得住（寫入另外由 check_write_in 擋下）
+    pub fn abs(&self, rel: &RelPath) -> Result<RelPath, OutOfReach> {
+        if self.mount && rel.parts().first().is_some_and(|first| first == USERS_DIR) {
+            return Err(OutOfReach);
+        }
+        Ok(self.base.join(rel))
     }
 
     /// 可以在這個資料夾中新增、移除項目嗎？不行時回傳原因
@@ -159,14 +172,14 @@ impl Space {
     }
 }
 
-/// 一顆硬碟的根目錄：資料目錄，或儲存位置（必須有掛載）
+/// 一顆硬碟的根目錄（必須有掛載），以及它是不是分享給成員的位置。資料目錄永遠不是
 pub async fn volume_root(
     pool: &SqlitePool,
     data_dir: &Path,
     volume_id: Option<i64>,
-) -> Result<(PathBuf, String), SpaceError> {
+) -> Result<(PathBuf, bool), SpaceError> {
     let Some(id) = volume_id else {
-        return Ok((data_dir.to_path_buf(), "Default".to_string()));
+        return Ok((data_dir.to_path_buf(), false));
     };
     let volume = storage_db::find_volume(pool, id)
         .await?
@@ -178,7 +191,7 @@ pub async fn volume_root(
             volume.name
         )));
     }
-    Ok((root, volume.name))
+    Ok((root, volume.shared))
 }
 
 /// 找出這個人要使用的空間，並確認他有權限
@@ -212,6 +225,7 @@ pub async fn resolve(
                     disk_root: true,
                     own_folder: Some(location.folder),
                     mount: false,
+                    keeps_trash: true,
                 });
             }
             let dir = storage::user_dir(&root, &location.folder).ok_or(SpaceError::NotFound)?;
@@ -234,13 +248,14 @@ pub async fn resolve(
                 disk_root: false,
                 own_folder: None,
                 mount: false,
+                keeps_trash: true,
             })
         }
         SpaceKey::Volume(volume_id) => {
             if !admin {
                 return mounted(pool, data_dir, user_id, key, volume_id).await;
             }
-            let (root, _) = volume_root(pool, data_dir, volume_id).await?;
+            let (root, shared) = volume_root(pool, data_dir, volume_id).await?;
             let own_folder = storage_db::user_location(pool, user_id)
                 .await?
                 .filter(|location| location.volume_id == volume_id)
@@ -257,6 +272,7 @@ pub async fn resolve(
                 disk_root: true,
                 own_folder,
                 mount: false,
+                keeps_trash: !shared,
             })
         }
     }
@@ -277,12 +293,16 @@ async fn mounted(
     let can_write = mounts::access(pool, user_id, id)
         .await?
         .ok_or(SpaceError::AdminOnly)?;
-    let (root, _) = volume_root(pool, data_dir, volume_id).await?;
+    let (root, shared) = volume_root(pool, data_dir, volume_id).await?;
+    // 掛載只存在於分享的位置（db::mounts 設定時檢查）；這裡再確認一次
+    if !shared {
+        return Err(SpaceError::AdminOnly);
+    }
     Ok(Space {
         key,
         root,
         base: RelPath::default(),
-        // 硬碟最上層的垃圾桶：掛載的人與管理員共用，誰刪除的都可以還原
+        // 分享的位置沒有垃圾桶（keeps_trash）；這只是形式上的值
         trash: Place {
             volume_id,
             owner_id: None,
@@ -292,6 +312,7 @@ async fn mounted(
         disk_root: true,
         own_folder: None,
         mount: true,
+        keeps_trash: false,
     })
 }
 
@@ -316,6 +337,7 @@ mod tests {
             disk_root: true,
             own_folder: own.map(str::to_string),
             mount: false,
+            keeps_trash: true,
         }
     }
 

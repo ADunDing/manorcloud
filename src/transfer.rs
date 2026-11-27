@@ -82,7 +82,7 @@ pub async fn plan(
         if t.kind == "move" {
             from.check_modify(&item).map_err(PlanError::Denied)?;
         }
-        if same_disk && to.abs(&to_dir).starts_with(&from.abs(&item)) {
+        if same_disk && to.abs(&to_dir)?.starts_with(&from.abs(&item)?) {
             return Err(PlanError::Invalid(
                 "A folder can't be copied or moved into itself".into(),
             ));
@@ -112,6 +112,12 @@ pub enum PlanError {
     Invalid(String),
     Denied(String),
     Space(space::SpaceError),
+}
+
+impl From<space::OutOfReach> for PlanError {
+    fn from(_: space::OutOfReach) -> Self {
+        PlanError::NotFound
+    }
 }
 
 impl From<space::SpaceError> for PlanError {
@@ -170,7 +176,10 @@ async fn run(pool: &SqlitePool, data_dir: &Path, id: i64) -> Result<(), String> 
 
     let start = usize::try_from(t.done_items).unwrap_or(0);
     for (index, name) in names.iter().enumerate().skip(start) {
-        let rel = plan.from.abs(&plan.from_dir.child(name));
+        let rel = plan
+            .from
+            .abs(&plan.from_dir.child(name))
+            .map_err(|_| "Item not found".to_string())?;
         let root = plan.from.root.clone();
         let source = tokio::task::spawn_blocking(move || tree::resolve(&root, &rel, true))
             .await
@@ -213,7 +222,10 @@ async fn run(pool: &SqlitePool, data_dir: &Path, id: i64) -> Result<(), String> 
         skipped.extend(copy.skipped);
 
         // 2. 放到目的地
-        let dest_rel = plan.to.abs(&plan.to_dir);
+        let dest_rel = plan
+            .to
+            .abs(&plan.to_dir)
+            .map_err(|_| "Item not found".to_string())?;
         let to_root = plan.to.root.clone();
         let staged = staging.join(name);
         let placed_name = name.clone();

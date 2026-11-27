@@ -8,8 +8,6 @@
 
 use sqlx::{FromRow, SqlitePool};
 
-use super::mounts;
-
 /// 一個儲存位置
 #[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct Volume {
@@ -17,17 +15,19 @@ pub struct Volume {
     pub name: String,
     pub path: String,
     pub created_at: i64,
+    /// 用途：false 存放成員的個人檔案；true 分享給成員（見 db::mounts）
+    pub shared: bool,
 }
 
 /// 所有儲存位置，依名稱排序
 pub async fn list_volumes(pool: &SqlitePool) -> Result<Vec<Volume>, sqlx::Error> {
-    sqlx::query_as("SELECT id, name, path, created_at FROM storage_volumes ORDER BY name")
+    sqlx::query_as("SELECT id, name, path, created_at, shared FROM storage_volumes ORDER BY name")
         .fetch_all(pool)
         .await
 }
 
 pub async fn find_volume(pool: &SqlitePool, id: i64) -> Result<Option<Volume>, sqlx::Error> {
-    sqlx::query_as("SELECT id, name, path, created_at FROM storage_volumes WHERE id = ?")
+    sqlx::query_as("SELECT id, name, path, created_at, shared FROM storage_volumes WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -48,7 +48,7 @@ pub async fn add_volume(
 ) -> Result<Volume, AddVolumeError> {
     sqlx::query_as(
         "INSERT INTO storage_volumes (name, path) VALUES (?, ?) \
-         RETURNING id, name, path, created_at",
+         RETURNING id, name, path, created_at, shared",
     )
     .bind(name)
     .bind(path)
@@ -334,8 +334,8 @@ pub enum StartMoveError {
     InProgress,
     /// 目的地已經有同名的資料夾（屬於另一個使用者）
     FolderTaken,
-    /// 目的地掛載給了其他人：不能放任何人的 My files（見 db::mounts）
-    Mounted,
+    /// 目的地的用途是分享給成員：不放任何人的 My files
+    Shared,
     Db(sqlx::Error),
 }
 
@@ -390,11 +390,9 @@ pub async fn start_move(
         tx.commit().await?;
         return Err(StartMoveError::AlreadyThere);
     }
-    if let Some(target) = target
-        && mounts::is_mounted(&mut tx, target).await?
-    {
+    if is_shared(&mut tx, target).await? {
         tx.commit().await?;
-        return Err(StartMoveError::Mounted);
+        return Err(StartMoveError::Shared);
     }
 
     // 目的地的資料夾名稱不能和別人重複（帳號改名時資料夾沒能跟著改名才可能發生）
@@ -451,10 +449,8 @@ pub async fn set_volume(
     target: Option<i64>,
 ) -> Result<(), StartMoveError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    if let Some(target) = target
-        && mounts::is_mounted(&mut tx, target).await?
-    {
-        return Err(StartMoveError::Mounted);
+    if is_shared(&mut tx, target).await? {
+        return Err(StartMoveError::Shared);
     }
     let updated = sqlx::query("UPDATE users SET storage_volume_id = ? WHERE id = ?")
         .bind(target)
@@ -464,6 +460,73 @@ pub async fn set_volume(
         .rows_affected();
     if updated == 0 {
         return Err(StartMoveError::UserNotFound);
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 這個位置的用途是不是分享給成員（交易中使用）。資料目錄永遠不是
+async fn is_shared(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    volume_id: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let Some(id) = volume_id else {
+        return Ok(false);
+    };
+    let shared: Option<bool> =
+        sqlx::query_scalar("SELECT shared FROM storage_volumes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(shared.unwrap_or(false))
+}
+
+#[derive(Debug)]
+pub enum SetSharedError {
+    NotFound,
+    /// 還有人的 My files 在這裡，或正在搬過來、搬出去
+    HasPeople,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for SetSharedError {
+    fn from(e: sqlx::Error) -> Self {
+        SetSharedError::Db(e)
+    }
+}
+
+/// 改變位置的用途。
+///
+/// - 分享給成員：這裡不能有任何人的 My files，也不能有進行中的搬移（搬進來或搬出去）。
+///   呼叫端接著清除硬碟上的 `users` 資料夾（裡面已經沒有任何人的檔案）
+/// - 存放成員的個人檔案：取消所有人的分享（硬碟上的檔案不動）
+pub async fn set_shared(pool: &SqlitePool, id: i64, shared: bool) -> Result<(), SetSharedError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if shared {
+        let has_people: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE storage_volume_id = ?1) \
+                 OR EXISTS (SELECT 1 FROM storage_moves WHERE target_volume_id = ?1)",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_people {
+            return Err(SetSharedError::HasPeople);
+        }
+    } else {
+        sqlx::query("DELETE FROM storage_mounts WHERE volume_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let updated = sqlx::query("UPDATE storage_volumes SET shared = ? WHERE id = ?")
+        .bind(shared)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Err(SetSharedError::NotFound);
     }
     tx.commit().await?;
     Ok(())

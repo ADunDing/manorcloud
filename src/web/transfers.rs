@@ -149,12 +149,12 @@ async fn start(
 
     // 每個項目都存在；目的地資料夾存在；放得下
     let from_root = plan.from.root.clone();
-    let items: Vec<_> = names
+    let items = names
         .iter()
         .map(|name| plan.from.abs(&plan.from_dir.child(name)))
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     let to_root = plan.to.root.clone();
-    let to_dir = plan.to.abs(&plan.to_dir);
+    let to_dir = plan.to.abs(&plan.to_dir)?;
     let total = blocking(move || {
         tree::resolve_dir(&to_root, &to_dir)?;
         let mut total = 0;

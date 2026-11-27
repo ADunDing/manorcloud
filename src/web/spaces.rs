@@ -178,6 +178,8 @@ struct ItemResponse {
 struct ListResponse {
     /// 這個資料夾不能修改時的原因；可以修改時是 null
     read_only: Option<String>,
+    /// false：刪除就是永久刪除（分享給成員的位置沒有垃圾桶），前端刪除前要先確認
+    trash: bool,
     items: Vec<ItemResponse>,
 }
 
@@ -190,7 +192,7 @@ async fn list(
     let dir = parse_path(&query.path)?;
     let hidden = show_hidden(&pool, &user).await?;
     let root = space.root.clone();
-    let abs = space.abs(&dir);
+    let abs = space.abs(&dir)?;
     let entries: Vec<Entry> = blocking(move || tree::list(&root, &abs)).await?;
     let items = entries
         .into_iter()
@@ -206,6 +208,7 @@ async fn list(
         .collect();
     Ok(Json(ListResponse {
         read_only: space.check_write_in(&dir).err(),
+        trash: space.keeps_trash,
         items,
     }))
 }
@@ -252,7 +255,7 @@ async fn search(
     }
     let hidden = show_hidden(&pool, &user).await?;
     let root = space.root.clone();
-    let abs = space.abs(&dir);
+    let abs = space.abs(&dir)?;
     let filter_space = space.clone();
     let filter_dir = dir.clone();
     let (found, more) = blocking(move || {
@@ -294,7 +297,7 @@ async fn download(
     let rel = parse_path(&query.path)?;
     let name = rel.name().ok_or_else(item_not_found)?.to_string();
     let root = space.root.clone();
-    let abs = space.abs(&rel);
+    let abs = space.abs(&rel)?;
     let (file, meta, etag) = blocking(move || {
         let (file, meta) = tree::open_file(&root, &abs)?;
         let etag = tree::etag(&tree::resolve(&root, &abs, true)?, &meta);
@@ -349,13 +352,16 @@ async fn archive(
 
     let hidden = show_hidden(&pool, &user).await?;
     let root = space.root.clone();
-    let abs = space.abs(&dir);
-    let picked = names.clone();
+    // 每個選取的項目各自經過 abs：在最上層選了 users 也會被擋下（見 Space::abs）
+    let picked = names
+        .iter()
+        .map(|name| space.abs(&dir.child(name)))
+        .collect::<Result<Vec<_>, _>>()?;
     let entries = blocking(move || {
         let include = |name: &str| hidden || !tree::is_hidden_name(name);
         let mut all = Vec::new();
-        for name in &picked {
-            all.extend(tree::walk(&root, &abs.child(name), &include)?);
+        for item in &picked {
+            all.extend(tree::walk(&root, item, &include)?);
         }
         Ok(all)
     })
@@ -397,7 +403,7 @@ async fn create_folder(
     space.check_write_in(&parent).map_err(denied)?;
     let name = check_name(&space, &parent, &req.name)?;
     let root = space.root.clone();
-    let abs = space.abs(&parent);
+    let abs = space.abs(&parent)?;
     let created = name.clone();
     blocking(move || tree::create_dir(&root, &abs, &created)).await?;
     Ok((StatusCode::CREATED, Json(NameResponse { name })))
@@ -440,7 +446,7 @@ async fn rename(
     };
     let moved = parent.child(&name);
     let root = space.root.clone();
-    let (abs_from, abs_parent) = (space.abs(&from), space.abs(&parent));
+    let (abs_from, abs_parent) = (space.abs(&from)?, space.abs(&parent)?);
     blocking(move || tree::rename(&root, &abs_from, &abs_parent, &name)).await?;
     Ok(Json(PathResponse {
         path: moved.display(),
@@ -468,12 +474,12 @@ async fn copy(
     let name = from.name().ok_or_else(item_not_found)?.to_string();
     space.check_write_in(&parent).map_err(denied)?;
     let name = check_name(&space, &parent, &name)?;
-    let (root, abs) = (space.root.clone(), space.abs(&from));
+    let (root, abs) = (space.root.clone(), space.abs(&from)?);
     let size = blocking(move || Ok(tree::tree_size(&tree::resolve(&root, &abs, true)?))).await?;
     check_quota(&pool, &data_dir, &user, &space, size).await?;
     let root = space.root.clone();
     let tmp = space.tmp_dir();
-    let (abs_from, abs_parent) = (space.abs(&from), space.abs(&parent));
+    let (abs_from, abs_parent) = (space.abs(&from)?, space.abs(&parent)?);
     let copied = blocking(move || {
         let source = tree::resolve(&root, &abs_from, true)?;
         let target = tree::resolve_dir(&root, &abs_parent)?;
@@ -492,11 +498,11 @@ async fn copy(
 
 #[derive(Serialize)]
 struct DeleteResponse {
-    /// 垃圾桶中的編號（還原用）
-    trash_id: i64,
+    /// 垃圾桶中的編號（還原用）。分享給成員的位置沒有垃圾桶：已經永久刪除，是 null
+    trash_id: Option<i64>,
 }
 
-/// DELETE /api/files?path=：放進垃圾桶
+/// DELETE /api/files?path=：放進垃圾桶；分享給成員的位置直接永久刪除（前端先確認過）
 async fn remove(
     InSpace { space, .. }: InSpace,
     State(pool): State<SqlitePool>,
@@ -504,8 +510,16 @@ async fn remove(
 ) -> Result<Json<DeleteResponse>, AppError> {
     let rel = parse_path(&query.path)?;
     space.check_modify(&rel).map_err(denied)?;
+    if !space.keeps_trash {
+        let root = space.root.clone();
+        let abs = space.abs(&rel)?;
+        blocking(move || tree::remove_path(&tree::resolve(&root, &abs, true)?)).await?;
+        return Ok(Json(DeleteResponse { trash_id: None }));
+    }
     let trash_id = move_to_trash(&pool, &space, &rel).await?;
-    Ok(Json(DeleteResponse { trash_id }))
+    Ok(Json(DeleteResponse {
+        trash_id: Some(trash_id),
+    }))
 }
 
 /// 把一個項目放進垃圾桶，回傳垃圾桶中的編號。呼叫前先用 `check_modify` 確認可以刪除
@@ -515,7 +529,7 @@ pub(super) async fn move_to_trash(
     rel: &RelPath,
 ) -> Result<i64, AppError> {
     let root = space.root.clone();
-    let abs = space.abs(rel);
+    let abs = space.abs(rel)?;
     let path = blocking(move || tree::resolve(&root, &abs, true)).await?;
 
     // 先寫紀錄，再搬進垃圾桶：中途失敗只會留下一筆找不到檔案的紀錄
@@ -579,7 +593,7 @@ async fn upload(
         .unwrap_or(0);
     check_quota(&pool, &data_dir, &user, &space, declared).await?;
     let root = space.root.clone();
-    let abs = space.abs(&dir);
+    let abs = space.abs(&dir)?;
     let target_dir: PathBuf = blocking(move || tree::resolve_dir(&root, &abs)).await?;
 
     let mut field = multipart
