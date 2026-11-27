@@ -48,7 +48,7 @@ const MAX_NAME_BYTES: usize = 0xFFFF;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ArchiveError {
-    /// 路徑太長，放不進 ZIP 的名稱欄位
+    /// 路徑太長，放不進名稱欄位
     NameTooLong,
     /// 開始新項目時，上一個檔案還沒結束（呼叫順序的 bug）
     EntryInProgress,
@@ -61,9 +61,11 @@ pub enum ArchiveError {
 impl fmt::Display for ArchiveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ArchiveError::NameTooLong => f.write_str("path too long for a zip entry"),
-            ArchiveError::EntryInProgress => f.write_str("the previous zip entry is not finished"),
-            ArchiveError::NoEntry => f.write_str("no zip entry in progress"),
+            ArchiveError::NameTooLong => f.write_str("path too long for an archive entry"),
+            ArchiveError::EntryInProgress => {
+                f.write_str("the previous archive entry is not finished")
+            }
+            ArchiveError::NoEntry => f.write_str("no archive entry in progress"),
             ArchiveError::SizeMismatch { expected, actual } => {
                 write!(
                     f,

@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use super::{
-    download::{ArchiveItem, MAX_ARCHIVE_ITEMS, archive_response, file_response},
+    download::{ArchiveFormat, ArchiveItem, MAX_ARCHIVE_ITEMS, archive_response, file_response},
     error::AppError,
     extract::{CurrentUser, InSpace},
     state::{AppState, UploadLimit, WebDavSwitch},
@@ -318,10 +318,13 @@ struct ArchiveQuery {
     path: String,
     /// 選取的項目名稱，以 `/` 分隔（名稱中不會有 `/`）
     names: String,
+    #[serde(default)]
+    format: ArchiveFormat,
 }
 
-/// GET /api/archive?path=相片&names=a.jpg/2026：把選取的項目（連同資料夾底下的所有內容）
-/// 邊讀邊打包成一個 .zip。用 GET：瀏覽器直接把它當成一般的檔案下載
+/// GET /api/archive?path=相片&names=a.jpg/2026&format=tar.gz：把選取的項目（連同資料夾底下的所有內容）
+/// 邊讀邊打包成一個壓縮檔。`format` 是 zip（預設）、tar、tar.gz 或 tar.zst。
+/// 用 GET：瀏覽器直接把它當成一般的檔案下載
 async fn archive(
     InSpace { user, space }: InSpace,
     State(pool): State<SqlitePool>,
@@ -365,7 +368,7 @@ async fn archive(
             source: (!item.is_dir).then_some(item.source),
         })
         .collect();
-    archive_response(items, &names)
+    archive_response(items, &names, query.format)
 }
 
 // ==================== 修改 ====================
@@ -796,6 +799,61 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(&body[..4], b"PK\x03\x04");
+    }
+
+    #[sqlx::test]
+    async fn archive_formats(pool: SqlitePool) {
+        use std::io::Read;
+
+        let t = TestApp::new(pool, MIB).await;
+        let home = t.home("carol");
+        std::fs::create_dir(home.join("docs")).unwrap();
+        std::fs::write(home.join("docs/a.txt"), b"abc").unwrap();
+
+        let download = |format: &str| {
+            request(
+                Method::GET,
+                &format!("/api/archive?names=docs&format={format}"),
+                Some(&t.cookie),
+            )
+            .body(Body::empty())
+            .unwrap()
+        };
+        // 解壓縮後都是同一個 tar：資料夾 docs/，然後 docs/a.txt 與它的內容
+        let check_tar = |tar: &[u8]| {
+            assert_eq!(&tar[..5], b"docs/");
+            assert_eq!(&tar[512..522], b"docs/a.txt");
+            assert_eq!(&tar[1024..1027], b"abc");
+        };
+
+        let (status, headers, body) = t.send(download("tar")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/x-tar");
+        assert!(
+            headers[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("filename=\"docs.tar\"")
+        );
+        check_tar(&body);
+
+        let (status, headers, body) = t.send(download("tar.gz")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/gzip");
+        let mut tar = Vec::new();
+        flate2::read::GzDecoder::new(&body[..])
+            .read_to_end(&mut tar)
+            .unwrap();
+        check_tar(&tar);
+
+        let (status, headers, body) = t.send(download("tar.zst")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/zstd");
+        check_tar(&zstd::decode_all(&body[..]).unwrap());
+
+        // 不支援的格式：400，而不是默默改用 zip
+        let (status, _, _) = t.send(download("rar")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[sqlx::test]

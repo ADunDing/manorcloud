@@ -1,12 +1,14 @@
-//! 檔案下載，支援 HTTP Range（斷點續傳、影片拖曳），以及把多個項目打包成 .zip 的串流下載。
+//! 檔案下載，支援 HTTP Range（斷點續傳、影片拖曳），以及把多個項目打包成
+//! .zip、.tar、.tar.gz 或 .tar.zst 的串流下載。
 //!
 //! 安全重點：上傳的內容完全不可信。絕不能讓瀏覽器在本站的 origin 上「顯示」它，
 //! 否則一個上傳的 HTML 檔裡的腳本，就能以受害者的身分呼叫所有 API
 //! （Cookie 會自動帶上，而且同源請求能通過 Origin 檢查）。
 //! 防線見 `base_response` 中各 header 的說明；200、206、416 三種回應全部由它建構。
-//! 打包下載的回應（application/zip）使用相同的防線。
+//! 打包下載的回應使用相同的防線。
 
-use std::io::{self, SeekFrom};
+use std::io::{self, Read, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use axum::{
@@ -15,6 +17,7 @@ use axum::{
     response::Response,
 };
 use futures_util::stream;
+use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
@@ -25,6 +28,8 @@ use super::{
     range::{self, RangeRequest},
 };
 use crate::storage::archive::ZipWriter;
+use crate::storage::compress::Compressor;
+use crate::storage::tar::TarWriter;
 
 /// 每次從磁碟讀取的大小。預設的 4 KiB 會讓大檔案產生大量系統呼叫；
 /// 64 KiB 仍是固定的一小塊，記憶體用量不隨檔案大小成長。
@@ -136,9 +141,60 @@ where
 
 // ==================== 打包下載 ====================
 
+/// 打包下載的格式。查詢參數 `format` 的值就是副檔名；沒有給的時候是 zip
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub(super) enum ArchiveFormat {
+    /// 只打包不壓縮：每個系統都能直接開啟
+    #[default]
+    #[serde(rename = "zip")]
+    Zip,
+    /// 只打包不壓縮：Linux、NAS 常用
+    #[serde(rename = "tar")]
+    Tar,
+    #[serde(rename = "tar.gz")]
+    TarGz,
+    #[serde(rename = "tar.zst")]
+    TarZst,
+}
+
+impl ArchiveFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            ArchiveFormat::Zip => "zip",
+            ArchiveFormat::Tar => "tar",
+            ArchiveFormat::TarGz => "tar.gz",
+            ArchiveFormat::TarZst => "tar.zst",
+        }
+    }
+
+    fn content_type(self) -> &'static str {
+        match self {
+            ArchiveFormat::Zip => "application/zip",
+            ArchiveFormat::Tar => "application/x-tar",
+            ArchiveFormat::TarGz => "application/gzip",
+            ArchiveFormat::TarZst => "application/zstd",
+        }
+    }
+
+    fn packer(self) -> Packer {
+        match self {
+            ArchiveFormat::Zip => Packer::Zip(ZipWriter::new()),
+            _ => Packer::Tar(TarWriter::new()),
+        }
+    }
+
+    fn compressor(self) -> io::Result<Compressor> {
+        Ok(match self {
+            ArchiveFormat::Zip | ArchiveFormat::Tar => Compressor::None,
+            ArchiveFormat::TarGz => Compressor::gzip(),
+            ArchiveFormat::TarZst => Compressor::zstd()?,
+        })
+    }
+}
+
 /// 打包下載中的一個項目
 pub(super) struct ArchiveItem {
-    /// zip 中的路徑
+    /// 壓縮檔中的路徑
     pub path: String,
     /// 修改時間（Unix 秒）
     pub mtime: i64,
@@ -146,24 +202,27 @@ pub(super) struct ArchiveItem {
     pub source: Option<PathBuf>,
 }
 
-/// 把項目邊讀邊打包成 .zip 送出。
+/// 把項目邊讀邊打包（需要時再壓縮）送出。
 /// `roots`：選取的項目的名稱，決定下載的檔名
 pub(super) fn archive_response(
     items: Vec<ArchiveItem>,
     roots: &[String],
+    format: ArchiveFormat,
 ) -> Result<Response, AppError> {
     let (sender, receiver) = mpsc::channel(ARCHIVE_QUEUE);
-    tokio::spawn(write_archive(items, sender));
+    // 讀檔與壓縮都在 blocking 執行緒：壓縮很吃 CPU，放在 async 的執行緒上，
+    // 會讓同一個執行緒上其他使用者的請求都等著
+    tokio::task::spawn_blocking(move || write_archive(&items, format, &sender));
     let body = Body::from_stream(stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
     }));
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::CONTENT_TYPE, format.content_type())
         .header(
             header::CONTENT_DISPOSITION,
-            content_disposition(&archive_name(roots)),
+            content_disposition(&archive_name(roots, format)),
         )
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
@@ -175,76 +234,150 @@ pub(super) fn archive_response(
         .map_err(AppError::internal)
 }
 
-/// 下載的檔名：只選一個項目時用它的名稱，否則是 ManorCloud-日期.zip
-fn archive_name(roots: &[String]) -> String {
+/// 下載的檔名：只選一個項目時用它的名稱，否則是 ManorCloud-日期
+fn archive_name(roots: &[String], format: ArchiveFormat) -> String {
+    let ext = format.extension();
     match roots {
-        [single] => format!("{single}.zip"),
-        _ => format!("ManorCloud-{}.zip", time::OffsetDateTime::now_utc().date()),
+        [single] => format!("{single}.{ext}"),
+        _ => format!(
+            "ManorCloud-{}.{ext}",
+            time::OffsetDateTime::now_utc().date()
+        ),
     }
 }
 
-/// 在背景依序讀取每個檔案、產生 zip 並送出。
+/// 在 blocking 執行緒依序讀取每個檔案、打包、壓縮並送出。
 ///
 /// 中途失敗時送出一個錯誤：連線以失敗結束，瀏覽器顯示「下載失敗」，
-/// 而不是留下一個看似完成、其實缺了內容的 zip。
+/// 而不是留下一個看似完成、其實缺了內容的壓縮檔。
 /// 使用者取消下載時，接收端被丟棄，送出失敗，這裡就停止讀取磁碟。
-async fn write_archive(items: Vec<ArchiveItem>, sender: mpsc::Sender<io::Result<Bytes>>) {
-    if let Err(e) = stream_entries(&items, &sender).await
+fn write_archive(
+    items: &[ArchiveItem],
+    format: ArchiveFormat,
+    sender: &mpsc::Sender<io::Result<Bytes>>,
+) {
+    if let Err(e) = stream_entries(items, format, sender)
         && !sender.is_closed()
     {
         eprintln!("archive download failed: {e}");
-        let _ = sender.send(Err(e)).await;
+        let _ = sender.blocking_send(Err(e));
     }
 }
 
-async fn stream_entries(
+fn stream_entries(
     items: &[ArchiveItem],
+    format: ArchiveFormat,
     sender: &mpsc::Sender<io::Result<Bytes>>,
 ) -> io::Result<()> {
-    let mut zip = ZipWriter::new();
+    let mut packer = format.packer();
+    let mut output = Output {
+        compressor: format.compressor()?,
+        sender,
+    };
     let mut buffer = vec![0u8; STREAM_CHUNK_BYTES];
 
     for item in items {
         let Some(source) = &item.source else {
-            let header = zip
-                .directory(&item.path, item.mtime)
-                .map_err(io::Error::other)?;
-            send(sender, header).await?;
+            output.put(&packer.directory(&item.path, item.mtime)?)?;
             continue;
         };
 
         // 不跟隨符號連結：走訪與開檔之間被換成連結，也不會讀到空間以外的檔案
-        let mut file = tokio::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(source)
-            .await?;
-        let size = file.metadata().await?.len();
+            .open(source)?;
+        let size = file.metadata()?.len();
 
-        let header = zip
-            .start_file(&item.path, item.mtime, size)
-            .map_err(io::Error::other)?;
-        send(sender, header).await?;
+        output.put(&packer.start_file(&item.path, item.mtime, size)?)?;
         loop {
-            let read = file.read(&mut buffer).await?;
+            let read = file.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
-            zip.update(&buffer[..read]);
-            send(sender, buffer[..read].to_vec()).await?;
+            packer.update(&buffer[..read]);
+            output.put(&buffer[..read])?;
         }
-        let descriptor = zip.finish_file().map_err(io::Error::other)?;
-        send(sender, descriptor).await?;
+        output.put(&packer.finish_file()?)?;
     }
 
-    let tail = zip.finish().map_err(io::Error::other)?;
-    send(sender, tail).await
+    output.put(&packer.finish()?)?;
+    output.finish()
 }
 
-async fn send(sender: &mpsc::Sender<io::Result<Bytes>>, bytes: Vec<u8>) -> io::Result<()> {
+/// 打包器：zip 或 tar，用法相同
+enum Packer {
+    Zip(ZipWriter),
+    Tar(TarWriter),
+}
+
+impl Packer {
+    fn directory(&mut self, path: &str, mtime: i64) -> io::Result<Vec<u8>> {
+        match self {
+            Packer::Zip(zip) => zip.directory(path, mtime),
+            Packer::Tar(tar) => tar.directory(path, mtime),
+        }
+        .map_err(io::Error::other)
+    }
+
+    fn start_file(&mut self, path: &str, mtime: i64, size: u64) -> io::Result<Vec<u8>> {
+        match self {
+            Packer::Zip(zip) => zip.start_file(path, mtime, size),
+            Packer::Tar(tar) => tar.start_file(path, mtime, size),
+        }
+        .map_err(io::Error::other)
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            Packer::Zip(zip) => zip.update(data),
+            Packer::Tar(tar) => tar.update(data),
+        }
+    }
+
+    fn finish_file(&mut self) -> io::Result<Vec<u8>> {
+        match self {
+            Packer::Zip(zip) => zip.finish_file(),
+            Packer::Tar(tar) => tar.finish_file(),
+        }
+        .map_err(io::Error::other)
+    }
+
+    fn finish(self) -> io::Result<Vec<u8>> {
+        match self {
+            Packer::Zip(zip) => zip.finish(),
+            Packer::Tar(tar) => tar.finish(),
+        }
+        .map_err(io::Error::other)
+    }
+}
+
+/// 打包後的位元組經過壓縮，再送往網路
+struct Output<'a> {
+    compressor: Compressor,
+    sender: &'a mpsc::Sender<io::Result<Bytes>>,
+}
+
+impl Output<'_> {
+    fn put(&mut self, data: &[u8]) -> io::Result<()> {
+        let bytes = self.compressor.write(data)?;
+        send(self.sender, bytes)
+    }
+
+    fn finish(self) -> io::Result<()> {
+        let bytes = self.compressor.finish()?;
+        send(self.sender, bytes)
+    }
+}
+
+/// 送出一段資料。壓縮器還在累積時可能沒有輸出：空的就不送。
+/// 網路比磁碟慢時，佇列滿了在這裡等待（這是 blocking 執行緒，可以直接等）
+fn send(sender: &mpsc::Sender<io::Result<Bytes>>, bytes: Vec<u8>) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
     sender
-        .send(Ok(Bytes::from(bytes)))
-        .await
+        .blocking_send(Ok(Bytes::from(bytes)))
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the download was cancelled"))
 }
 

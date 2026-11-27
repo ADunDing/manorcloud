@@ -1,4 +1,4 @@
-// 對話框：確認、輸入名稱（New folder）、選擇下載方式。
+// 對話框：確認、輸入名稱（New folder）、選擇下載方式與格式。
 // 整個程式都用這裡的對話框，不用瀏覽器內建的 confirm：外觀一致，也跟著深色模式。
 //
 // 用瀏覽器內建的 <dialog>：showModal() 讓背景不能操作，Esc 自動關閉，焦點留在對話框裡。
@@ -213,30 +213,73 @@ export function nameDialog(options: NameDialogOptions): Promise<boolean> {
   });
 }
 
-type DownloadChoice = "zip" | "separate";
+/** 打包下載的格式：值就是副檔名，也是 /api/archive 的 format 參數 */
+export type ArchiveFormat = "zip" | "tar" | "tar.gz" | "tar.zst";
+
+export type DownloadChoice = ArchiveFormat | "separate";
 
 /**
- * 選了多個項目時，選擇下載成一個 .zip 還是分開下載。
- * 選了資料夾時只能用 .zip：瀏覽器無法直接下載一整個資料夾。
+ * 「個別下載」這個選項：
+ * - hidden：只有一個項目（例如一個資料夾），不顯示
+ * - available：可以選
+ * - folders：選了資料夾，不能選（瀏覽器無法直接下載一整個資料夾）
+ */
+type SeparateOption = "hidden" | "available" | "folders";
+
+const FORMATS: readonly { readonly format: ArchiveFormat; readonly hint: () => string }[] = [
+  { format: "zip", hint: () => t("Opens on any computer. Packed, not compressed") },
+  { format: "tar", hint: () => t("For Linux and NAS. Packed, not compressed") },
+  { format: "tar.gz", hint: () => t("Compressed. Makes documents smaller, but not photos or videos") },
+  { format: "tar.zst", hint: () => t("Compressed like .tar.gz, but faster. Needs a recent system") },
+];
+
+const FORMAT_KEY = "manorcloud.archive-format";
+
+/** 上次選的格式：下次預先選好。沒有記錄或無法使用 localStorage 時是 zip */
+function lastFormat(): ArchiveFormat {
+  try {
+    const saved = localStorage.getItem(FORMAT_KEY);
+    return FORMATS.find((f) => f.format === saved)?.format ?? "zip";
+  } catch {
+    return "zip";
+  }
+}
+
+function saveFormat(format: ArchiveFormat): void {
+  try {
+    localStorage.setItem(FORMAT_KEY, format);
+  } catch {
+    // 無法儲存只代表下次預先選的是 zip
+  }
+}
+
+/**
+ * 選擇下載方式：打包成哪一種格式，或（選了多個檔案時）個別下載。
+ * Cancel、Esc 回傳 undefined
  */
 export function chooseDownload(
-  count: number,
-  hasFolders: boolean,
+  title: string,
+  separate: SeparateOption,
 ): Promise<DownloadChoice | undefined> {
   return new Promise((resolve) => {
     let result: DownloadChoice | undefined;
+    const selected = lastFormat();
 
-    const zip = h("input", {
-      type: "radio",
-      name: "download-mode",
-      value: "zip",
-      checked: true,
-    });
-    const separate = h("input", {
+    const options = FORMATS.map(({ format, hint }) => ({
+      format,
+      hint,
+      input: h("input", {
+        type: "radio",
+        name: "download-mode",
+        value: format,
+        checked: format === selected,
+      }),
+    }));
+    const separateInput = h("input", {
       type: "radio",
       name: "download-mode",
       value: "separate",
-      disabled: hasFolders,
+      disabled: separate === "folders",
     });
     const cancel = h(
       "button",
@@ -248,7 +291,6 @@ export function chooseDownload(
       { type: "submit", class: "primary" },
       t("Download"),
     );
-    const title = t("Download {count} items", { count });
 
     const form = h(
       "form",
@@ -258,18 +300,16 @@ export function chooseDownload(
         "fieldset",
         { class: "choices" },
         h("legend", { class: "visually-hidden" }, t("How to download")),
-        choice(
-          zip,
-          t("As one .zip file"),
-          t("The files are packed together, not compressed"),
-        ),
-        choice(
-          separate,
-          t("As separate files"),
-          hasFolders
-            ? t("Not available when folders are selected")
-            : t("Your browser may ask you to allow several downloads"),
-        ),
+        options.map(({ format, hint, input }) => choice(input, `.${format}`, hint())),
+        separate === "hidden"
+          ? null
+          : choice(
+              separateInput,
+              t("As separate files"),
+              separate === "folders"
+                ? t("Not available when folders are selected")
+                : t("Your browser may ask you to allow several downloads"),
+            ),
       ),
       h("div", { class: "dialog-actions" }, cancel, confirm),
     );
@@ -278,7 +318,11 @@ export function chooseDownload(
     cancel.addEventListener("click", () => dialog.close());
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      result = separate.checked ? "separate" : "zip";
+      const picked = options.find((option) => option.input.checked)?.format;
+      if (picked !== undefined) {
+        saveFormat(picked);
+      }
+      result = picked ?? "separate";
       dialog.close();
     });
     dialog.addEventListener("close", () => {
@@ -290,6 +334,12 @@ export function chooseDownload(
     dialog.showModal();
     confirm.focus();
   });
+}
+
+/** 只選格式（沒有「個別下載」）：下載一個資料夾、分享的資料夾時使用 */
+export async function chooseArchiveFormat(title: string): Promise<ArchiveFormat | undefined> {
+  const choice = await chooseDownload(title, "hidden");
+  return choice === "separate" ? undefined : choice;
 }
 
 function choice(

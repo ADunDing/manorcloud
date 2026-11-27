@@ -9,7 +9,7 @@
 import { t, tNodes } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { h } from "./dom.js";
-import { chooseDownload, nameDialog } from "./dialogs.js";
+import { chooseArchiveFormat, chooseDownload, nameDialog, type ArchiveFormat } from "./dialogs.js";
 import {
   DRAG_TYPE,
   FileList,
@@ -741,8 +741,8 @@ class FolderView {
   /**
    * 下載選取的項目：
    * - 一個檔案：直接下載
-   * - 一個資料夾：下載成 .zip
-   * - 多個項目：讓使用者選擇一個 .zip 或分開下載（有資料夾時只能 .zip）
+   * - 一個資料夾：選擇格式後打包下載
+   * - 多個項目：選擇打包成哪一種格式，或分開下載（有資料夾時只能打包）
    */
   private async downloadSelected(): Promise<void> {
     const selected = this.list.selectedItems();
@@ -753,21 +753,24 @@ class FolderView {
     if (selected.length === 1) {
       if (first.kind === "file") {
         download(this.itemPath(first), first.name);
-      } else {
-        downloadArchive(this.path, selected);
+        return;
+      }
+      const format = await chooseArchiveFormat(t("Download {name}", { name: first.name }));
+      if (format !== undefined) {
+        downloadArchive(this.path, selected, format);
       }
       return;
     }
     const choice = await chooseDownload(
-      selected.length,
-      selected.some((item) => item.kind === "folder"),
+      t("Download {count} items", { count: selected.length }),
+      selected.some((item) => item.kind === "folder") ? "folders" : "available",
     );
-    if (choice === "zip") {
-      downloadArchive(this.path, selected);
-    } else if (choice === "separate") {
+    if (choice === "separate") {
       selected.forEach((item, index) => {
         window.setTimeout(() => download(this.itemPath(item), item.name), index * 400);
       });
+    } else if (choice !== undefined) {
+      downloadArchive(this.path, selected, choice);
     }
   }
 
@@ -1724,8 +1727,8 @@ class SearchView implements View {
   }
 
   /**
-   * 下載：都在同一個資料夾時與資料夾畫面相同（可以選擇一個 .zip 或分開下載）；
-   * 分散在不同資料夾時，檔案一個一個下載，資料夾各自打包成 .zip
+   * 下載：都在同一個資料夾時與資料夾畫面相同（可以選擇打包的格式或分開下載）；
+   * 分散在不同資料夾時，檔案一個一個下載，資料夾各自打包（格式先問一次）
    */
   private async downloadSelected(): Promise<void> {
     const selected = this.list?.selectedItems() ?? [];
@@ -1737,23 +1740,36 @@ class SearchView implements View {
     const sameFolder = selected.every((item) => joinPath(this.parentOf(item)) === joinPath(parent));
     if (selected.length > 1 && sameFolder) {
       const choice = await chooseDownload(
-        selected.length,
-        selected.some((item) => item.kind === "folder"),
+        t("Download {count} items", { count: selected.length }),
+        selected.some((item) => item.kind === "folder") ? "folders" : "available",
       );
-      if (choice === "zip") {
-        downloadArchive(parent, selected);
+      if (choice === undefined) {
         return;
       }
       if (choice !== "separate") {
+        downloadArchive(parent, selected, choice);
         return;
       }
+    }
+    // 分開下載：資料夾要打包，先問一次格式（同一個資料夾中選了資料夾時，上面已經打包了）
+    let format: ArchiveFormat = "zip";
+    if (selected.some((item) => item.kind === "folder")) {
+      const title =
+        selected.length === 1
+          ? t("Download {name}", { name: first.name })
+          : t("Download {count} items", { count: selected.length });
+      const picked = await chooseArchiveFormat(title);
+      if (picked === undefined) {
+        return;
+      }
+      format = picked;
     }
     selected.forEach((item, index) => {
       window.setTimeout(() => {
         if (item.kind === "file") {
           download(this.itemPath(item), item.name);
         } else {
-          downloadArchive(this.parentOf(item), [item]);
+          downloadArchive(this.parentOf(item), [item], format);
         }
       }, index * 400);
     });
@@ -1908,12 +1924,17 @@ function download(path: string, name: string): void {
   startDownload(apiUrl("/api/files/content", place.space, { path }), name);
 }
 
-/** 打包成一個 .zip 下載。伺服器一邊打包一邊傳送，不會先在磁碟上產生壓縮檔 */
-function downloadArchive(folder: readonly string[], items: readonly FileItem[]): void {
+/** 打包成一個壓縮檔下載。伺服器一邊打包一邊傳送，不會先在磁碟上產生壓縮檔 */
+function downloadArchive(
+  folder: readonly string[],
+  items: readonly FileItem[],
+  format: ArchiveFormat,
+): void {
   startDownload(
     apiUrl("/api/archive", place.space, {
       path: joinPath(folder),
       names: items.map((item) => item.name).join("/"),
+      format,
     }),
     "",
   );

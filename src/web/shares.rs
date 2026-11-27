@@ -10,7 +10,7 @@
 //!   POST   /api/public/shares/{token}/unlock          輸入密碼：{password}
 //!   GET    /api/public/shares/{token}/items?path=     資料夾的內容
 //!   GET    /api/public/shares/{token}/file?path=      下載一個檔案（支援 Range）
-//!   GET    /api/public/shares/{token}/archive?path=   把資料夾打包成 .zip 下載
+//!   GET    /api/public/shares/{token}/archive?path=&format=   把資料夾打包下載
 //!
 //! 安全：
 //! - 連結中的代碼是 128 位元的亂數，猜不到
@@ -40,7 +40,7 @@ use sqlx::SqlitePool;
 
 use super::{
     auth::{LoginAttempt, LoginError, hash_password, verify_password},
-    download::{ArchiveItem, archive_response, file_response},
+    download::{ArchiveFormat, ArchiveItem, archive_response, file_response},
     error::AppError,
     extract::{ClientIp, CurrentUser, InSpace},
     spaces::{blocking, parse_path},
@@ -492,12 +492,21 @@ async fn file(
     .await
 }
 
-/// GET /api/public/shares/{token}/archive?path=：資料夾（含子資料夾）打包成 .zip
+#[derive(Deserialize)]
+struct ArchiveQuery {
+    #[serde(default)]
+    path: String,
+    /// zip（預設）、tar、tar.gz 或 tar.zst
+    #[serde(default)]
+    format: ArchiveFormat,
+}
+
+/// GET /api/public/shares/{token}/archive?path=&format=：資料夾（含子資料夾）打包下載
 async fn archive(
     State(pool): State<SqlitePool>,
     State(data_dir): State<Arc<Path>>,
     UrlPath(token): UrlPath<String>,
-    Query(query): Query<SubPathQuery>,
+    Query(query): Query<ArchiveQuery>,
     jar: CookieJar,
 ) -> Result<Response, AppError> {
     let (share, space, rel) = open(&pool, &data_dir, &token).await?;
@@ -524,7 +533,7 @@ async fn archive(
             source: (!item.is_dir).then_some(item.source),
         })
         .collect();
-    archive_response(items, &[name])
+    archive_response(items, &[name], query.format)
 }
 
 #[cfg(test)]

@@ -15,7 +15,9 @@
 //! 暫存與垃圾桶都和檔案在同一個檔案系統：放到正式的名稱上、放進垃圾桶都只是改名。
 
 pub mod archive;
+pub mod compress;
 pub mod resumable;
+pub mod tar;
 
 use std::ffi::CString;
 use std::io;

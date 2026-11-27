@@ -7,6 +7,7 @@
 
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { copyText } from "./clipboard.js";
+import { chooseArchiveFormat } from "./dialogs.js";
 import { h } from "./dom.js";
 import { fileIconName, folderIconName, iconUrl } from "./file-types.js";
 import { formatSize, formatTime } from "./format.js";
@@ -512,10 +513,20 @@ export function renderPublicShare(container: HTMLElement, token: string): void {
             ),
           ),
           h(
-            "a",
-            { class: "button secondary", href: `${base}/archive${query({})}`, download: "" },
+            "button",
+            {
+              type: "button",
+              class: "button secondary",
+              onClick: () => {
+                void chooseArchiveFormat(t("Download all")).then((format) => {
+                  if (format !== undefined) {
+                    startDownload(`${base}/archive${query({ format })}`);
+                  }
+                });
+              },
+            },
             icon("download", 16),
-            t("Download all (.zip)"),
+            t("Download all"),
           ),
         ),
         errorBox,
@@ -615,4 +626,12 @@ export function renderPublicShare(container: HTMLElement, token: string): void {
   window.addEventListener("hashchange", () => void show());
   container.replaceChildren(h("p", { class: "muted" }, t("Loading…")));
   void show();
+}
+
+/** 用帶 download 屬性的連結下載：瀏覽器存檔，不會離開這個頁面 */
+function startDownload(href: string): void {
+  const link = h("a", { href, download: "", hidden: true });
+  document.body.append(link);
+  link.click();
+  link.remove();
 }

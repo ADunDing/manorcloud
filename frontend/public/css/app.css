@@ -2223,8 +2223,8 @@ table.files .col-location {
 
 /* ==================== 分享連結 ==================== */
 
-/* 看起來像按鈕的連結（下載） */
-a.button {
+/* 分享頁面的下載：看起來像按鈕的連結，以及有圖示的按鈕 */
+.button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -2235,12 +2235,12 @@ a.button {
     white-space: nowrap;
 }
 
-a.button.primary {
+.button.primary {
     background: var(--accent);
     color: var(--accent-fg);
 }
 
-a.button.secondary {
+.button.secondary {
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--fg);
