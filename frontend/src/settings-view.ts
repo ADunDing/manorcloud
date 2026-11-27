@@ -576,7 +576,6 @@ function showSsoForm(panel: HTMLElement, current: AdminSso): void {
   const adminGroup = h("input", {
     type: "text",
     value: current.admin_group,
-    placeholder: "authentik Admins",
     maxlength: 200,
     spellcheck: "false",
   });

@@ -48,8 +48,8 @@ gh attestation verify manorcloud-linux-aarch64.tar.gz --repo ADunDing/manorcloud
 ```sh
 docker run -d --name manorcloud --restart unless-stopped --stop-timeout 35 \
   -p 3000:3000 \
-  -v manorcloud-data:/var/lib/manorcloud/data \
-  -v manorcloud-database:/var/lib/manorcloud/database \
+  -v manorcloud_data:/var/lib/manorcloud/data \
+  -v manorcloud_db:/var/lib/manorcloud/database \
   ghcr.io/adunding/manorcloud
 docker logs manorcloud
 ```
@@ -66,13 +66,15 @@ services:
       - "3000:3000"
     volumes:
       # Your files
-      - data:/var/lib/manorcloud/data
+      - manorcloud_data:/var/lib/manorcloud/data
       # The database
-      - database:/var/lib/manorcloud/database
+      - manorcloud_db:/var/lib/manorcloud/database
 
 volumes:
-  data:
-  database:
+  manorcloud_db:
+    name: manorcloud_db
+  manorcloud_data:
+    name: manorcloud_data
 ```
 
 ```sh
