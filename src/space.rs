@@ -6,16 +6,19 @@
 //! |------------------|----------------|---------------------------------------------------|
 //! | 沒有、`me`       | 所有人         | 一般使用者：`{他的硬碟}/users/{名稱}`；管理員：他的硬碟的最上層 |
 //! | `default`、`{n}` | 管理員         | 資料目錄、儲存位置 n 的最上層                      |
+//! | `{n}`            | 掛載給他的人   | 儲存位置 n 的最上層（唯讀或可以修改，見 db::mounts） |
 //!
 //! 硬碟的最上層（管理員看到的樣子）有一個 `users` 資料夾，裡面是每位使用者的 My files：
 //! 管理員可以開啟與下載，但不能修改（他自己在那裡的資料夾除外）。
+//! 掛載的位置上不會有任何人的 My files（db::mounts 的不變條件），
+//! 掛載的人也看不到 `users` 資料夾（多一道防線）。
 
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
 use crate::{
-    db::{storage as storage_db, trash::Place},
+    db::{mounts, storage as storage_db, trash::Place},
     storage::{self, USERS_DIR},
     tree::RelPath,
 };
@@ -66,6 +69,8 @@ pub struct Space {
     pub disk_root: bool,
     /// 管理員自己在 `users` 中的資料夾（他可以修改）
     pub own_folder: Option<String>,
+    /// 掛載給一般使用者的位置：`users` 資料夾不顯示，檔案不算進配額
+    pub mount: bool,
 }
 
 #[derive(Debug)]
@@ -87,6 +92,9 @@ impl From<sqlx::Error> for SpaceError {
 /// 不能修改的原因（給使用者看）
 pub const USERS_READ_ONLY: &str =
     "People's own files can be opened and downloaded here, but not changed";
+
+/// 唯讀的掛載不能修改的原因
+pub const MOUNT_READ_ONLY: &str = "You can open and download files here, but not change them";
 
 impl Space {
     /// 空間中的路徑 → 相對於根目錄的路徑
@@ -135,9 +143,11 @@ impl Space {
         self.disk_root && dir.is_root() && name == USERS_DIR
     }
 
-    /// 這個資料夾中不顯示的項目（硬碟最上層的 lost+found）
+    /// 這個資料夾中不顯示的項目：硬碟最上層的 lost+found，以及掛載中的 users
     pub fn is_ignored(&self, dir: &RelPath, name: &str) -> bool {
-        dir.is_root() && self.base.is_root() && name == "lost+found"
+        dir.is_root()
+            && self.base.is_root()
+            && (name == "lost+found" || (self.mount && name == USERS_DIR))
     }
 
     pub fn tmp_dir(&self) -> PathBuf {
@@ -201,6 +211,7 @@ pub async fn resolve(
                     read_only,
                     disk_root: true,
                     own_folder: Some(location.folder),
+                    mount: false,
                 });
             }
             let dir = storage::user_dir(&root, &location.folder).ok_or(SpaceError::NotFound)?;
@@ -222,11 +233,12 @@ pub async fn resolve(
                 read_only,
                 disk_root: false,
                 own_folder: None,
+                mount: false,
             })
         }
         SpaceKey::Volume(volume_id) => {
             if !admin {
-                return Err(SpaceError::AdminOnly);
+                return mounted(pool, data_dir, user_id, key, volume_id).await;
             }
             let (root, _) = volume_root(pool, data_dir, volume_id).await?;
             let own_folder = storage_db::user_location(pool, user_id)
@@ -244,9 +256,43 @@ pub async fn resolve(
                 read_only: None,
                 disk_root: true,
                 own_folder,
+                mount: false,
             })
         }
     }
+}
+
+/// 一般使用者打開一顆硬碟：只有掛載給他的位置可以。
+/// 資料目錄（`default`）永遠不能掛載：那裡是每個人的 My files
+async fn mounted(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    user_id: i64,
+    key: SpaceKey,
+    volume_id: Option<i64>,
+) -> Result<Space, SpaceError> {
+    let Some(id) = volume_id else {
+        return Err(SpaceError::AdminOnly);
+    };
+    let can_write = mounts::access(pool, user_id, id)
+        .await?
+        .ok_or(SpaceError::AdminOnly)?;
+    let (root, _) = volume_root(pool, data_dir, volume_id).await?;
+    Ok(Space {
+        key,
+        root,
+        base: RelPath::default(),
+        // 硬碟最上層的垃圾桶：掛載的人與管理員共用，誰刪除的都可以還原
+        trash: Place {
+            volume_id,
+            owner_id: None,
+        },
+        read_only: (!can_write).then(|| MOUNT_READ_ONLY.to_string()),
+        // users 資料夾不能修改（它也不會顯示，見 is_ignored）
+        disk_root: true,
+        own_folder: None,
+        mount: true,
+    })
 }
 
 #[cfg(test)]
@@ -269,6 +315,7 @@ mod tests {
             read_only: None,
             disk_root: true,
             own_folder: own.map(str::to_string),
+            mount: false,
         }
     }
 

@@ -2,7 +2,7 @@
 //!
 //!   GET    /api/admin/storage                       所有位置、每個人在哪裡、搬移的進度
 //!   POST   /api/admin/storage                       新增位置
-//!   DELETE /api/admin/storage/{id}                  刪除位置（沒有人使用、硬碟上沒有檔案時）
+//!   DELETE /api/admin/storage/{id}                  移除位置（沒有人使用時）；硬碟上的檔案不動
 //!   PUT    /api/admin/users/{id}/storage            更換使用者的位置
 //!   POST   /api/admin/users/{id}/storage/retry      重試失敗的搬移
 //!   DELETE /api/admin/users/{id}/storage/move       取消搬移，檔案留在原處
@@ -26,13 +26,14 @@ use sqlx::SqlitePool;
 use super::{error::AppError, extract::AdminUser, spaces::blocking, state::AppState};
 use crate::{
     db::{
+        mounts as mounts_db,
         storage::{
             self as storage_db, AddVolumeError, DeleteVolumeError, StartMove, StartMoveError,
         },
         trash as trash_db,
     },
     folders, mover,
-    storage::{self, USERS_DIR, resumable},
+    storage::{self, resumable},
     tree,
 };
 
@@ -62,6 +63,8 @@ struct VolumeItem {
     available_bytes: Option<u64>,
     /// 有幾個使用者在這裡
     users: usize,
+    /// 掛載給了幾個人
+    mounted: usize,
 }
 
 #[derive(Serialize)]
@@ -101,6 +104,13 @@ async fn overview(
     let users = storage_db::assignments(&pool).await?;
     let moves = storage_db::list_moves(&pool).await?;
     let count = |id: Option<i64>| users.iter().filter(|u| u.volume_id == id).count();
+    let mounts = mounts_db::counts(&pool).await?;
+    let mounted = |id: i64| {
+        mounts
+            .iter()
+            .find(|(volume, _)| *volume == id)
+            .map_or(0, |(_, n)| usize::try_from(*n).unwrap_or(0))
+    };
 
     let mut items = Vec::with_capacity(volumes.len() + 1);
     items.push(volume_item(
@@ -108,10 +118,18 @@ async fn overview(
         "Default".to_string(),
         &data_dir,
         count(None),
+        0,
     ));
     for v in volumes {
         let users = count(Some(v.id));
-        items.push(volume_item(Some(v.id), v.name, Path::new(&v.path), users));
+        let shared = mounted(v.id);
+        items.push(volume_item(
+            Some(v.id),
+            v.name,
+            Path::new(&v.path),
+            users,
+            shared,
+        ));
     }
 
     Ok(Json(Overview {
@@ -138,7 +156,13 @@ async fn overview(
     }))
 }
 
-fn volume_item(id: Option<i64>, name: String, path: &Path, users: usize) -> VolumeItem {
+fn volume_item(
+    id: Option<i64>,
+    name: String,
+    path: &Path,
+    users: usize,
+    mounted: usize,
+) -> VolumeItem {
     // 資料目錄沒有標記檔；其他位置沒有標記檔代表硬碟沒有掛載，容量顯示為無法使用
     let ready = id.is_none() || storage::volume_ready(path);
     let space = storage::disk_space(path).ok().filter(|_| ready);
@@ -149,6 +173,7 @@ fn volume_item(id: Option<i64>, name: String, path: &Path, users: usize) -> Volu
         total_bytes: space.map(|s| s.total),
         available_bytes: space.map(|s| s.available),
         users,
+        mounted,
     }
 }
 
@@ -216,7 +241,7 @@ async fn add_volume(
 
     Ok((
         StatusCode::CREATED,
-        Json(volume_item(Some(volume.id), volume.name, &path, 0)),
+        Json(volume_item(Some(volume.id), volume.name, &path, 0, 0)),
     ))
 }
 
@@ -288,48 +313,16 @@ fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', r"'\''"))
 }
 
-/// 硬碟上還有沒有檔案（`.manorcloud`、`lost+found` 與空的 `users` 不算）
-fn has_files(root: &Path) -> io::Result<bool> {
-    for item in std::fs::read_dir(root)? {
-        let name = item?.file_name();
-        let name = name.to_string_lossy();
-        if tree::is_system_name(&name) || name == "lost+found" {
-            continue;
-        }
-        if name == USERS_DIR
-            && std::fs::read_dir(root.join(USERS_DIR))?.all(|user| {
-                user.is_ok_and(|user| {
-                    std::fs::read_dir(user.path()).is_ok_and(|mut items| items.next().is_none())
-                })
-            })
-        {
-            continue;
-        }
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-/// DELETE /api/admin/storage/{id}：刪除儲存位置。只有沒有人使用、硬碟上也沒有檔案時可以刪除；
-/// 只移除 ManorCloud 自己的 `.manorcloud` 與空的資料夾
+/// DELETE /api/admin/storage/{id}：移除儲存位置。只要沒有人的 My files 在這裡就可以移除。
+///
+/// **硬碟上的東西完全不動**，包括 ManorCloud 自己的 `.manorcloud`：
+/// 位置可能是一顆裝著重要資料的硬碟，移除只代表網頁上不再顯示它。
+/// 之後再加入同一個資料夾，檔案都還在。垃圾桶裡的項目則無法再還原（見 `delete_volume`）
 async fn delete_volume(
     admin: AdminUser,
     State(pool): State<SqlitePool>,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<StatusCode, AppError> {
-    let volume = storage_db::find_volume(&pool, id)
-        .await?
-        .ok_or_else(volume_not_found)?;
-    let root = PathBuf::from(&volume.path);
-    let trashed = !trash_db::on_volume(&pool, Some(id)).await?.is_empty();
-    let checked = root.clone();
-    let files = storage::volume_ready(&root) && blocking(move || has_files(&checked)).await?;
-    if files || trashed {
-        return Err(AppError::Conflict(format!(
-            "Delete the files in {} first, including the ones in Trash",
-            volume.name
-        )));
-    }
     storage_db::delete_volume(&pool, id)
         .await
         .map_err(|e| match e {
@@ -337,29 +330,39 @@ async fn delete_volume(
             DeleteVolumeError::InUse => AppError::Conflict(
                 "Move everyone's files to another storage before removing this one".to_string(),
             ),
+            DeleteVolumeError::Busy => AppError::Conflict(
+                "Files are being copied or moved here. Try again when that's finished".to_string(),
+            ),
             DeleteVolumeError::Db(e) => AppError::internal(e),
         })?;
-    if storage::volume_ready(&root) {
-        let _ = blocking(move || {
-            let users = root.join(USERS_DIR);
-            if let Ok(items) = std::fs::read_dir(&users) {
-                for item in items.flatten() {
-                    let _ = std::fs::remove_dir(item.path());
-                }
-                let _ = std::fs::remove_dir(&users);
-            }
-            std::fs::remove_dir_all(storage::system_dir(&root))
-        })
-        .await;
-    }
     println!(
-        "storage: location {id} removed by administrator {}",
+        "storage: location {id} removed by administrator {} (the files on the disk are kept)",
         admin.id
     );
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ==================== 更換使用者的位置 ====================
+
+fn start_move_error(e: StartMoveError) -> AppError {
+    match e {
+        StartMoveError::UserNotFound => AppError::NotFound("User not found".to_string()),
+        StartMoveError::AlreadyThere => {
+            AppError::Conflict("Their files are already there".to_string())
+        }
+        StartMoveError::InProgress => {
+            AppError::Conflict("Their files are already being moved".to_string())
+        }
+        StartMoveError::FolderTaken => {
+            AppError::Conflict("Someone else already has a folder with that name there".to_string())
+        }
+        StartMoveError::Mounted => AppError::Conflict(
+            "That storage is shared with people as a mount, so nobody's own files can go there"
+                .to_string(),
+        ),
+        StartMoveError::Db(e) => AppError::internal(e),
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -420,7 +423,9 @@ async fn change_location(
 
     // 管理員：只是換一顆硬碟作為他的 My files
     if role == "admin" {
-        storage_db::set_volume(&pool, user_id, req.volume_id).await?;
+        storage_db::set_volume(&pool, user_id, req.volume_id)
+            .await
+            .map_err(start_move_error)?;
         println!(
             "storage: administrator {user_id} now uses {} as My files (by administrator {})",
             target.display(),
@@ -461,19 +466,7 @@ async fn change_location(
 
     let started = storage_db::start_move(&pool, user_id, req.volume_id, total)
         .await
-        .map_err(|e| match e {
-            StartMoveError::UserNotFound => AppError::NotFound("User not found".to_string()),
-            StartMoveError::AlreadyThere => {
-                AppError::Conflict("Their files are already there".to_string())
-            }
-            StartMoveError::InProgress => {
-                AppError::Conflict("Their files are already being moved".to_string())
-            }
-            StartMoveError::FolderTaken => AppError::Conflict(
-                "Someone else already has a folder with that name there".to_string(),
-            ),
-            StartMoveError::Db(e) => AppError::internal(e),
-        })?;
+        .map_err(start_move_error)?;
 
     let (moving, cancelled) = match started {
         StartMove::Switched { cancelled_uploads } => {
@@ -768,20 +761,98 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn a_location_with_files_cannot_be_removed(pool: SqlitePool) {
+    async fn removing_a_location_keeps_its_files(pool: SqlitePool) {
         let t = TestApp::new(pool, MIB).await;
         t.make_admin().await;
         let disk = tempfile::tempdir().unwrap();
         let volume = add(&t, disk.path()).await;
-        std::fs::write(disk.path().join("報告.pdf"), b"x").unwrap();
+        std::fs::create_dir(disk.path().join("iso")).unwrap();
+        std::fs::write(disk.path().join("iso/debian.iso"), b"x").unwrap();
 
+        // 指向這個位置的紀錄：垃圾桶中的項目、分享連結、未完成的上傳、做完的傳輸
+        let space = volume.to_string();
+        let trashed = trash_db::add(
+            &t.pool,
+            trash_db::Place {
+                volume_id: Some(volume),
+                owner_id: None,
+            },
+            "old.txt",
+            false,
+            3,
+        )
+        .await
+        .unwrap();
+        std::fs::write(storage::trash_path(disk.path(), trashed), b"old").unwrap();
+        let owner = t.user_id;
+        sqlx::query(
+            "INSERT INTO shares (token, owner_id, space, path, kind) VALUES ('t', ?, ?, 'iso', 'folder')",
+        )
+        .bind(owner)
+        .bind(&space)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO uploads (id, owner_id, space, dir, name, size) \
+             VALUES ('0123456789abcdef0123456789abcdef', ?, ?, '', 'a', 1)",
+        )
+        .bind(owner)
+        .bind(&space)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO transfers (owner_id, kind, from_space, from_dir, names, to_space, to_dir, \
+             total_bytes, state) VALUES (?, 'copy', ?, '', '[]', 'me', '', 0, 'running')",
+        )
+        .bind(owner)
+        .bind(&space)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+
+        // 傳輸還在進行：不能移除
         let uri = format!("/api/admin/storage/{volume}");
-        let (status, _) = t.json(Method::DELETE, &uri, None).await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, body) = t.json(Method::DELETE, &uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
 
-        std::fs::remove_file(disk.path().join("報告.pdf")).unwrap();
+        sqlx::query("UPDATE transfers SET state = 'done'")
+            .execute(&t.pool)
+            .await
+            .unwrap();
         let (status, _) = t.json(Method::DELETE, &uri, None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(!disk.path().join(".manorcloud").exists());
+
+        // 硬碟上的東西一個都沒有少：檔案、ManorCloud 自己的資料夾、垃圾桶裡的項目
+        assert_eq!(
+            std::fs::read(disk.path().join("iso/debian.iso")).unwrap(),
+            b"x"
+        );
+        assert!(storage::volume_ready(disk.path()));
+        assert!(storage::trash_path(disk.path(), trashed).exists());
+
+        // 指向它的紀錄都清掉了：編號之後可能被新的位置重新使用
+        for sql in [
+            "SELECT count(*) FROM trash",
+            "SELECT count(*) FROM shares",
+            "SELECT count(*) FROM uploads",
+            "SELECT count(*) FROM transfers",
+        ] {
+            let count: i64 = sqlx::query_scalar(sql).fetch_one(&t.pool).await.unwrap();
+            assert_eq!(count, 0, "{sql}");
+        }
+
+        // 再加入同一個資料夾：檔案都還在
+        let again = add(&t, disk.path()).await;
+        let (status, body) = t
+            .json(
+                Method::GET,
+                &format!("/api/files?path=iso&space={again}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["name"], "debian.iso");
     }
 }

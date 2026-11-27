@@ -8,6 +8,8 @@
 
 use sqlx::{FromRow, SqlitePool};
 
+use super::mounts;
+
 /// 一個儲存位置
 #[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct Volume {
@@ -67,6 +69,8 @@ pub enum DeleteVolumeError {
     NotFound,
     /// 還有使用者在這個位置，或正在搬過來
     InUse,
+    /// 有複製或搬移正在讀寫這個位置
+    Busy,
     Db(sqlx::Error),
 }
 
@@ -76,10 +80,17 @@ impl From<sqlx::Error> for DeleteVolumeError {
     }
 }
 
-/// 刪除儲存位置的紀錄。硬碟上是否還有檔案由呼叫端先確認；
-/// 這裡在同一個 IMMEDIATE 交易中確認沒有人在這個位置，檢查之後不會有人剛好被換過來
+/// 移除儲存位置：ManorCloud 不再使用它，但硬碟上的檔案一個都不刪（由呼叫端保證不碰硬碟）。
+///
+/// 同一個 IMMEDIATE 交易中確認沒有人的檔案在這裡、沒有傳輸正在進行，
+/// 檢查之後不會有人剛好被換過來，也不會剛好開始新的傳輸。
+///
+/// 指向這個位置的紀錄一併刪除：分享連結、未完成的上傳、傳輸的紀錄（以 space= 的文字記錄），
+/// 以及垃圾桶的紀錄（外鍵 ON DELETE CASCADE）。位置的編號之後可能被新加入的位置重新使用，
+/// 留著的話，舊的分享連結會指到另一顆硬碟上的同一個路徑
 pub async fn delete_volume(pool: &SqlitePool, id: i64) -> Result<(), DeleteVolumeError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let space = id.to_string();
 
     let in_use: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM users WHERE storage_volume_id = ?1) \
@@ -90,6 +101,25 @@ pub async fn delete_volume(pool: &SqlitePool, id: i64) -> Result<(), DeleteVolum
     .await?;
     if in_use {
         return Err(DeleteVolumeError::InUse);
+    }
+
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM transfers \
+             WHERE state = 'running' AND (from_space = ?1 OR to_space = ?1))",
+    )
+    .bind(&space)
+    .fetch_one(&mut *tx)
+    .await?;
+    if busy {
+        return Err(DeleteVolumeError::Busy);
+    }
+
+    for sql in [
+        "DELETE FROM shares WHERE space = ?",
+        "DELETE FROM uploads WHERE space = ?",
+        "DELETE FROM transfers WHERE from_space = ?1 OR to_space = ?1",
+    ] {
+        sqlx::query(sql).bind(&space).execute(&mut *tx).await?;
     }
 
     let deleted = sqlx::query("DELETE FROM storage_volumes WHERE id = ?")
@@ -304,6 +334,8 @@ pub enum StartMoveError {
     InProgress,
     /// 目的地已經有同名的資料夾（屬於另一個使用者）
     FolderTaken,
+    /// 目的地掛載給了其他人：不能放任何人的 My files（見 db::mounts）
+    Mounted,
     Db(sqlx::Error),
 }
 
@@ -358,6 +390,12 @@ pub async fn start_move(
         tx.commit().await?;
         return Err(StartMoveError::AlreadyThere);
     }
+    if let Some(target) = target
+        && mounts::is_mounted(&mut tx, target).await?
+    {
+        tx.commit().await?;
+        return Err(StartMoveError::Mounted);
+    }
 
     // 目的地的資料夾名稱不能和別人重複（帳號改名時資料夾沒能跟著改名才可能發生）
     let taken: bool = sqlx::query_scalar(
@@ -411,14 +449,24 @@ pub async fn set_volume(
     pool: &SqlitePool,
     user_id: i64,
     target: Option<i64>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<(), StartMoveError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some(target) = target
+        && mounts::is_mounted(&mut tx, target).await?
+    {
+        return Err(StartMoveError::Mounted);
+    }
     let updated = sqlx::query("UPDATE users SET storage_volume_id = ? WHERE id = ?")
         .bind(target)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
-    Ok(updated == 1)
+    if updated == 0 {
+        return Err(StartMoveError::UserNotFound);
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn cancel_uploads(

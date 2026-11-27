@@ -1564,6 +1564,44 @@ select.dialog-input {
     padding-right: 0.4rem;
 }
 
+/* 儲存位置的掛載對象：每人一列，名稱與權限的下拉選單 */
+.mount-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.mount-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+}
+
+.mount-list li + li {
+    border-top: 1px solid var(--border-soft);
+}
+
+.mount-list select.dialog-input {
+    width: auto;
+}
+
+.mount-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 操作欄有掛載與刪除兩個按鈕：不換行 */
+table.storage-table .actions-cell {
+    white-space: nowrap;
+}
+
 /* ---------- 儲存位置 ---------- */
 
 .storage-intro {

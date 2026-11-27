@@ -38,7 +38,7 @@ import { filesHref, MY_FILES, type Location } from "./router.js";
 import { refreshStorage } from "./sidebar.js";
 import { apiUrl, joinPath, spaceOf, spaceOfLocation, type Space } from "./space.js";
 import { showToast } from "./toast.js";
-import type { FileItem, Listing, ServerConfig, StorageOverview } from "./types.js";
+import type { FileItem, Listing, Mount, ServerConfig, StorageOverview } from "./types.js";
 import { TransferPanel } from "./transfers.js";
 import { UploadQueue } from "./upload-queue.js";
 
@@ -247,17 +247,33 @@ async function rootLabelOf(options: BrowserOptions): Promise<string> {
     case "me":
       return t("My files");
     case "disk": {
+      if (!options.admin) {
+        const mounts = await api.get<Mount[]>("/api/mounts");
+        return mounts.find((mount) => mount.id === location.disk)?.name ?? t("Disk");
+      }
       const storage = await api.get<StorageOverview>("/api/admin/storage");
       return storage.volumes.find((volume) => volume.id === location.disk)?.name ?? t("Disk");
     }
   }
 }
 
-/** 複製、移動的目的地。一般使用者只有自己的 My files */
+/** 複製、移動的目的地。一般使用者：自己的 My files 與可以修改的掛載 */
 async function placesFor(options: BrowserOptions): Promise<FolderPlace[]> {
   const mine: FolderPlace = { space: null, rootLabel: t("My files") };
   if (!options.admin) {
-    return [mine];
+    try {
+      const mounts = await api.get<Mount[]>("/api/mounts");
+      // 傳輸清單顯示來源與目的地的名稱：唯讀的掛載也可能是來源
+      for (const mount of mounts) {
+        spaceLabels.set(spaceOf(mount.id), mount.name);
+      }
+      const writable = mounts
+        .filter((mount) => mount.writable)
+        .map((mount) => ({ space: spaceOf(mount.id), rootLabel: mount.name }));
+      return [mine, ...writable];
+    } catch {
+      return [mine];
+    }
   }
   try {
     const storage = await api.get<StorageOverview>("/api/admin/storage");

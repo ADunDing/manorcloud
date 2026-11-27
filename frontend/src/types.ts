@@ -103,6 +103,17 @@ export interface StorageVolume {
   readonly available_bytes: number | null;
   /** 有幾個使用者在這裡 */
   readonly users: number;
+  /** 掛載給了幾個人 */
+  readonly mounted: number;
+}
+
+/** 掛載給自己的儲存位置。對應 Rust 端 web/mounts.rs 的 MountItem */
+export interface Mount {
+  /** 儲存位置的編號：檔案的 API 用 space={id} */
+  readonly id: number;
+  readonly name: string;
+  /** false：只能瀏覽與下載 */
+  readonly writable: boolean;
 }
 
 /** 更換位置時的搬移進度 */

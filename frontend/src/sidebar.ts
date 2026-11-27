@@ -11,7 +11,7 @@ import { icon } from "./icons.js";
 import { dropdown, menuItem, menuSeparator } from "./menu.js";
 import { filesHref, MY_FILES, SHARED_HREF, TRASH_HREF, type Location } from "./router.js";
 import { spaceOfLocation, withSpace, type Space } from "./space.js";
-import type { StorageInfo, StorageOverview } from "./types.js";
+import type { Mount, StorageInfo, StorageOverview } from "./types.js";
 
 /** 目前所在的區塊：側欄中對應的項目會反白。帳號設定、使用者管理等頁面不屬於任何一個 */
 type Section = "files" | "trash" | "shared" | null;
@@ -153,6 +153,8 @@ export function renderSidebar(
   container.hidden = false;
   if (options.admin) {
     void loadDisks(myFilesItem, myFiles, section, location, options.userId);
+  } else {
+    void loadMounts(myFilesItem, section, location);
   }
   refreshStorage();
 }
@@ -194,6 +196,36 @@ async function loadDisks(
           ),
         ),
       );
+    myFilesItem.after(...items);
+  } catch {
+    // 只是捷徑，不值得打擾使用者
+  }
+}
+
+/**
+ * 一般使用者：管理員掛載給他的儲存位置，排在 My files 之後。
+ * 取得失敗就不顯示：只是捷徑，不值得打擾使用者
+ */
+async function loadMounts(myFilesItem: HTMLElement, section: Section, location: Location): Promise<void> {
+  try {
+    const mounts = await api.get<Mount[]>("/api/mounts");
+    const disk = section === "files" && location.kind === "disk" ? location.disk : undefined;
+    const items = mounts.map((mount) =>
+      h(
+        "li",
+        {},
+        h(
+          "a",
+          {
+            href: filesHref({ kind: "disk", disk: mount.id }),
+            class: "nav-link",
+            "aria-current": disk === mount.id ? "page" : null,
+          },
+          icon("disk", 20),
+          mount.name,
+        ),
+      ),
+    );
     myFilesItem.after(...items);
   } catch {
     // 只是捷徑，不值得打擾使用者

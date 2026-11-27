@@ -113,9 +113,15 @@ function showHome(user: User): void {
   const admin = { admin: isAdmin, userId: user.id };
 
   const route = currentRoute();
-  // 硬碟的最上層只有管理員能看：一般使用者回到自己的檔案。
+  // 資料目錄的最上層只有管理員能看：一般使用者回到自己的檔案。
+  // 其他硬碟可能掛載給了他，由後端決定能不能打開（不能時畫面顯示錯誤與返回的連結）。
   // 這只是使用體驗；真正的權限檢查在後端
-  if (!isAdmin && (route.view === "files" || route.view === "trash") && route.location.kind === "disk") {
+  if (
+    !isAdmin &&
+    (route.view === "files" || route.view === "trash") &&
+    route.location.kind === "disk" &&
+    route.location.disk === null
+  ) {
     history.replaceState(null, "", filesHref(MY_FILES));
     showHome(user);
     return;

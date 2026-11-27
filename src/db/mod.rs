@@ -1,4 +1,5 @@
 pub mod app_passwords;
+pub mod mounts;
 pub mod session;
 pub mod settings;
 pub mod shares;

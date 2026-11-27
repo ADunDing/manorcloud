@@ -133,6 +133,15 @@ async fn restore(
     }))
 }
 
+/// 唯讀的空間（例如唯讀的掛載）不能永久刪除垃圾桶中的項目：
+/// 那些是別人刪除的、還能還原的東西
+fn check_can_purge(space: &Space) -> Result<(), AppError> {
+    match &space.read_only {
+        Some(reason) => Err(denied(reason.clone())),
+        None => Ok(()),
+    }
+}
+
 /// 永久刪除一個項目：先刪檔案，再刪紀錄
 async fn purge(pool: &SqlitePool, space: &Space, id: i64) -> Result<(), AppError> {
     let path = storage::trash_path(&space.root, id);
@@ -156,6 +165,7 @@ async fn delete_forever(
     trash_db::find(&pool, place, id)
         .await?
         .ok_or_else(not_in_trash)?;
+    check_can_purge(&space)?;
     purge(&pool, &space, id).await?;
     // 配額的用量包含垃圾桶：重新計算
     quota::forget(&data_dir, user.id);
@@ -169,6 +179,7 @@ async fn empty(
     State(data_dir): State<Arc<Path>>,
 ) -> Result<StatusCode, AppError> {
     let place = space.trash;
+    check_can_purge(&space)?;
     for item in trash_db::list(&pool, place).await? {
         purge(&pool, &space, item.id).await?;
     }

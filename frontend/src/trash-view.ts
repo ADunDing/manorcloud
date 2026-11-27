@@ -9,7 +9,7 @@ import { t } from "./i18n.js";
 import { api, ApiError, isHandledGlobally } from "./api.js";
 import { MY_FILES, trashHref, type Location } from "./router.js";
 import { spaceOfLocation, withSpace, type Space } from "./space.js";
-import type { StorageOverview } from "./types.js";
+import type { Mount, StorageOverview } from "./types.js";
 import { confirmDialog } from "./dialogs.js";
 import { h } from "./dom.js";
 import { FileList, loadView, saveView, type ViewMode } from "./file-list.js";
@@ -51,7 +51,7 @@ interface TrashPlace {
   readonly space: Space;
   /** 原本位置的第一段：My files 或硬碟的名稱 */
   readonly rootLabel: string;
-  /** 管理員的分頁；一般使用者沒有 */
+  /** 每顆硬碟（管理員）或每個掛載（一般使用者）一個分頁 */
   readonly tabs: readonly { readonly label: string; readonly href: string; readonly current: boolean }[];
 }
 
@@ -77,14 +77,16 @@ export function renderTrash(
 
   void (async () => {
     try {
-      const [items, storage] = await Promise.all([
+      const [items, storage, mounts] = await Promise.all([
         api.get<TrashItem[]>(withSpace("/api/trash", space)),
         options.admin ? api.get<StorageOverview>("/api/admin/storage") : Promise.resolve(null),
+        // 分頁只是捷徑：取得失敗就不顯示
+        options.admin ? Promise.resolve([]) : api.get<Mount[]>("/api/mounts").catch(() => []),
       ]);
       if (token !== loading) {
         return;
       }
-      place = trashPlace(options, space, storage);
+      place = storage === null ? mountTrashPlace(options, space, mounts) : trashPlace(options, space, storage);
       current = new TrashView(container, items, notice);
       current.mount();
     } catch (error) {
@@ -126,6 +128,28 @@ function trashPlace(
     disk === undefined
       ? t("My files")
       : (storage.volumes.find((volume) => volume.id === disk)?.name ?? t("Unknown"));
+  return { space, rootLabel, tabs };
+}
+
+/**
+ * 一般使用者：My files 與每一個掛載給他的位置各一個分頁（掛載的垃圾桶由所有使用它的人共用）。
+ * 沒有掛載時不顯示分頁
+ */
+function mountTrashPlace(options: TrashOptions, space: Space, mounts: readonly Mount[]): TrashPlace {
+  const disk = options.location.kind === "disk" ? options.location.disk : undefined;
+  const tabs =
+    mounts.length === 0
+      ? []
+      : [
+          { label: t("My files"), href: trashHref(MY_FILES), current: disk === undefined },
+          ...mounts.map((mount) => ({
+            label: mount.name,
+            href: trashHref({ kind: "disk", disk: mount.id }),
+            current: disk === mount.id,
+          })),
+        ];
+  const rootLabel =
+    disk === undefined ? t("My files") : (mounts.find((mount) => mount.id === disk)?.name ?? t("Unknown"));
   return { space, rootLabel, tabs };
 }
 

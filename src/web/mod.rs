@@ -6,6 +6,7 @@ mod csrf;
 mod download;
 mod error;
 mod extract;
+mod mounts;
 mod quotas;
 mod range;
 mod server_settings;
@@ -117,6 +118,7 @@ fn api_router() -> Router<AppState> {
         .merge(sso::router())
         .merge(two_factor::router())
         .merge(storage::router())
+        .merge(mounts::router())
         .merge(app_passwords::router())
         .layer(middleware::from_fn(csrf::check_origin))
 }

@@ -551,9 +551,22 @@ const UI: Readonly<Record<string, string>> = {
   "Remove {name}?": "要移除 {name} 嗎？",
   "Remove {name}": "移除 {name}",
   "Removed {name}": "已移除 {name}",
+  "Mounted for 1 person": "已掛載給 1 個人",
+  "Mounted for {count} people": "已掛載給 {count} 個人",
+  "Choose who can use {name}": "選擇誰可以使用 {name}",
+  "Someone's own files are on this storage, so it can't be mounted for people":
+    "有人的個人檔案放在這個儲存空間，所以無法掛載給其他人",
+  "Who can use {name}": "誰可以使用 {name}",
+  "The whole storage appears in their sidebar. Files there are shared by everyone you choose and don't count toward their storage limit.":
+    "整個儲存空間會出現在他們的側邊欄。裡面的檔案由你選擇的所有人共用，不算進他們的空間配額。",
+  "There are no members yet. Add people in Users first.": "還沒有任何成員，請先在「使用者」中新增。",
+  "Access for {name}": "{name} 的權限",
+  "No access": "無法使用",
+  "Read only": "唯讀",
+  "Read and write": "可讀寫",
   "Added {name}": "已新增 {name}",
-  "ManorCloud will stop using this folder. Nothing on the disk is deleted, and nobody's files are there.":
-    "ManorCloud 將不再使用這個資料夾。硬碟上的內容不會被刪除，而且那裡沒有任何人的檔案。",
+  "ManorCloud stops showing this storage, but the files on the disk stay where they are: add the same folder again to see them. Its shared links stop working, and items in its Trash can no longer be restored.":
+    "ManorCloud 不再顯示這個儲存空間，但硬碟上的檔案都會留在原處：重新加入同一個資料夾就能再看到它們。它的分享連結會失效，垃圾桶中的項目也無法再還原。",
   "Each person's files are kept in one location. To put someone's files on another disk, use Change storage in Users. To use another disk or a NAS share, mount it on this computer first, then add it here.":
     "每個人的檔案存放在一個位置。要把某人的檔案放到其他硬碟，請在「使用者」使用「變更儲存空間」。要使用其他硬碟或 NAS 共用資料夾，請先掛載到這台電腦，再到這裡新增。",
   Space: "空間",
@@ -625,6 +638,16 @@ const SERVER: Readonly<Record<string, string>> = {
     "ManorCloud 沒有權限修改這裡，請檢查資料夾的權限",
   "More data than the declared file size": "資料超過宣告的檔案大小",
   "Move everyone's files to another storage before removing this one": "移除前請先把所有人的檔案移到其他儲存空間",
+  "That storage is shared with people as a mount, so nobody's own files can go there":
+    "這個儲存空間已經掛載給其他人，所以不能放任何人的個人檔案",
+  "Someone's own files are on this storage. Move them to another storage first":
+    "有人的個人檔案放在這個儲存空間，請先把它們移到其他儲存空間",
+  "A storage can only be shared with members. Administrators can already see every storage":
+    "儲存空間只能掛載給成員。管理員本來就能看到每一個儲存空間",
+  "A storage can be shared with at most 1000 people": "一個儲存空間最多只能掛載給 1000 個人",
+  "You can open and download files here, but not change them": "你可以開啟與下載這裡的檔案，但不能修改",
+  "Files are being copied or moved here. Try again when that's finished":
+    "這裡有檔案正在複製或移動，請等完成後再試",
   "Not enough storage space on the disk": "硬碟空間不足",
   "Not enough storage space on the server": "伺服器空間不足",
   "Not found": "找不到",
