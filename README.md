@@ -47,7 +47,10 @@ gh attestation verify manorcloud-linux-aarch64.tar.gz --repo ADunDing/manorcloud
 
 ```sh
 docker run -d --name manorcloud --restart unless-stopped --stop-timeout 35 \
-  -p 3000:3000 -v manorcloud:/var/lib/manorcloud ghcr.io/adunding/manorcloud
+  -p 3000:3000 \
+  -v manorcloud-data:/var/lib/manorcloud/data \
+  -v manorcloud-database:/var/lib/manorcloud/database \
+  ghcr.io/adunding/manorcloud
 docker logs manorcloud
 ```
 
@@ -62,11 +65,14 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - manorcloud:/var/lib/manorcloud
-      # - /mnt/disk2:/mnt/disk2
+      # Your files
+      - data:/var/lib/manorcloud/data
+      # The database
+      - database:/var/lib/manorcloud/database
 
 volumes:
-  manorcloud:
+  data:
+  database:
 ```
 
 ```sh
@@ -76,21 +82,31 @@ docker compose logs manorcloud
 
 The log shows the first administrator's password. Settings below go in as `-e NAME=value`
 (Compose: `environment:`). To upgrade, `docker compose pull && docker compose up -d`, or pull and
-recreate the container; your files stay in the `manorcloud` volume. For more disks, mount them
-into the container and give them to its user with `sudo chown 65532:65532 /mnt/disk2`.
+recreate the container; your files and the database stay in their volumes.
+
+Your files and the database are in separate volumes, so either can live on a disk instead: use a
+folder on it in place of the volume name (for example `- /mnt/disk1/manorcloud:/var/lib/manorcloud/data`)
+and give the folder to the container's user first:
+
+```sh
+sudo mkdir -p /mnt/disk1/manorcloud
+sudo chown 65532:65532 /mnt/disk1/manorcloud
+```
+
+More disks are mounted and given to the container's user the same way (`/mnt/disk2:/mnt/disk2`).
 
 ## Configuration
 
 Almost everything is set in **Administration** in the browser. Only these are in
 `/etc/manorcloud/manorcloud.env` (then `sudo systemctl restart manorcloud`):
 
-| Setting                   | Default                                      | Meaning                                    |
-|---------------------------|----------------------------------------------|--------------------------------------------|
-| `MANORCLOUD_BIND`         | `127.0.0.1:3000`                             | Use `0.0.0.0:3000` for other devices       |
-| `MANORCLOUD_DATA_DIR`     | `/var/lib/manorcloud/data`                   | Where files are stored                     |
-| `MANORCLOUD_DATABASE_URL` | `sqlite:///var/lib/manorcloud/manorcloud.db` | Must be on a local disk                    |
-| `MANORCLOUD_TLS_CERT`     | (none)                                       | PEM certificate, to serve HTTPS directly   |
-| `MANORCLOUD_TLS_KEY`      | (none)                                       | Its private key                            |
+| Setting                   | Default                                               | Meaning                                  |
+|---------------------------|-------------------------------------------------------|------------------------------------------|
+| `MANORCLOUD_BIND`         | `127.0.0.1:3000`                                      | Use `0.0.0.0:3000` for other devices     |
+| `MANORCLOUD_DATA_DIR`     | `/var/lib/manorcloud/data`                            | Where files are stored                   |
+| `MANORCLOUD_DATABASE_URL` | `sqlite:///var/lib/manorcloud/database/manorcloud.db` | Must be on a local disk                  |
+| `MANORCLOUD_TLS_CERT`     | (none)                                                | PEM certificate, to serve HTTPS directly |
+| `MANORCLOUD_TLS_KEY`      | (none)                                                | Its private key                          |
 
 ### More disks
 

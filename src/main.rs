@@ -50,7 +50,8 @@ Other:
 
 Files:
   /etc/manorcloud/manorcloud.env    configuration
-  /var/lib/manorcloud               database; files are in data/ with their real names
+  /var/lib/manorcloud/database      database
+  /var/lib/manorcloud/data          files, with their real names
 ";
 
 /// 命令列解析的結果

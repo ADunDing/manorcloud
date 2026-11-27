@@ -168,7 +168,8 @@ jobs:
             tar -xzf artifacts/manorcloud-*-"$arch".tar.gz -C "docker/$platform" \
               --strip-components=1 --wildcards '*/manorcloud'
           done
-          mkdir -p docker/state
+          # 映像檔中的 /var/lib/manorcloud 與它的兩個 volume（見 Dockerfile）
+          mkdir -p docker/state/data docker/state/database
           ls -lR docker
 
       # 推送之前先實際啟動一次：資料夾權限之類的問題在這裡就會發現

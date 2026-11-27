@@ -329,8 +329,9 @@ ExecStart=/usr/local/bin/manorcloud run
 # the program itself never reads this file.
 EnvironmentFile=/etc/manorcloud/manorcloud.env
 
-# systemd creates /var/lib/manorcloud owned by manorcloud, unreadable by other users
-StateDirectory=manorcloud
+# systemd creates /var/lib/manorcloud and its database/ owned by manorcloud, unreadable by
+# other users. The program creates the database file but not its folder (data/ it creates itself)
+StateDirectory=manorcloud manorcloud/database
 StateDirectoryMode=0750
 WorkingDirectory=/var/lib/manorcloud
 UMask=0027
@@ -400,7 +401,7 @@ MANORCLOUD_BIND=127.0.0.1:3000
 # Database location. It MUST be on a local disk, never on NFS or another network share:
 # SQLite relies on file locking, which is unreliable on network filesystems and can
 # corrupt the database.
-MANORCLOUD_DATABASE_URL=sqlite:///var/lib/manorcloud/manorcloud.db
+MANORCLOUD_DATABASE_URL=sqlite:///var/lib/manorcloud/database/manorcloud.db
 
 # Where uploaded files are stored.
 # If you move this outside /var/lib/manorcloud (for example to an external disk), the service
